@@ -1,0 +1,12 @@
+{
+  "name": "@luoxia/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/main.js",
+  "dependencies": {
+    "@luoxia/contracts-runtime": "0.1.0",
+    "@luoxia/world-core": "0.1.0"
+  }
+}
+

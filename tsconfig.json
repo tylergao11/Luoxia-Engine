@@ -1,0 +1,18 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "packages/contracts-runtime"
+    },
+    {
+      "path": "packages/world-core"
+    },
+    {
+      "path": "apps/server"
+    },
+    {
+      "path": "apps/gdjs-host"
+    }
+  ]
+}
+

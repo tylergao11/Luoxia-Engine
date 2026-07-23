@@ -25,22 +25,11 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "workbook_contract_version",
-        "source_digest",
-        "compiler_version",
         "bundle_digest"
       ],
       "properties": {
-        "workbook_contract_version": {
-          "const": "content-pack-workbook.v1"
-        },
-        "source_digest": {
-          "$ref": "common.v1.schema.json#/$defs/Sha256"
-        },
-        "compiler_version": {
-          "$ref": "common.v1.schema.json#/$defs/SemVer"
-        },
         "bundle_digest": {
+          "description": "Lowercase SHA-256 of the RFC 8785 canonical UTF-8 bytes of the root bundle value.",
           "$ref": "common.v1.schema.json#/$defs/Sha256"
         }
       }
