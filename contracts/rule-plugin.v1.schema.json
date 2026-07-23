@@ -1,0 +1,2371 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.luoxia.engine/contracts/rule-plugin.v1.schema.json",
+  "title": "Luoxia RulePlugin Contract v1",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/RulePluginManifest"
+    },
+    {
+      "$ref": "#/$defs/RulePluginRequest"
+    },
+    {
+      "$ref": "#/$defs/RulePluginResponse"
+    }
+  ],
+  "$defs": {
+    "OperationKind": {
+      "enum": [
+        "rule.evaluate",
+        "capability.resolve",
+        "navigation.resolve",
+        "definition.validate",
+        "goal_plan.validate",
+        "world_extension.resolve",
+        "content_upgrade.transform",
+        "day_cycle.advance",
+        "state_machine.advance",
+        "automatic_event.world.resolve",
+        "automatic_event.character.resolve",
+        "stage_outcome.resolve",
+        "dialogue.open",
+        "dialogue.turn.append",
+        "dialogue.close",
+        "event_card.publish"
+      ]
+    },
+    "RulePluginManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "record_type",
+        "plugin_id",
+        "api_version",
+        "implementation_version",
+        "implementation_digest",
+        "entrypoint",
+        "deterministic",
+        "no_io",
+        "operations"
+      ],
+      "properties": {
+        "contract_version": {
+          "const": "rule-plugin.v1"
+        },
+        "record_type": {
+          "const": "rule_plugin.manifest"
+        },
+        "plugin_id": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "api_version": {
+          "$ref": "common.v1.schema.json#/$defs/SemVer"
+        },
+        "implementation_version": {
+          "$ref": "common.v1.schema.json#/$defs/SemVer"
+        },
+        "implementation_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "entrypoint": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^(?![A-Za-z]:)(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+        },
+        "deterministic": {
+          "const": true
+        },
+        "no_io": {
+          "const": true
+        },
+        "operations": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "operation_id",
+              "operation_kind"
+            ],
+            "properties": {
+              "operation_id": {
+                "$ref": "common.v1.schema.json#/$defs/Identifier"
+              },
+              "operation_kind": {
+                "$ref": "#/$defs/OperationKind"
+              }
+            }
+          }
+        }
+      }
+    },
+    "RuleEvaluationInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rule",
+        "arguments"
+      ],
+      "properties": {
+        "rule": {
+          "$ref": "common.v1.schema.json#/$defs/RuleRef"
+        },
+        "arguments": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        }
+      }
+    },
+    "CapabilityResolutionInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command_id",
+        "actor",
+        "capability",
+        "arguments"
+      ],
+      "properties": {
+        "command_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "actor": {
+          "$ref": "common.v1.schema.json#/$defs/EntityRef"
+        },
+        "target": {
+          "$ref": "common.v1.schema.json#/$defs/SubjectRef"
+        },
+        "capability": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/CapabilityCatalogRef"
+        },
+        "arguments": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        }
+      }
+    },
+    "DefinitionValidationInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "definition_id",
+        "proposal",
+        "constraints",
+        "model_proof"
+      ],
+      "properties": {
+        "definition_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "proposal": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/DynamicDefinitionProposal"
+        },
+        "constraints": {
+          "type": "array",
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/RuleRef"
+          }
+        },
+        "model_proof": {
+          "$ref": "#/$defs/DirectorSystemProofRef"
+        }
+      }
+    },
+    "UpgradeAuthorization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "upgrade_command_id",
+        "requested_by_actor_id",
+        "source_bundle_digest",
+        "target_bundle_digest",
+        "decision",
+        "consent_text_digest",
+        "issued_at",
+        "expires_at",
+        "authorization_token",
+        "authorization_digest"
+      ],
+      "properties": {
+        "upgrade_command_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "requested_by_actor_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "source_bundle_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "target_bundle_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "decision": {
+          "const": "accepted"
+        },
+        "consent_text_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "issued_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "authorization_token": {
+          "type": "string",
+          "minLength": 32,
+          "maxLength": 512
+        },
+        "authorization_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        }
+      }
+    },
+    "ContentUpgradeInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_bundle",
+        "target_bundle",
+        "source_save",
+        "declared_mapping",
+        "authorization"
+      ],
+      "properties": {
+        "source_bundle": {
+          "$ref": "common.v1.schema.json#/$defs/PackLock"
+        },
+        "target_bundle": {
+          "$ref": "common.v1.schema.json#/$defs/PackLock"
+        },
+        "source_save": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/SaveEnvelope"
+        },
+        "declared_mapping": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "catalog_kind",
+              "source_id",
+              "target_id"
+            ],
+            "properties": {
+              "catalog_kind": {
+                "enum": [
+                  "type",
+                  "definition",
+                  "entity",
+                  "relation",
+                  "capability",
+                  "world_law",
+                  "generation_archetype",
+                  "prompt",
+                  "art_profile",
+                  "materialization_profile",
+                  "asset",
+                  "binding"
+                ]
+              },
+              "source_id": {
+                "$ref": "common.v1.schema.json#/$defs/Identifier"
+              },
+              "target_id": {
+                "$ref": "common.v1.schema.json#/$defs/Identifier"
+              }
+            }
+          }
+        },
+        "authorization": {
+          "$ref": "#/$defs/UpgradeAuthorization"
+        }
+      }
+    },
+    "RulePluginRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "record_type",
+        "request_id",
+        "plugin_lock",
+        "operation_id",
+        "operation_kind",
+        "basis_revision",
+        "readonly_world",
+        "deterministic_context",
+        "input"
+      ],
+      "properties": {
+        "contract_version": {
+          "const": "rule-plugin.v1"
+        },
+        "record_type": {
+          "const": "rule_plugin.request"
+        },
+        "request_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "plugin_lock": {
+          "$ref": "common.v1.schema.json#/$defs/PluginLock"
+        },
+        "operation_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "operation_kind": {
+          "$ref": "#/$defs/OperationKind"
+        },
+        "basis_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "readonly_world": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/WorldState"
+        },
+        "deterministic_context": {
+          "$ref": "common.v1.schema.json#/$defs/DeterministicContext"
+        },
+        "input": {}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "rule.evaluate"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "input": {
+                "$ref": "#/$defs/RuleEvaluationInput"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "capability.resolve"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "input": {
+                "$ref": "#/$defs/CapabilityResolutionInput"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "navigation.resolve"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "input": {
+                "$ref": "#/$defs/NavigationResolveInput"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "definition.validate"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "input": {
+                "$ref": "#/$defs/DefinitionValidationInput"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "goal_plan.validate"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "input": {
+                "$ref": "#/$defs/GoalPlanValidateInput"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "world_extension.resolve"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "input": {
+                "$ref": "#/$defs/WorldExtensionResolveInput"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "content_upgrade.transform"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "input": {
+                "$ref": "#/$defs/ContentUpgradeInput"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "day_cycle.advance"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "input": {
+                "$ref": "#/$defs/DayCycleAdvanceInput"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "state_machine.advance"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "input": {
+                "$ref": "#/$defs/StateMachineAdvanceInput"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "automatic_event.world.resolve"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "input": {
+                "$ref": "#/$defs/WorldAutomaticEventResolveInput"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "automatic_event.character.resolve"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "input": {
+                "$ref": "#/$defs/CharacterAutomaticEventResolveInput"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "stage_outcome.resolve"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "input": {
+                "$ref": "#/$defs/StageOutcomeResolveInput"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "dialogue.open"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "input": {
+                "$ref": "#/$defs/DialogueOpenInput"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "dialogue.turn.append"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "input": {
+                "$ref": "#/$defs/DialogueTurnAppendInput"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "dialogue.close"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "input": {
+                "$ref": "#/$defs/DialogueCloseInput"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "event_card.publish"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "input": {
+                "$ref": "#/$defs/EventCardPublishInput"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "ChoiceSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "output_kind",
+        "choice_id",
+        "options"
+      ],
+      "properties": {
+        "output_kind": {
+          "const": "choice.required"
+        },
+        "choice_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "options": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "option_id",
+              "weight"
+            ],
+            "properties": {
+              "option_id": {
+                "$ref": "common.v1.schema.json#/$defs/Identifier"
+              },
+              "weight": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "payload": {
+                "$ref": "common.v1.schema.json#/$defs/JsonObject"
+              }
+            }
+          }
+        }
+      }
+    },
+    "RejectOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "output_kind",
+        "code",
+        "message"
+      ],
+      "properties": {
+        "output_kind": {
+          "const": "reject"
+        },
+        "code": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 4000
+        },
+        "details": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        }
+      }
+    },
+    "ValidationOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "output_kind",
+        "valid",
+        "issues"
+      ],
+      "properties": {
+        "output_kind": {
+          "const": "validation"
+        },
+        "valid": {
+          "type": "boolean"
+        },
+        "issues": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+              },
+              "message": {
+                "type": "string",
+                "maxLength": 4000
+              },
+              "subject": {
+                "$ref": "common.v1.schema.json#/$defs/SubjectRef"
+              }
+            }
+          }
+        }
+      }
+    },
+    "ContentUpgradeOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "output_kind",
+        "source_bundle_digest",
+        "target_bundle_digest",
+        "upgrade_command_id",
+        "authorization_digest",
+        "candidate_save",
+        "unresolved",
+        "result_digest"
+      ],
+      "properties": {
+        "output_kind": {
+          "const": "content_upgrade.candidate"
+        },
+        "source_bundle_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "target_bundle_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "upgrade_command_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "authorization_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "candidate_save": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/SaveEnvelope"
+        },
+        "unresolved": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "code",
+              "path"
+            ],
+            "properties": {
+              "code": {
+                "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+              },
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "message": {
+                "type": "string",
+                "maxLength": 4000
+              }
+            }
+          }
+        },
+        "result_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        }
+      }
+    },
+    "RulePluginResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "record_type",
+        "request_id",
+        "plugin_lock",
+        "operation_id",
+        "operation_kind",
+        "basis_revision",
+        "deterministic_context_id",
+        "deterministic_context_digest",
+        "output"
+      ],
+      "properties": {
+        "contract_version": {
+          "const": "rule-plugin.v1"
+        },
+        "record_type": {
+          "const": "rule_plugin.response"
+        },
+        "request_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "plugin_lock": {
+          "$ref": "common.v1.schema.json#/$defs/PluginLock"
+        },
+        "operation_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "basis_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "deterministic_context_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "deterministic_context_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "output": {},
+        "operation_kind": {
+          "$ref": "#/$defs/OperationKind"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "rule.evaluate"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "output": {
+                "$ref": "#/$defs/RuleEvaluationOperationOutput"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "capability.resolve"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "output": {
+                "$ref": "#/$defs/CapabilityOperationOutput"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "navigation.resolve"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "output": {
+                "$ref": "#/$defs/NavigationOperationOutput"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "definition.validate"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "output": {
+                "$ref": "#/$defs/DefinitionOperationOutput"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "goal_plan.validate"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "output": {
+                "$ref": "#/$defs/GoalPlanOperationOutput"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "world_extension.resolve"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "output": {
+                "$ref": "#/$defs/WorldExtensionOperationOutput"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "content_upgrade.transform"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "output": {
+                "$ref": "#/$defs/ContentUpgradeOperationOutput"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "day_cycle.advance"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "output": {
+                "$ref": "#/$defs/DayCycleOperationOutput"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "state_machine.advance"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "output": {
+                "$ref": "#/$defs/StateMachineOperationOutput"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "automatic_event.world.resolve"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "output": {
+                "$ref": "#/$defs/WorldAutomaticEventOperationOutput"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "automatic_event.character.resolve"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "output": {
+                "$ref": "#/$defs/CharacterAutomaticEventOperationOutput"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "stage_outcome.resolve"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "output": {
+                "$ref": "#/$defs/StageOutcomeOperationOutput"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "dialogue.open"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "output": {
+                "$ref": "#/$defs/DialogueOpenOperationOutput"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "dialogue.turn.append"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "output": {
+                "$ref": "#/$defs/DialogueAppendOperationOutput"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "dialogue.close"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "output": {
+                "$ref": "#/$defs/DialogueCloseOperationOutput"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "event_card.publish"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "output": {
+                "$ref": "#/$defs/EventCardPublishOperationOutput"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "DayCycleAdvanceInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "from_day",
+        "from_phase",
+        "to_day",
+        "to_phase",
+        "control"
+      ],
+      "properties": {
+        "from_day": {
+          "$ref": "common.v1.schema.json#/$defs/DayNumber"
+        },
+        "from_phase": {
+          "enum": [
+            "autonomous",
+            "director_settlement",
+            "player"
+          ]
+        },
+        "to_day": {
+          "$ref": "common.v1.schema.json#/$defs/DayNumber"
+        },
+        "to_phase": {
+          "enum": [
+            "autonomous",
+            "director_settlement",
+            "player"
+          ]
+        },
+        "control": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/ControlBindingRef"
+        },
+        "event_budget_policy": {
+          "$ref": "content-bundle.v1.schema.json#/$defs/EventBudgetPolicy"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "to_phase": {
+                "const": "player"
+              }
+            },
+            "required": [
+              "to_phase"
+            ]
+          },
+          "then": {
+            "required": [
+              "event_budget_policy"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "event_budget_policy"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "StateMachineAdvanceInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "machine_instance_id",
+        "day"
+      ],
+      "properties": {
+        "machine_instance_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "day": {
+          "$ref": "common.v1.schema.json#/$defs/DayNumber"
+        }
+      }
+    },
+    "WorldAutomaticEventResolveInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "proposal",
+        "model_proof"
+      ],
+      "properties": {
+        "proposal": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/WorldAutomaticEventProposal"
+        },
+        "model_proof": {
+          "$ref": "#/$defs/DirectorDailyProofRef"
+        }
+      }
+    },
+    "CharacterAutomaticEventResolveInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "proposal",
+        "character_reactions",
+        "director_proof"
+      ],
+      "properties": {
+        "character_reactions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CharacterReactionBatch"
+          },
+          "minItems": 1
+        },
+        "proposal": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/CharacterAutomaticEventProposal"
+        },
+        "director_proof": {
+          "$ref": "#/$defs/DirectorDailyProofRef"
+        }
+      }
+    },
+    "EventCardPublishInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "control",
+        "proposal",
+        "policy",
+        "model_proof"
+      ],
+      "properties": {
+        "proposal": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/EventCardProposal"
+        },
+        "policy": {
+          "$ref": "content-bundle.v1.schema.json#/$defs/EventBudgetPolicy"
+        },
+        "control": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/ControlBindingRef"
+        },
+        "model_proof": {
+          "$ref": "#/$defs/DirectorDialogueProofRef"
+        }
+      }
+    },
+    "NavigationResolveInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "control",
+        "actor",
+        "destination"
+      ],
+      "properties": {
+        "control": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/ControlBindingRef"
+        },
+        "actor": {
+          "$ref": "common.v1.schema.json#/$defs/EntityRef"
+        },
+        "destination": {
+          "$ref": "common.v1.schema.json#/$defs/EntityRef"
+        }
+      }
+    },
+    "GoalPlanValidateInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "plan_id",
+        "proposal",
+        "model_proof"
+      ],
+      "properties": {
+        "plan_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "proposal": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/GoalPlanProposal"
+        },
+        "model_proof": {
+          "$ref": "#/$defs/DirectorSystemProofRef"
+        }
+      }
+    },
+    "WorldExtensionResolveInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "goal_plan_id",
+        "goal_node_id",
+        "request_id"
+      ],
+      "properties": {
+        "goal_plan_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "goal_node_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "request_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        }
+      }
+    },
+    "DialogueOpenInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dialogue_id",
+        "day",
+        "participants",
+        "first_turn",
+        "control"
+      ],
+      "properties": {
+        "dialogue_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "day": {
+          "$ref": "common.v1.schema.json#/$defs/DayNumber"
+        },
+        "participants": {
+          "type": "array",
+          "minItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "world-runtime.v1.schema.json#/$defs/DialogueParticipantRef"
+          }
+        },
+        "first_turn": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/HumanDialogueTurn"
+        },
+        "control": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/ControlBindingRef"
+        }
+      }
+    },
+    "DialogueTurnAppendInput": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/HumanDialogueTurnAppendInput"
+        },
+        {
+          "$ref": "#/$defs/CharacterDialogueTurnAppendInput"
+        },
+        {
+          "$ref": "#/$defs/DirectorSystemDialogueTurnAppendInput"
+        }
+      ]
+    },
+    "DialogueCloseInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dialogue_id",
+        "expected_revision",
+        "reason_code"
+      ],
+      "properties": {
+        "dialogue_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "expected_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "reason_code": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        }
+      }
+    },
+    "DirectorDailyProofRef": {
+      "allOf": [
+        {
+          "$ref": "model-protocol.v1.schema.json#/$defs/VerifiedModelOutputRef"
+        },
+        {
+          "type": "object",
+          "required": [
+            "request_kind"
+          ],
+          "properties": {
+            "request_kind": {
+              "const": "director.daily_settlement"
+            }
+          }
+        }
+      ]
+    },
+    "DirectorDialogueProofRef": {
+      "allOf": [
+        {
+          "$ref": "model-protocol.v1.schema.json#/$defs/VerifiedModelOutputRef"
+        },
+        {
+          "type": "object",
+          "required": [
+            "request_kind"
+          ],
+          "properties": {
+            "request_kind": {
+              "enum": [
+                "director.dialogue_events",
+                "director.system_dialogue"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "DirectorSystemProofRef": {
+      "allOf": [
+        {
+          "$ref": "model-protocol.v1.schema.json#/$defs/VerifiedModelOutputRef"
+        },
+        {
+          "type": "object",
+          "required": [
+            "request_kind"
+          ],
+          "properties": {
+            "request_kind": {
+              "const": "director.system_dialogue"
+            }
+          }
+        }
+      ]
+    },
+    "CharacterDialogueProofRef": {
+      "allOf": [
+        {
+          "$ref": "model-protocol.v1.schema.json#/$defs/VerifiedModelOutputRef"
+        },
+        {
+          "type": "object",
+          "required": [
+            "request_kind"
+          ],
+          "properties": {
+            "request_kind": {
+              "const": "character.dialogue"
+            }
+          }
+        }
+      ]
+    },
+    "CharacterReactProofRef": {
+      "allOf": [
+        {
+          "$ref": "model-protocol.v1.schema.json#/$defs/VerifiedModelOutputRef"
+        },
+        {
+          "type": "object",
+          "required": [
+            "request_kind"
+          ],
+          "properties": {
+            "request_kind": {
+              "const": "character.react"
+            }
+          }
+        }
+      ]
+    },
+    "CharacterReactionBatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "character",
+        "model_proof",
+        "reactions"
+      ],
+      "properties": {
+        "character": {
+          "$ref": "common.v1.schema.json#/$defs/EntityRef"
+        },
+        "model_proof": {
+          "$ref": "#/$defs/CharacterReactProofRef"
+        },
+        "reactions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "world-runtime.v1.schema.json#/$defs/CharacterReactionProposal"
+          }
+        }
+      }
+    },
+    "HumanDialogueTurnAppendInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dialogue_id",
+        "expected_revision",
+        "control",
+        "turn"
+      ],
+      "properties": {
+        "dialogue_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "expected_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "control": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/ControlBindingRef"
+        },
+        "turn": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/HumanDialogueTurn"
+        }
+      }
+    },
+    "CharacterDialogueTurnAppendInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dialogue_id",
+        "expected_revision",
+        "model_proof",
+        "turn"
+      ],
+      "properties": {
+        "dialogue_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "expected_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "model_proof": {
+          "$ref": "#/$defs/CharacterDialogueProofRef"
+        },
+        "turn": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/CharacterMindDialogueTurn"
+        }
+      }
+    },
+    "DirectorSystemDialogueTurnAppendInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dialogue_id",
+        "expected_revision",
+        "control",
+        "model_proof",
+        "turn"
+      ],
+      "properties": {
+        "dialogue_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "expected_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "control": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/ControlBindingRef"
+        },
+        "model_proof": {
+          "$ref": "#/$defs/DirectorSystemProofRef"
+        },
+        "turn": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/DirectorSystemDialogueTurn"
+        }
+      }
+    },
+    "StageOutcomeResolveInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "control",
+        "proposal"
+      ],
+      "properties": {
+        "control": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/ControlBindingRef"
+        },
+        "proposal": {
+          "$ref": "gdjs-bridge.v1.schema.json#/$defs/StageOutcomeProposal"
+        }
+      }
+    },
+    "CapabilityPacketOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "output_kind",
+        "proposal"
+      ],
+      "properties": {
+        "output_kind": {
+          "const": "packet.proposal"
+        },
+        "proposal": {
+          "allOf": [
+            {
+              "$ref": "world-runtime.v1.schema.json#/$defs/PacketProposal"
+            },
+            {
+              "type": "object",
+              "required": [
+                "ops"
+              ],
+              "properties": {
+                "ops": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "$ref": "world-runtime.v1.schema.json#/$defs/EventOutcomeOp"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "NavigationPacketOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "output_kind",
+        "proposal"
+      ],
+      "properties": {
+        "output_kind": {
+          "const": "packet.proposal"
+        },
+        "proposal": {
+          "allOf": [
+            {
+              "$ref": "world-runtime.v1.schema.json#/$defs/PacketProposal"
+            },
+            {
+              "type": "object",
+              "required": [
+                "ops"
+              ],
+              "properties": {
+                "ops": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "$ref": "world-runtime.v1.schema.json#/$defs/EntityRelocateOp"
+                  },
+                  "maxItems": 1
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "DefinitionPacketOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "output_kind",
+        "proposal"
+      ],
+      "properties": {
+        "output_kind": {
+          "const": "packet.proposal"
+        },
+        "proposal": {
+          "allOf": [
+            {
+              "$ref": "world-runtime.v1.schema.json#/$defs/PacketProposal"
+            },
+            {
+              "type": "object",
+              "required": [
+                "ops"
+              ],
+              "properties": {
+                "ops": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "$ref": "world-runtime.v1.schema.json#/$defs/DefinitionRegisterOp"
+                  },
+                  "maxItems": 1
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "GoalPlanPacketOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "output_kind",
+        "proposal"
+      ],
+      "properties": {
+        "output_kind": {
+          "const": "packet.proposal"
+        },
+        "proposal": {
+          "allOf": [
+            {
+              "$ref": "world-runtime.v1.schema.json#/$defs/PacketProposal"
+            },
+            {
+              "type": "object",
+              "required": [
+                "ops"
+              ],
+              "properties": {
+                "ops": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "$ref": "world-runtime.v1.schema.json#/$defs/GoalPlanUpsertOp"
+                  },
+                  "maxItems": 1
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "CharacterMindControlBindingUpsertOp": {
+      "allOf": [
+        {
+          "$ref": "world-runtime.v1.schema.json#/$defs/ControlBindingUpsertOp"
+        },
+        {
+          "type": "object",
+          "required": [
+            "binding"
+          ],
+          "properties": {
+            "binding": {
+              "type": "object",
+              "required": [
+                "binding_kind"
+              ],
+              "properties": {
+                "binding_kind": {
+                  "const": "character_mind"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "WorldExtensionPacketOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "output_kind",
+        "proposal"
+      ],
+      "properties": {
+        "output_kind": {
+          "const": "packet.proposal"
+        },
+        "proposal": {
+          "allOf": [
+            {
+              "$ref": "world-runtime.v1.schema.json#/$defs/PacketProposal"
+            },
+            {
+              "type": "object",
+              "required": [
+                "ops"
+              ],
+              "properties": {
+                "ops": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "oneOf": [
+                      {
+                        "$ref": "world-runtime.v1.schema.json#/$defs/DefinitionRegisterOp"
+                      },
+                      {
+                        "$ref": "world-runtime.v1.schema.json#/$defs/EntityCreateOp"
+                      },
+                      {
+                        "$ref": "world-runtime.v1.schema.json#/$defs/RelationUpsertOp"
+                      },
+                      {
+                        "$ref": "#/$defs/CharacterMindControlBindingUpsertOp"
+                      },
+                      {
+                        "$ref": "world-runtime.v1.schema.json#/$defs/StateMachineCreateOp"
+                      },
+                      {
+                        "$ref": "world-runtime.v1.schema.json#/$defs/GoalPlanUpsertOp"
+                      },
+                      {
+                        "$ref": "world-runtime.v1.schema.json#/$defs/MaterializationRequestOp"
+                      }
+                    ]
+                  },
+                  "contains": {
+                    "$ref": "world-runtime.v1.schema.json#/$defs/GoalPlanUpsertOp"
+                  },
+                  "minContains": 1,
+                  "maxContains": 1
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "DayCyclePacketOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "output_kind",
+        "proposal"
+      ],
+      "properties": {
+        "output_kind": {
+          "const": "packet.proposal"
+        },
+        "proposal": {
+          "allOf": [
+            {
+              "$ref": "world-runtime.v1.schema.json#/$defs/PacketProposal"
+            },
+            {
+              "type": "object",
+              "required": [
+                "ops"
+              ],
+              "properties": {
+                "ops": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "oneOf": [
+                      {
+                        "$ref": "world-runtime.v1.schema.json#/$defs/DayCycleTransitionOp"
+                      },
+                      {
+                        "$ref": "world-runtime.v1.schema.json#/$defs/EventCardExpireOp"
+                      },
+                      {
+                        "$ref": "world-runtime.v1.schema.json#/$defs/EventBudgetOpenOp"
+                      }
+                    ]
+                  },
+                  "contains": {
+                    "$ref": "world-runtime.v1.schema.json#/$defs/DayCycleTransitionOp"
+                  },
+                  "minContains": 1,
+                  "maxContains": 1,
+                  "allOf": [
+                    {
+                      "contains": {
+                        "$ref": "world-runtime.v1.schema.json#/$defs/EventBudgetOpenOp"
+                      },
+                      "minContains": 0,
+                      "maxContains": 1
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "StateMachinePacketOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "output_kind",
+        "proposal"
+      ],
+      "properties": {
+        "output_kind": {
+          "const": "packet.proposal"
+        },
+        "proposal": {
+          "allOf": [
+            {
+              "$ref": "world-runtime.v1.schema.json#/$defs/PacketProposal"
+            },
+            {
+              "type": "object",
+              "required": [
+                "ops"
+              ],
+              "properties": {
+                "ops": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "$ref": "world-runtime.v1.schema.json#/$defs/StateMachineSetStateOp"
+                  },
+                  "maxItems": 1
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "AutomaticEventPacketOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "output_kind",
+        "proposal"
+      ],
+      "properties": {
+        "output_kind": {
+          "const": "packet.proposal"
+        },
+        "proposal": {
+          "allOf": [
+            {
+              "$ref": "world-runtime.v1.schema.json#/$defs/PacketProposal"
+            },
+            {
+              "type": "object",
+              "required": [
+                "ops"
+              ],
+              "properties": {
+                "ops": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "$ref": "world-runtime.v1.schema.json#/$defs/EventOutcomeOp"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "StageOutcomePacketOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "output_kind",
+        "proposal"
+      ],
+      "properties": {
+        "output_kind": {
+          "const": "packet.proposal"
+        },
+        "proposal": {
+          "allOf": [
+            {
+              "$ref": "world-runtime.v1.schema.json#/$defs/PacketProposal"
+            },
+            {
+              "type": "object",
+              "required": [
+                "ops"
+              ],
+              "properties": {
+                "ops": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "oneOf": [
+                      {
+                        "$ref": "world-runtime.v1.schema.json#/$defs/EventOutcomeOp"
+                      },
+                      {
+                        "$ref": "world-runtime.v1.schema.json#/$defs/StageUpdateOp"
+                      },
+                      {
+                        "$ref": "world-runtime.v1.schema.json#/$defs/StageCloseOp"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "DialogueOpenPacketOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "output_kind",
+        "proposal"
+      ],
+      "properties": {
+        "output_kind": {
+          "const": "packet.proposal"
+        },
+        "proposal": {
+          "allOf": [
+            {
+              "$ref": "world-runtime.v1.schema.json#/$defs/PacketProposal"
+            },
+            {
+              "type": "object",
+              "required": [
+                "ops"
+              ],
+              "properties": {
+                "ops": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "$ref": "world-runtime.v1.schema.json#/$defs/DialogueOpenOp"
+                  },
+                  "maxItems": 1
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "DialogueAppendPacketOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "output_kind",
+        "proposal"
+      ],
+      "properties": {
+        "output_kind": {
+          "const": "packet.proposal"
+        },
+        "proposal": {
+          "allOf": [
+            {
+              "$ref": "world-runtime.v1.schema.json#/$defs/PacketProposal"
+            },
+            {
+              "type": "object",
+              "required": [
+                "ops"
+              ],
+              "properties": {
+                "ops": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "$ref": "world-runtime.v1.schema.json#/$defs/DialogueTurnAppendOp"
+                  },
+                  "maxItems": 1
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "DialogueClosePacketOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "output_kind",
+        "proposal"
+      ],
+      "properties": {
+        "output_kind": {
+          "const": "packet.proposal"
+        },
+        "proposal": {
+          "allOf": [
+            {
+              "$ref": "world-runtime.v1.schema.json#/$defs/PacketProposal"
+            },
+            {
+              "type": "object",
+              "required": [
+                "ops"
+              ],
+              "properties": {
+                "ops": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "$ref": "world-runtime.v1.schema.json#/$defs/DialogueCloseOp"
+                  },
+                  "maxItems": 1
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "EventCardPublishPacketOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "output_kind",
+        "proposal"
+      ],
+      "properties": {
+        "output_kind": {
+          "const": "packet.proposal"
+        },
+        "proposal": {
+          "allOf": [
+            {
+              "$ref": "world-runtime.v1.schema.json#/$defs/PacketProposal"
+            },
+            {
+              "type": "object",
+              "required": [
+                "ops"
+              ],
+              "properties": {
+                "ops": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "$ref": "world-runtime.v1.schema.json#/$defs/EventCardPublishOp"
+                  },
+                  "maxItems": 1
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "RuleEvaluationOperationOutput": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/RejectOutput"
+        },
+        {
+          "$ref": "#/$defs/ChoiceSpec"
+        },
+        {
+          "$ref": "#/$defs/ValidationOutput"
+        }
+      ]
+    },
+    "CapabilityOperationOutput": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/RejectOutput"
+        },
+        {
+          "$ref": "#/$defs/ChoiceSpec"
+        },
+        {
+          "$ref": "#/$defs/CapabilityPacketOutput"
+        }
+      ]
+    },
+    "NavigationOperationOutput": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/RejectOutput"
+        },
+        {
+          "$ref": "#/$defs/NavigationPacketOutput"
+        }
+      ]
+    },
+    "DefinitionOperationOutput": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/RejectOutput"
+        },
+        {
+          "$ref": "#/$defs/DefinitionPacketOutput"
+        }
+      ]
+    },
+    "GoalPlanOperationOutput": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/RejectOutput"
+        },
+        {
+          "$ref": "#/$defs/GoalPlanPacketOutput"
+        }
+      ]
+    },
+    "WorldExtensionOperationOutput": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/RejectOutput"
+        },
+        {
+          "$ref": "#/$defs/WorldExtensionPacketOutput"
+        }
+      ]
+    },
+    "ContentUpgradeOperationOutput": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/RejectOutput"
+        },
+        {
+          "$ref": "#/$defs/ContentUpgradeOutput"
+        }
+      ]
+    },
+    "DayCycleOperationOutput": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/RejectOutput"
+        },
+        {
+          "$ref": "#/$defs/DayCyclePacketOutput"
+        }
+      ]
+    },
+    "StateMachineOperationOutput": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/RejectOutput"
+        },
+        {
+          "$ref": "#/$defs/StateMachinePacketOutput"
+        }
+      ]
+    },
+    "WorldAutomaticEventOperationOutput": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/RejectOutput"
+        },
+        {
+          "$ref": "#/$defs/ChoiceSpec"
+        },
+        {
+          "$ref": "#/$defs/AutomaticEventPacketOutput"
+        }
+      ]
+    },
+    "CharacterAutomaticEventOperationOutput": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/RejectOutput"
+        },
+        {
+          "$ref": "#/$defs/ChoiceSpec"
+        },
+        {
+          "$ref": "#/$defs/AutomaticEventPacketOutput"
+        }
+      ]
+    },
+    "StageOutcomeOperationOutput": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/RejectOutput"
+        },
+        {
+          "$ref": "#/$defs/ChoiceSpec"
+        },
+        {
+          "$ref": "#/$defs/StageOutcomePacketOutput"
+        }
+      ]
+    },
+    "DialogueOpenOperationOutput": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/RejectOutput"
+        },
+        {
+          "$ref": "#/$defs/DialogueOpenPacketOutput"
+        }
+      ]
+    },
+    "DialogueAppendOperationOutput": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/RejectOutput"
+        },
+        {
+          "$ref": "#/$defs/DialogueAppendPacketOutput"
+        }
+      ]
+    },
+    "DialogueCloseOperationOutput": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/RejectOutput"
+        },
+        {
+          "$ref": "#/$defs/DialogueClosePacketOutput"
+        }
+      ]
+    },
+    "EventCardPublishOperationOutput": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/RejectOutput"
+        },
+        {
+          "$ref": "#/$defs/EventCardPublishPacketOutput"
+        }
+      ]
+    }
+  }
+}

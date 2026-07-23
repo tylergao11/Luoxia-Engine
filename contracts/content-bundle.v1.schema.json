@@ -1,0 +1,1644 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.luoxia.engine/contracts/content-bundle.v1.schema.json",
+  "title": "Luoxia Canonical ContentBundle v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "release",
+    "bundle"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": "content-bundle.v1"
+    },
+    "release": {
+      "$ref": "#/$defs/ReleaseDescriptor"
+    },
+    "bundle": {
+      "$ref": "#/$defs/BundlePayload"
+    }
+  },
+  "$defs": {
+    "ReleaseDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workbook_contract_version",
+        "source_digest",
+        "compiler_version",
+        "bundle_digest"
+      ],
+      "properties": {
+        "workbook_contract_version": {
+          "const": "content-pack-workbook.v1"
+        },
+        "source_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "compiler_version": {
+          "$ref": "common.v1.schema.json#/$defs/SemVer"
+        },
+        "bundle_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        }
+      }
+    },
+    "BundlePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "manifest",
+        "dependencies",
+        "worlds",
+        "catalog",
+        "gameplay",
+        "presentation",
+        "content_upgrades",
+        "simulation"
+      ],
+      "properties": {
+        "manifest": {
+          "$ref": "#/$defs/Manifest"
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DependencyLock"
+          }
+        },
+        "worlds": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/WorldDefinition"
+          }
+        },
+        "catalog": {
+          "$ref": "#/$defs/Catalog"
+        },
+        "gameplay": {
+          "$ref": "#/$defs/Gameplay"
+        },
+        "presentation": {
+          "$ref": "#/$defs/Presentation"
+        },
+        "content_upgrades": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentUpgrade"
+          }
+        },
+        "simulation": {
+          "$ref": "#/$defs/Simulation"
+        }
+      }
+    },
+    "Manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pack_id",
+        "pack_version",
+        "display_name",
+        "description",
+        "default_locale",
+        "engine_contract_version",
+        "entry_world_id",
+        "release_state"
+      ],
+      "properties": {
+        "pack_id": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "pack_version": {
+          "$ref": "common.v1.schema.json#/$defs/SemVer"
+        },
+        "display_name": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "description": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "default_locale": {
+          "type": "string",
+          "pattern": "^[a-z]{2,3}(?:-[A-Z]{2})?$"
+        },
+        "engine_contract_version": {
+          "$ref": "common.v1.schema.json#/$defs/SemVer"
+        },
+        "entry_world_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "publisher": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "license_spdx": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "release_state": {
+          "enum": [
+            "draft",
+            "release"
+          ]
+        }
+      }
+    },
+    "DependencyLock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dependency_id",
+        "dependency_kind",
+        "package_id",
+        "version",
+        "integrity_sha256",
+        "required"
+      ],
+      "properties": {
+        "dependency_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "dependency_kind": {
+          "enum": [
+            "content_pack",
+            "rule_plugin",
+            "stage_module",
+            "asset_provider"
+          ]
+        },
+        "package_id": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "version": {
+          "$ref": "common.v1.schema.json#/$defs/SemVer"
+        },
+        "integrity_sha256": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "purpose": {
+          "type": "string",
+          "maxLength": 2000
+        }
+      }
+    },
+    "WorldDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "world_id",
+        "name",
+        "summary",
+        "initial_time",
+        "start_location_entity_id",
+        "player_archetype_definition_id",
+        "calendar_resolver",
+        "navigation_resolver",
+        "default_art_profile_id",
+        "default_materialization_profile_id",
+        "system",
+        "event_budget"
+      ],
+      "properties": {
+        "world_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "name": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "summary": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "initial_time": {
+          "$ref": "common.v1.schema.json#/$defs/LogicalTime"
+        },
+        "start_location_entity_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "player_archetype_definition_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "calendar_resolver": {
+          "$ref": "#/$defs/PluginOperationRef"
+        },
+        "default_art_profile_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "default_materialization_profile_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "default_stage": {
+          "$ref": "#/$defs/StageRef"
+        },
+        "system": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "display_name",
+            "persona_prompt_id"
+          ],
+          "properties": {
+            "display_name": {
+              "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+            },
+            "persona_prompt_id": {
+              "$ref": "common.v1.schema.json#/$defs/Identifier"
+            },
+            "art_profile_id": {
+              "$ref": "common.v1.schema.json#/$defs/Identifier"
+            }
+          }
+        },
+        "fields": {
+          "$ref": "#/$defs/FieldValues"
+        },
+        "event_budget": {
+          "$ref": "#/$defs/EventBudgetPolicy"
+        },
+        "navigation_resolver": {
+          "$ref": "#/$defs/PluginOperationRef"
+        }
+      }
+    },
+    "PluginOperationRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dependency_id",
+        "operation_id"
+      ],
+      "properties": {
+        "dependency_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "operation_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        }
+      }
+    },
+    "StageRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage_module_dependency_id",
+        "scene_id"
+      ],
+      "properties": {
+        "stage_module_dependency_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "scene_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        }
+      }
+    },
+    "Catalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "types",
+        "extension_fields",
+        "enum_sets",
+        "definitions",
+        "entities",
+        "relations"
+      ],
+      "properties": {
+        "types": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TypeDefinition"
+          }
+        },
+        "extension_fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExtensionField"
+          }
+        },
+        "enum_sets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EnumSet"
+          }
+        },
+        "definitions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StaticDefinition"
+          }
+        },
+        "entities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/InitialEntity"
+          }
+        },
+        "relations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/InitialRelation"
+          }
+        }
+      }
+    },
+    "TypeDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type_id",
+        "type_kind",
+        "name",
+        "description",
+        "runtime_creatable",
+        "runtime_mutable"
+      ],
+      "properties": {
+        "type_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "type_kind": {
+          "enum": [
+            "definition",
+            "component",
+            "relation"
+          ]
+        },
+        "name": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "description": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "parent_type_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "runtime_creatable": {
+          "type": "boolean"
+        },
+        "runtime_mutable": {
+          "type": "boolean"
+        },
+        "component_cardinality": {
+          "enum": [
+            "one",
+            "many"
+          ]
+        },
+        "relation_direction": {
+          "enum": [
+            "directed",
+            "undirected"
+          ]
+        },
+        "relation_multiplicity": {
+          "enum": [
+            "one_to_one",
+            "one_to_many",
+            "many_to_one",
+            "many_to_many"
+          ]
+        },
+        "inverse_type_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "validator": {
+          "$ref": "#/$defs/PluginOperationRef"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type_kind": {
+                "const": "component"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "component_cardinality"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type_kind": {
+                "const": "relation"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "relation_direction",
+              "relation_multiplicity"
+            ]
+          }
+        }
+      ]
+    },
+    "ExtensionField": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "field_id",
+        "owner_kind",
+        "name",
+        "description",
+        "value_type",
+        "cardinality",
+        "required",
+        "visibility",
+        "translatable",
+        "runtime_mutable",
+        "sort_order"
+      ],
+      "properties": {
+        "field_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "owner_kind": {
+          "enum": [
+            "world",
+            "definition",
+            "component",
+            "relation",
+            "capability",
+            "world_law",
+            "generation_archetype",
+            "art_profile",
+            "materialization_profile",
+            "asset",
+            "binding"
+          ]
+        },
+        "owner_type_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "name": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "description": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "value_type": {
+          "enum": [
+            "text",
+            "integer",
+            "decimal",
+            "boolean",
+            "id_ref",
+            "world_time",
+            "duration"
+          ]
+        },
+        "cardinality": {
+          "enum": [
+            "one",
+            "many"
+          ]
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "enum_set_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "reference": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "ref_kind"
+          ],
+          "properties": {
+            "ref_kind": {
+              "enum": [
+                "world",
+                "type",
+                "definition",
+                "entity",
+                "relation",
+                "capability",
+                "world_law",
+                "generation_archetype",
+                "prompt",
+                "art_profile",
+                "materialization_profile",
+                "asset",
+                "binding",
+                "dependency"
+              ]
+            },
+            "ref_type_id": {
+              "$ref": "common.v1.schema.json#/$defs/Identifier"
+            }
+          }
+        },
+        "default_value": {
+          "$ref": "common.v1.schema.json#/$defs/JsonValue"
+        },
+        "minimum": {
+          "type": "number"
+        },
+        "maximum": {
+          "type": "number"
+        },
+        "pattern": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "visibility": {
+          "enum": [
+            "public",
+            "discoverable",
+            "system_only",
+            "secret"
+          ]
+        },
+        "translatable": {
+          "type": "boolean"
+        },
+        "runtime_mutable": {
+          "type": "boolean"
+        },
+        "sort_order": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "EnumSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enum_set_id",
+        "items"
+      ],
+      "properties": {
+        "enum_set_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "item_id",
+              "label",
+              "sort_order"
+            ],
+            "properties": {
+              "item_id": {
+                "$ref": "common.v1.schema.json#/$defs/Identifier"
+              },
+              "label": {
+                "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+              },
+              "description": {
+                "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+              },
+              "sort_order": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          }
+        }
+      }
+    },
+    "FieldValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "field_id",
+        "ordinal",
+        "value"
+      ],
+      "properties": {
+        "field_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "ordinal": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "locale": {
+          "type": "string",
+          "pattern": "^[a-z]{2,3}(?:-[A-Z]{2})?$"
+        },
+        "value": {
+          "$ref": "common.v1.schema.json#/$defs/JsonValue"
+        }
+      }
+    },
+    "FieldValues": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/FieldValue"
+      }
+    },
+    "ComponentInstance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "component_id",
+        "component_type_id",
+        "ordinal",
+        "fields"
+      ],
+      "properties": {
+        "component_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "component_type_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "ordinal": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fields": {
+          "$ref": "#/$defs/FieldValues"
+        }
+      }
+    },
+    "StaticDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "definition_id",
+        "definition_type_id",
+        "name",
+        "components",
+        "fields"
+      ],
+      "properties": {
+        "definition_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "definition_type_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "name": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "summary": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "parent_definition_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "components": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ComponentInstance"
+          }
+        },
+        "fields": {
+          "$ref": "#/$defs/FieldValues"
+        }
+      }
+    },
+    "InitialEntity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entity_id",
+        "archetype_definition_id",
+        "name",
+        "components",
+        "fields"
+      ],
+      "properties": {
+        "entity_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "archetype_definition_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "name": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "summary": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "components": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ComponentInstance"
+          }
+        },
+        "fields": {
+          "$ref": "#/$defs/FieldValues"
+        }
+      }
+    },
+    "InitialRelation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "relation_id",
+        "relation_type_id",
+        "from",
+        "to",
+        "fields"
+      ],
+      "properties": {
+        "relation_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "relation_type_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "from": {
+          "$ref": "#/$defs/LocalSubjectRef"
+        },
+        "to": {
+          "$ref": "#/$defs/LocalSubjectRef"
+        },
+        "fields": {
+          "$ref": "#/$defs/FieldValues"
+        }
+      }
+    },
+    "LocalSubjectRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "id"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "definition",
+            "entity"
+          ]
+        },
+        "id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        }
+      }
+    },
+    "Gameplay": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capabilities",
+        "world_laws",
+        "generation_archetypes",
+        "prompt_fragments"
+      ],
+      "properties": {
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Capability"
+          }
+        },
+        "world_laws": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorldLaw"
+          }
+        },
+        "generation_archetypes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GenerationArchetype"
+          }
+        },
+        "prompt_fragments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PromptFragment"
+          }
+        }
+      }
+    },
+    "Capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability_id",
+        "world_id",
+        "name",
+        "description",
+        "resolver",
+        "fields"
+      ],
+      "properties": {
+        "capability_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "world_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "name": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "description": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "actor_definition_type_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "target_definition_type_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "availability_law_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "resolver": {
+          "$ref": "#/$defs/PluginOperationRef"
+        },
+        "planning_prompt_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "fields": {
+          "$ref": "#/$defs/FieldValues"
+        }
+      }
+    },
+    "WorldLaw": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "law_id",
+        "world_id",
+        "name",
+        "description",
+        "law_mode",
+        "priority",
+        "evaluator",
+        "fields"
+      ],
+      "properties": {
+        "law_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "world_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "name": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "description": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "law_mode": {
+          "enum": [
+            "constraint",
+            "permission",
+            "cost",
+            "consequence",
+            "schedule"
+          ]
+        },
+        "priority": {
+          "type": "integer"
+        },
+        "evaluator": {
+          "$ref": "#/$defs/PluginOperationRef"
+        },
+        "explanation_prompt_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "fields": {
+          "$ref": "#/$defs/FieldValues"
+        }
+      }
+    },
+    "GenerationArchetype": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "archetype_id",
+        "world_id",
+        "name",
+        "description",
+        "result_kind",
+        "generator",
+        "prompt_fragment_id",
+        "fields"
+      ],
+      "properties": {
+        "archetype_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "world_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "name": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "description": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "result_kind": {
+          "enum": [
+            "definition",
+            "entity",
+            "world_extension"
+          ]
+        },
+        "target_type_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "base_definition_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "eligibility_law_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "generator": {
+          "$ref": "#/$defs/PluginOperationRef"
+        },
+        "prompt_fragment_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "art_profile_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "materialization_profile_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "fields": {
+          "$ref": "#/$defs/FieldValues"
+        }
+      }
+    },
+    "PromptFragment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "prompt_id",
+        "purpose",
+        "locale",
+        "name",
+        "text"
+      ],
+      "properties": {
+        "prompt_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "purpose": {
+          "enum": [
+            "character_persona",
+            "character_dialogue",
+            "character_reaction",
+            "director_core",
+            "director_daily_settlement",
+            "director_dialogue_events",
+            "director_system_dialogue",
+            "system_persona",
+            "asset_subject",
+            "asset_style",
+            "asset_negative"
+          ]
+        },
+        "locale": {
+          "type": "string",
+          "pattern": "^[a-z]{2,3}(?:-[A-Z]{2})?$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 50000
+        }
+      }
+    },
+    "Presentation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "art_profiles",
+        "materialization_profiles",
+        "assets",
+        "bindings"
+      ],
+      "properties": {
+        "art_profiles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ArtProfile"
+          }
+        },
+        "materialization_profiles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MaterializationProfile"
+          }
+        },
+        "assets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PackAsset"
+          }
+        },
+        "bindings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PackBinding"
+          }
+        }
+      }
+    },
+    "ArtProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "art_profile_id",
+        "name",
+        "description",
+        "style_prompt_id",
+        "width",
+        "height",
+        "fields"
+      ],
+      "properties": {
+        "art_profile_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "name": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "description": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "style_prompt_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "negative_prompt_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "aspect_ratio": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*:[1-9][0-9]*$"
+        },
+        "parent_art_profile_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "fields": {
+          "$ref": "#/$defs/FieldValues"
+        }
+      }
+    },
+    "MaterializationProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "materialization_profile_id",
+        "name",
+        "description",
+        "generation_policy",
+        "fallback_asset_id",
+        "review_policy",
+        "promotion_policy",
+        "fields"
+      ],
+      "properties": {
+        "materialization_profile_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "name": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "description": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "generation_policy": {
+          "enum": [
+            "disabled",
+            "on_demand"
+          ]
+        },
+        "provider": {
+          "$ref": "#/$defs/PluginOperationRef"
+        },
+        "art_profile_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "policy": {
+          "$ref": "#/$defs/PluginOperationRef"
+        },
+        "fallback_asset_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "review_policy": {
+          "enum": [
+            "automatic",
+            "human"
+          ]
+        },
+        "promotion_policy": {
+          "enum": [
+            "never",
+            "reviewed"
+          ]
+        },
+        "fields": {
+          "$ref": "#/$defs/FieldValues"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "generation_policy": {
+                "const": "on_demand"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "provider"
+            ]
+          }
+        }
+      ]
+    },
+    "PackAsset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "asset_id",
+        "media_kind",
+        "relative_path",
+        "content",
+        "fields"
+      ],
+      "properties": {
+        "asset_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "media_kind": {
+          "enum": [
+            "image",
+            "audio",
+            "video",
+            "data"
+          ]
+        },
+        "relative_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^(?![A-Za-z]:)(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+        },
+        "content": {
+          "$ref": "common.v1.schema.json#/$defs/AssetContentRef"
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "art_profile_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "license_spdx": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "fields": {
+          "$ref": "#/$defs/FieldValues"
+        }
+      }
+    },
+    "PackBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "binding_id",
+        "subject_kind",
+        "subject_id",
+        "slot_id",
+        "priority",
+        "fields"
+      ],
+      "properties": {
+        "binding_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "subject_kind": {
+          "enum": [
+            "world",
+            "definition",
+            "entity",
+            "relation",
+            "capability",
+            "generation_archetype"
+          ]
+        },
+        "subject_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "slot_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "asset_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "materialization_profile_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "art_profile_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "condition_law_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "stage": {
+          "$ref": "#/$defs/StageRef"
+        },
+        "priority": {
+          "type": "integer"
+        },
+        "fields": {
+          "$ref": "#/$defs/FieldValues"
+        }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "asset_id"
+          ]
+        },
+        {
+          "required": [
+            "materialization_profile_id"
+          ]
+        }
+      ]
+    },
+    "ContentUpgrade": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "migration_id",
+        "from_pack_version",
+        "from_bundle_digest",
+        "to_pack_version",
+        "transformer",
+        "description",
+        "requires_player_consent"
+      ],
+      "properties": {
+        "migration_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "from_pack_version": {
+          "$ref": "common.v1.schema.json#/$defs/SemVer"
+        },
+        "from_bundle_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "to_pack_version": {
+          "$ref": "common.v1.schema.json#/$defs/SemVer"
+        },
+        "transformer": {
+          "$ref": "#/$defs/PluginOperationRef"
+        },
+        "description": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "requires_player_consent": {
+          "type": "boolean"
+        }
+      }
+    },
+    "MachineStateDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state_id",
+        "name",
+        "semantic_intent",
+        "parameters",
+        "fields"
+      ],
+      "properties": {
+        "state_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "name": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "semantic_intent": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "parameters": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        },
+        "fields": {
+          "$ref": "#/$defs/FieldValues"
+        }
+      }
+    },
+    "MachineTransitionDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "transition_id",
+        "from_state_id",
+        "to_state_id",
+        "trigger_type",
+        "fields"
+      ],
+      "properties": {
+        "transition_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "from_state_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "to_state_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "trigger_type": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "guard": {
+          "$ref": "common.v1.schema.json#/$defs/RuleRef"
+        },
+        "fields": {
+          "$ref": "#/$defs/FieldValues"
+        }
+      }
+    },
+    "StateMachineDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "machine_id",
+        "world_id",
+        "machine_scope",
+        "name",
+        "initial_state_id",
+        "states",
+        "transitions",
+        "advance_resolver",
+        "fields"
+      ],
+      "properties": {
+        "machine_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "world_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "machine_scope": {
+          "enum": [
+            "character",
+            "world"
+          ]
+        },
+        "name": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "initial_state_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "states": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MachineStateDefinition"
+          },
+          "minItems": 1
+        },
+        "transitions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MachineTransitionDefinition"
+          }
+        },
+        "advance_resolver": {
+          "$ref": "#/$defs/PluginOperationRef"
+        },
+        "fields": {
+          "$ref": "#/$defs/FieldValues"
+        }
+      }
+    },
+    "InitialMachineBinding": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "binding_kind",
+            "binding_id",
+            "entity_id",
+            "machine_id"
+          ],
+          "properties": {
+            "binding_kind": {
+              "const": "character"
+            },
+            "binding_id": {
+              "$ref": "common.v1.schema.json#/$defs/Identifier"
+            },
+            "entity_id": {
+              "$ref": "common.v1.schema.json#/$defs/Identifier"
+            },
+            "machine_id": {
+              "$ref": "common.v1.schema.json#/$defs/Identifier"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "binding_kind",
+            "binding_id",
+            "world_id",
+            "machine_id"
+          ],
+          "properties": {
+            "binding_kind": {
+              "const": "world"
+            },
+            "binding_id": {
+              "$ref": "common.v1.schema.json#/$defs/Identifier"
+            },
+            "world_id": {
+              "$ref": "common.v1.schema.json#/$defs/Identifier"
+            },
+            "machine_id": {
+              "$ref": "common.v1.schema.json#/$defs/Identifier"
+            }
+          }
+        }
+      ]
+    },
+    "CharacterMindProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mind_id",
+        "entity_id",
+        "persona_prompt_ids",
+        "dialogue_prompt_id",
+        "reaction_prompt_id",
+        "fields"
+      ],
+      "properties": {
+        "mind_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "entity_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "persona_prompt_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/Identifier"
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "dialogue_prompt_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "reaction_prompt_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "fields": {
+          "$ref": "#/$defs/FieldValues"
+        }
+      }
+    },
+    "DirectorProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "director_id",
+        "world_id",
+        "core_prompt_ids",
+        "daily_settlement_prompt_id",
+        "dialogue_events_prompt_id",
+        "system_dialogue_prompt_id",
+        "fields"
+      ],
+      "properties": {
+        "director_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "world_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "core_prompt_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/Identifier"
+          }
+        },
+        "daily_settlement_prompt_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "dialogue_events_prompt_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "system_dialogue_prompt_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "fields": {
+          "$ref": "#/$defs/FieldValues"
+        }
+      }
+    },
+    "Simulation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state_machines",
+        "initial_machine_bindings",
+        "character_minds",
+        "director_profiles"
+      ],
+      "properties": {
+        "state_machines": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StateMachineDefinition"
+          },
+          "minItems": 1
+        },
+        "initial_machine_bindings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/InitialMachineBinding"
+          },
+          "minItems": 1
+        },
+        "character_minds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CharacterMindProfile"
+          }
+        },
+        "director_profiles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DirectorProfile"
+          },
+          "minItems": 1
+        }
+      }
+    },
+    "EventBudgetPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "daily_capacity",
+        "card_cost_resolver",
+        "cost_parameters"
+      ],
+      "properties": {
+        "daily_capacity": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "card_cost_resolver": {
+          "$ref": "#/$defs/PluginOperationRef"
+        },
+        "cost_parameters": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        }
+      }
+    }
+  }
+}

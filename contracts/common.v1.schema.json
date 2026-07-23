@@ -1,0 +1,515 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.luoxia.engine/contracts/common.v1.schema.json",
+  "title": "Luoxia Common Contract v1",
+  "type": "object",
+  "additionalProperties": false,
+  "$defs": {
+    "Identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$"
+    },
+    "NamespacedIdentifier": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 160,
+      "pattern": "^[a-z][a-z0-9_-]*(?:\\.[a-z][a-z0-9_-]*)+$"
+    },
+    "Uuid": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "SemVer": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+    },
+    "Sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "Digest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "value"
+      ],
+      "properties": {
+        "algorithm": {
+          "const": "sha256"
+        },
+        "value": {
+          "$ref": "#/$defs/Sha256"
+        }
+      }
+    },
+    "LocalizedText": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "pattern": "^[a-z]{2,3}(?:-[A-Z][a-z]{3})?(?:-[A-Z]{2}|-[0-9]{3})?$"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 20000
+      }
+    },
+    "JsonObject": {
+      "type": "object"
+    },
+    "JsonValue": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JsonValue"
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          }
+        }
+      ]
+    },
+    "PackLock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pack_id",
+        "pack_version",
+        "bundle_digest"
+      ],
+      "properties": {
+        "pack_id": {
+          "$ref": "#/$defs/NamespacedIdentifier"
+        },
+        "pack_version": {
+          "$ref": "#/$defs/SemVer"
+        },
+        "bundle_digest": {
+          "$ref": "#/$defs/Sha256"
+        }
+      }
+    },
+    "PluginLock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "plugin_id",
+        "api_version",
+        "implementation_digest"
+      ],
+      "properties": {
+        "plugin_id": {
+          "$ref": "#/$defs/NamespacedIdentifier"
+        },
+        "api_version": {
+          "$ref": "#/$defs/SemVer"
+        },
+        "implementation_digest": {
+          "$ref": "#/$defs/Sha256"
+        }
+      }
+    },
+    "StageModuleLock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "module_id",
+        "api_version",
+        "implementation_version",
+        "implementation_digest",
+        "gdjs_version"
+      ],
+      "properties": {
+        "module_id": {
+          "$ref": "#/$defs/NamespacedIdentifier"
+        },
+        "api_version": {
+          "$ref": "#/$defs/SemVer"
+        },
+        "implementation_version": {
+          "$ref": "#/$defs/SemVer"
+        },
+        "implementation_digest": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "gdjs_version": {
+          "$ref": "#/$defs/SemVer"
+        }
+      }
+    },
+    "StaticDefinitionRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "bundle_id",
+        "bundle_digest",
+        "local_id"
+      ],
+      "properties": {
+        "kind": {
+          "const": "static"
+        },
+        "bundle_id": {
+          "$ref": "#/$defs/NamespacedIdentifier"
+        },
+        "bundle_digest": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "local_id": {
+          "$ref": "#/$defs/Identifier"
+        }
+      }
+    },
+    "DynamicDefinitionRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "world_id",
+        "definition_id",
+        "revision"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dynamic"
+        },
+        "world_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "definition_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "DefinitionRef": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/StaticDefinitionRef"
+        },
+        {
+          "$ref": "#/$defs/DynamicDefinitionRef"
+        }
+      ]
+    },
+    "EntityRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "world_id",
+        "entity_id"
+      ],
+      "properties": {
+        "world_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "entity_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "expected_revision": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "SubjectRef": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "entity"
+          ],
+          "properties": {
+            "kind": {
+              "const": "entity"
+            },
+            "entity": {
+              "$ref": "#/$defs/EntityRef"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "definition"
+          ],
+          "properties": {
+            "kind": {
+              "const": "definition"
+            },
+            "definition": {
+              "$ref": "#/$defs/DefinitionRef"
+            }
+          }
+        }
+      ]
+    },
+    "RuleRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bundle_id",
+        "bundle_digest",
+        "rule_id"
+      ],
+      "properties": {
+        "bundle_id": {
+          "$ref": "#/$defs/NamespacedIdentifier"
+        },
+        "bundle_digest": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "rule_id": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "arguments": {
+          "$ref": "#/$defs/JsonObject"
+        }
+      }
+    },
+    "AssetContentRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "content_hash",
+        "media_type"
+      ],
+      "properties": {
+        "content_hash": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "media_type": {
+          "type": "string",
+          "pattern": "^[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+$"
+        }
+      }
+    },
+    "Visibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope"
+      ],
+      "properties": {
+        "scope": {
+          "enum": [
+            "private",
+            "owner",
+            "known_to",
+            "public"
+          ]
+        },
+        "actor_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/Uuid"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "scope": {
+                "const": "known_to"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "actor_ids"
+            ],
+            "properties": {
+              "actor_ids": {
+                "minItems": 1
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "actor_ids": {
+                "maxItems": 0
+              }
+            }
+          }
+        }
+      ]
+    },
+    "Provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "origin_kind",
+        "origin_id",
+        "created_at"
+      ],
+      "properties": {
+        "origin_kind": {
+          "enum": [
+            "content_bundle",
+            "player_action",
+            "system_plan",
+            "rule_plugin",
+            "stage_outcome",
+            "model_proposal",
+            "migration",
+            "operator"
+          ]
+        },
+        "origin_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "actor_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "parent_event_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/Uuid"
+          }
+        }
+      }
+    },
+    "LogicalTime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "clock_id",
+        "tick"
+      ],
+      "properties": {
+        "clock_id": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "tick": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "calendar_label": {
+          "type": "string",
+          "maxLength": 256
+        }
+      }
+    },
+    "DeterministicContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "context_id",
+        "issuer",
+        "context_digest",
+        "issuer_token",
+        "logical_time",
+        "random_choices",
+        "external_results"
+      ],
+      "properties": {
+        "context_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "issuer": {
+          "const": "world_core"
+        },
+        "context_digest": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "issuer_token": {
+          "type": "string",
+          "minLength": 32,
+          "maxLength": 512
+        },
+        "logical_time": {
+          "$ref": "#/$defs/LogicalTime"
+        },
+        "random_choices": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "choice_id",
+              "option_id",
+              "entropy_commitment"
+            ],
+            "properties": {
+              "choice_id": {
+                "$ref": "#/$defs/Identifier"
+              },
+              "option_id": {
+                "$ref": "#/$defs/Identifier"
+              },
+              "entropy_commitment": {
+                "$ref": "#/$defs/Sha256"
+              }
+            }
+          }
+        },
+        "external_results": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "result_id",
+              "content_digest",
+              "payload"
+            ],
+            "properties": {
+              "result_id": {
+                "$ref": "#/$defs/Identifier"
+              },
+              "content_digest": {
+                "$ref": "#/$defs/Sha256"
+              },
+              "payload": {
+                "$ref": "#/$defs/JsonValue"
+              }
+            }
+          }
+        }
+      }
+    },
+    "DayNumber": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "DayDuration": {
+      "type": "integer",
+      "minimum": 1
+    }
+  }
+}

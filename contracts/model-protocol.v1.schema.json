@@ -1,0 +1,1095 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.luoxia.engine/contracts/model-protocol.v1.schema.json",
+  "title": "Luoxia Model Protocol v1",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/ModelRequest"
+    },
+    {
+      "$ref": "#/$defs/ModelResponse"
+    }
+  ],
+  "$defs": {
+    "KnowledgeView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "viewer_entity_id",
+        "facts",
+        "memories"
+      ],
+      "properties": {
+        "viewer_entity_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "facts": {
+          "type": "array",
+          "items": {
+            "$ref": "world-runtime.v1.schema.json#/$defs/FactRecord"
+          }
+        },
+        "memories": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "memory_id",
+              "source_event_id",
+              "summary",
+              "salience"
+            ],
+            "properties": {
+              "memory_id": {
+                "$ref": "common.v1.schema.json#/$defs/Uuid"
+              },
+              "source_event_id": {
+                "$ref": "common.v1.schema.json#/$defs/Uuid"
+              },
+              "summary": {
+                "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+              },
+              "salience": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    "DirectorActorView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entity_id",
+        "objective_components",
+        "relations"
+      ],
+      "properties": {
+        "entity_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "location": {
+          "$ref": "common.v1.schema.json#/$defs/SubjectRef"
+        },
+        "objective_components": {
+          "type": "array",
+          "items": {
+            "$ref": "world-runtime.v1.schema.json#/$defs/ComponentValue"
+          }
+        },
+        "relations": {
+          "type": "array",
+          "items": {
+            "$ref": "world-runtime.v1.schema.json#/$defs/RelationState"
+          }
+        },
+        "action_machine": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/StateMachineInstanceState"
+        }
+      }
+    },
+    "DirectorWorldView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "day",
+        "actors",
+        "world_machines",
+        "facts"
+      ],
+      "properties": {
+        "day": {
+          "$ref": "common.v1.schema.json#/$defs/DayNumber"
+        },
+        "actors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DirectorActorView"
+          }
+        },
+        "world_machines": {
+          "type": "array",
+          "items": {
+            "$ref": "world-runtime.v1.schema.json#/$defs/StateMachineInstanceState"
+          }
+        },
+        "facts": {
+          "type": "array",
+          "items": {
+            "$ref": "world-runtime.v1.schema.json#/$defs/FactRecord"
+          }
+        }
+      }
+    },
+    "ObjectiveTraceEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "trace_id",
+        "day",
+        "event_type",
+        "subjects",
+        "payload",
+        "visibility"
+      ],
+      "properties": {
+        "trace_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "day": {
+          "$ref": "common.v1.schema.json#/$defs/DayNumber"
+        },
+        "event_type": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "subjects": {
+          "type": "array",
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/SubjectRef"
+          }
+        },
+        "payload": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        },
+        "visibility": {
+          "$ref": "common.v1.schema.json#/$defs/Visibility"
+        }
+      }
+    },
+    "CharacterSubjectiveView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "character",
+        "knowledge_view",
+        "action_machine"
+      ],
+      "properties": {
+        "character": {
+          "$ref": "common.v1.schema.json#/$defs/EntityRef"
+        },
+        "knowledge_view": {
+          "$ref": "#/$defs/KnowledgeView"
+        },
+        "action_machine": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/StateMachineInstanceState"
+        }
+      }
+    },
+    "DirectorDailySettlementInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "world_view",
+        "objective_traces"
+      ],
+      "properties": {
+        "world_view": {
+          "$ref": "#/$defs/DirectorWorldView"
+        },
+        "objective_traces": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ObjectiveTraceEntry"
+          }
+        }
+      }
+    },
+    "DirectorDialogueEventsInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "world_view",
+        "dialogue"
+      ],
+      "properties": {
+        "world_view": {
+          "$ref": "#/$defs/DirectorWorldView"
+        },
+        "dialogue": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/DialogueRecord"
+        }
+      }
+    },
+    "CharacterDialogueInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "subjective_view",
+        "dialogue",
+        "latest_player_turn_id"
+      ],
+      "properties": {
+        "subjective_view": {
+          "$ref": "#/$defs/CharacterSubjectiveView"
+        },
+        "dialogue": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/DialogueRecord"
+        },
+        "latest_player_turn_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        }
+      }
+    },
+    "CharacterReactInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "subjective_view",
+        "events"
+      ],
+      "properties": {
+        "subjective_view": {
+          "$ref": "#/$defs/CharacterSubjectiveView"
+        },
+        "events": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "world-runtime.v1.schema.json#/$defs/CharacterEventStimulus"
+          }
+        }
+      }
+    },
+    "DialogueReplyDraft": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "locale",
+        "text"
+      ],
+      "properties": {
+        "locale": {
+          "type": "string",
+          "pattern": "^[a-z]{2,3}(?:-[A-Z]{2})?$"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000
+        },
+        "emotion_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        }
+      }
+    },
+    "ModelInput": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/DirectorDailySettlementInput"
+        },
+        {
+          "$ref": "#/$defs/DirectorDialogueEventsInput"
+        },
+        {
+          "$ref": "#/$defs/DirectorSystemDialogueInput"
+        },
+        {
+          "$ref": "#/$defs/CharacterDialogueInput"
+        },
+        {
+          "$ref": "#/$defs/CharacterReactInput"
+        }
+      ]
+    },
+    "ModelOutput": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "output_kind",
+            "automatic_events"
+          ],
+          "properties": {
+            "output_kind": {
+              "const": "director.daily_settlement"
+            },
+            "automatic_events": {
+              "type": "array",
+              "items": {
+                "$ref": "world-runtime.v1.schema.json#/$defs/AutomaticEventProposal"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "output_kind",
+            "event_cards"
+          ],
+          "properties": {
+            "output_kind": {
+              "const": "director.dialogue_events"
+            },
+            "event_cards": {
+              "type": "array",
+              "items": {
+                "$ref": "world-runtime.v1.schema.json#/$defs/EventCardProposal"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "output_kind",
+            "reply",
+            "event_cards",
+            "goal_plans",
+            "definitions"
+          ],
+          "properties": {
+            "output_kind": {
+              "const": "director.system_dialogue"
+            },
+            "reply": {
+              "$ref": "#/$defs/DialogueReplyDraft"
+            },
+            "event_cards": {
+              "type": "array",
+              "items": {
+                "$ref": "world-runtime.v1.schema.json#/$defs/EventCardProposal"
+              }
+            },
+            "goal_plans": {
+              "type": "array",
+              "items": {
+                "$ref": "world-runtime.v1.schema.json#/$defs/GoalPlanProposal"
+              }
+            },
+            "definitions": {
+              "type": "array",
+              "items": {
+                "$ref": "world-runtime.v1.schema.json#/$defs/DynamicDefinitionProposal"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "output_kind",
+            "reply",
+            "commitments"
+          ],
+          "properties": {
+            "output_kind": {
+              "const": "character.dialogue"
+            },
+            "reply": {
+              "$ref": "#/$defs/DialogueReplyDraft"
+            },
+            "commitments": {
+              "type": "array",
+              "items": {
+                "$ref": "world-runtime.v1.schema.json#/$defs/AgencyCommitmentDraft"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "output_kind",
+            "reactions"
+          ],
+          "properties": {
+            "output_kind": {
+              "const": "character.react"
+            },
+            "reactions": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "world-runtime.v1.schema.json#/$defs/CharacterReactionProposal"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "output_kind",
+            "code",
+            "message"
+          ],
+          "properties": {
+            "output_kind": {
+              "const": "failed"
+            },
+            "code": {
+              "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+            },
+            "message": {
+              "type": "string",
+              "maxLength": 4000
+            }
+          }
+        }
+      ]
+    },
+    "ModelRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "record_type",
+        "request_id",
+        "request_kind",
+        "model_profile_id",
+        "basis_revision",
+        "resident_context",
+        "dynamic_input_digest",
+        "input"
+      ],
+      "properties": {
+        "contract_version": {
+          "const": "model-protocol.v1"
+        },
+        "record_type": {
+          "const": "model.request"
+        },
+        "request_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "model_profile_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "basis_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "resident_context": {
+          "$ref": "#/$defs/ResidentContextRef"
+        },
+        "dynamic_input_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "input": {
+          "$ref": "#/$defs/ModelInput"
+        },
+        "request_kind": {
+          "$ref": "#/$defs/ModelOperationKind"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "request_kind": {
+                "const": "director.daily_settlement"
+              }
+            },
+            "required": [
+              "request_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "input": {
+                "$ref": "#/$defs/DirectorDailySettlementInput"
+              },
+              "resident_context": {
+                "properties": {
+                  "context_kind": {
+                    "const": "director"
+                  },
+                  "mode": {
+                    "const": "daily_settlement"
+                  }
+                },
+                "required": [
+                  "context_kind",
+                  "mode"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "request_kind": {
+                "const": "director.dialogue_events"
+              }
+            },
+            "required": [
+              "request_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "input": {
+                "$ref": "#/$defs/DirectorDialogueEventsInput"
+              },
+              "resident_context": {
+                "properties": {
+                  "context_kind": {
+                    "const": "director"
+                  },
+                  "mode": {
+                    "const": "dialogue_events"
+                  }
+                },
+                "required": [
+                  "context_kind",
+                  "mode"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "request_kind": {
+                "const": "director.system_dialogue"
+              }
+            },
+            "required": [
+              "request_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "input": {
+                "$ref": "#/$defs/DirectorSystemDialogueInput"
+              },
+              "resident_context": {
+                "properties": {
+                  "context_kind": {
+                    "const": "director"
+                  },
+                  "mode": {
+                    "const": "system_dialogue"
+                  }
+                },
+                "required": [
+                  "context_kind",
+                  "mode"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "request_kind": {
+                "const": "character.dialogue"
+              }
+            },
+            "required": [
+              "request_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "input": {
+                "$ref": "#/$defs/CharacterDialogueInput"
+              },
+              "resident_context": {
+                "properties": {
+                  "context_kind": {
+                    "const": "character"
+                  },
+                  "mode": {
+                    "const": "dialogue"
+                  }
+                },
+                "required": [
+                  "context_kind",
+                  "mode"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "request_kind": {
+                "const": "character.react"
+              }
+            },
+            "required": [
+              "request_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "input": {
+                "$ref": "#/$defs/CharacterReactInput"
+              },
+              "resident_context": {
+                "properties": {
+                  "context_kind": {
+                    "const": "character"
+                  },
+                  "mode": {
+                    "const": "react"
+                  }
+                },
+                "required": [
+                  "context_kind",
+                  "mode"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "ModelResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "record_type",
+        "request_id",
+        "dynamic_input_digest",
+        "resident_context_digest",
+        "request_kind",
+        "basis_revision",
+        "output_digest",
+        "output"
+      ],
+      "properties": {
+        "contract_version": {
+          "const": "model-protocol.v1"
+        },
+        "record_type": {
+          "const": "model.response"
+        },
+        "request_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "basis_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "output_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "output": {
+          "$ref": "#/$defs/ModelOutput"
+        },
+        "request_kind": {
+          "$ref": "#/$defs/ModelOperationKind"
+        },
+        "resident_context_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "dynamic_input_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "request_kind": {
+                "const": "director.daily_settlement"
+              }
+            },
+            "required": [
+              "request_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "output": {
+                "type": "object",
+                "required": [
+                  "output_kind"
+                ],
+                "properties": {
+                  "output_kind": {
+                    "enum": [
+                      "director.daily_settlement",
+                      "failed"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "request_kind": {
+                "const": "director.dialogue_events"
+              }
+            },
+            "required": [
+              "request_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "output": {
+                "type": "object",
+                "required": [
+                  "output_kind"
+                ],
+                "properties": {
+                  "output_kind": {
+                    "enum": [
+                      "director.dialogue_events",
+                      "failed"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "request_kind": {
+                "const": "director.system_dialogue"
+              }
+            },
+            "required": [
+              "request_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "output": {
+                "type": "object",
+                "required": [
+                  "output_kind"
+                ],
+                "properties": {
+                  "output_kind": {
+                    "enum": [
+                      "director.system_dialogue",
+                      "failed"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "request_kind": {
+                "const": "character.dialogue"
+              }
+            },
+            "required": [
+              "request_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "output": {
+                "type": "object",
+                "required": [
+                  "output_kind"
+                ],
+                "properties": {
+                  "output_kind": {
+                    "enum": [
+                      "character.dialogue",
+                      "failed"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "request_kind": {
+                "const": "character.react"
+              }
+            },
+            "required": [
+              "request_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "output": {
+                "type": "object",
+                "required": [
+                  "output_kind"
+                ],
+                "properties": {
+                  "output_kind": {
+                    "enum": [
+                      "character.react",
+                      "failed"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "CacheBlockRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "block_id",
+        "block_revision",
+        "content_digest"
+      ],
+      "properties": {
+        "block_id": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "block_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "content_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        }
+      }
+    },
+    "EventInvocationContextRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "context_id",
+        "context_revision",
+        "context_digest",
+        "event_contract_digest",
+        "content_bundle_digest",
+        "capability_catalog_digest",
+        "world_law_catalog_digest"
+      ],
+      "properties": {
+        "context_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "context_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "context_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "event_contract_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "content_bundle_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "capability_catalog_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "world_law_catalog_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        }
+      }
+    },
+    "DirectorResidentContextRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "context_kind",
+        "resident_key",
+        "resident_revision",
+        "resident_digest",
+        "director_id",
+        "common_blocks",
+        "event_context",
+        "mode",
+        "mode_block"
+      ],
+      "properties": {
+        "context_kind": {
+          "const": "director"
+        },
+        "resident_key": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "resident_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "resident_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "director_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "common_blocks": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/CacheBlockRef"
+          }
+        },
+        "event_context": {
+          "$ref": "#/$defs/EventInvocationContextRef"
+        },
+        "mode": {
+          "enum": [
+            "daily_settlement",
+            "dialogue_events",
+            "system_dialogue"
+          ]
+        },
+        "mode_block": {
+          "$ref": "#/$defs/CacheBlockRef"
+        }
+      }
+    },
+    "CharacterResidentContextRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "context_kind",
+        "resident_key",
+        "resident_revision",
+        "resident_digest",
+        "entity_id",
+        "mind_profile",
+        "common_blocks",
+        "persona_blocks",
+        "mode",
+        "mode_block"
+      ],
+      "properties": {
+        "context_kind": {
+          "const": "character"
+        },
+        "resident_key": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "resident_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "resident_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "entity_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "mind_profile": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/CharacterMindCatalogRef"
+        },
+        "common_blocks": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/CacheBlockRef"
+          }
+        },
+        "persona_blocks": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/CacheBlockRef"
+          }
+        },
+        "mode": {
+          "enum": [
+            "dialogue",
+            "react"
+          ]
+        },
+        "mode_block": {
+          "$ref": "#/$defs/CacheBlockRef"
+        }
+      }
+    },
+    "ResidentContextRef": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/DirectorResidentContextRef"
+        },
+        {
+          "$ref": "#/$defs/CharacterResidentContextRef"
+        }
+      ]
+    },
+    "DirectorSystemDialogueInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "world_view",
+        "knowledge_view",
+        "dialogue"
+      ],
+      "properties": {
+        "world_view": {
+          "$ref": "#/$defs/DirectorWorldView"
+        },
+        "knowledge_view": {
+          "$ref": "#/$defs/KnowledgeView"
+        },
+        "dialogue": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/DialogueRecord"
+        }
+      }
+    },
+    "ModelOperationKind": {
+      "enum": [
+        "director.daily_settlement",
+        "director.dialogue_events",
+        "director.system_dialogue",
+        "character.dialogue",
+        "character.react"
+      ]
+    },
+    "VerifiedModelOutputRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "request_kind",
+        "basis_revision",
+        "resident_context_digest",
+        "dynamic_input_digest",
+        "output_digest"
+      ],
+      "properties": {
+        "request_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "request_kind": {
+          "$ref": "#/$defs/ModelOperationKind"
+        },
+        "basis_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "resident_context_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "dynamic_input_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "output_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        }
+      }
+    }
+  }
+}

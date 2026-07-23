@@ -1,0 +1,5009 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.luoxia.engine/contracts/world-runtime.v1.schema.json",
+  "title": "Luoxia World Runtime Contract v1",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/ContentPacket"
+    },
+    {
+      "$ref": "#/$defs/ApplyPacketResult"
+    },
+    {
+      "$ref": "#/$defs/CommittedEvent"
+    },
+    {
+      "$ref": "#/$defs/GoalPlan"
+    },
+    {
+      "$ref": "#/$defs/SessionView"
+    },
+    {
+      "$ref": "#/$defs/SaveEnvelope"
+    }
+  ],
+  "$defs": {
+    "CatalogRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bundle_id",
+        "bundle_digest",
+        "catalog_kind",
+        "local_id"
+      ],
+      "properties": {
+        "bundle_id": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "bundle_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "catalog_kind": {
+          "enum": [
+            "definition_type",
+            "component_type",
+            "relation_type",
+            "capability",
+            "world_law",
+            "generation_archetype",
+            "art_profile",
+            "materialization_profile",
+            "state_machine",
+            "character_mind"
+          ]
+        },
+        "local_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        }
+      }
+    },
+    "ComponentValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "component_type",
+        "ordinal",
+        "value"
+      ],
+      "properties": {
+        "component_type": {
+          "$ref": "#/$defs/ComponentTypeCatalogRef"
+        },
+        "ordinal": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "value": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        }
+      }
+    },
+    "PacketPrecondition": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "revision"
+          ],
+          "properties": {
+            "kind": {
+              "const": "world.revision_is"
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "entity_id",
+            "revision"
+          ],
+          "properties": {
+            "kind": {
+              "const": "entity.revision_is"
+            },
+            "entity_id": {
+              "$ref": "common.v1.schema.json#/$defs/Uuid"
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "definition_id",
+            "revision"
+          ],
+          "properties": {
+            "kind": {
+              "const": "definition.revision_is"
+            },
+            "definition_id": {
+              "$ref": "common.v1.schema.json#/$defs/Uuid"
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "subject",
+            "component_type",
+            "ordinal",
+            "value_digest"
+          ],
+          "properties": {
+            "kind": {
+              "const": "component.value_digest_is"
+            },
+            "subject": {
+              "$ref": "common.v1.schema.json#/$defs/SubjectRef"
+            },
+            "component_type": {
+              "$ref": "#/$defs/ComponentTypeCatalogRef"
+            },
+            "ordinal": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "value_digest": {
+              "$ref": "common.v1.schema.json#/$defs/Sha256"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "relation_id",
+            "exists"
+          ],
+          "properties": {
+            "kind": {
+              "const": "relation.exists"
+            },
+            "relation_id": {
+              "$ref": "common.v1.schema.json#/$defs/Uuid"
+            },
+            "exists": {
+              "type": "boolean"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "ledger_id",
+            "account",
+            "minimum_amount"
+          ],
+          "properties": {
+            "kind": {
+              "const": "ledger.balance_at_least"
+            },
+            "ledger_id": {
+              "$ref": "common.v1.schema.json#/$defs/Identifier"
+            },
+            "account": {
+              "$ref": "common.v1.schema.json#/$defs/SubjectRef"
+            },
+            "minimum_amount": {
+              "$ref": "#/$defs/DecimalString"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "rule"
+          ],
+          "properties": {
+            "kind": {
+              "const": "rule.holds"
+            },
+            "rule": {
+              "$ref": "common.v1.schema.json#/$defs/RuleRef"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "stage_instance_id",
+            "revision"
+          ],
+          "properties": {
+            "kind": {
+              "const": "stage.revision_is"
+            },
+            "stage_instance_id": {
+              "$ref": "common.v1.schema.json#/$defs/Uuid"
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "day",
+            "phase"
+          ],
+          "properties": {
+            "kind": {
+              "const": "day_cycle.is"
+            },
+            "day": {
+              "$ref": "common.v1.schema.json#/$defs/DayNumber"
+            },
+            "phase": {
+              "enum": [
+                "autonomous",
+                "director_settlement",
+                "player"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "event_card_id",
+            "status"
+          ],
+          "properties": {
+            "kind": {
+              "const": "event_card.status_is"
+            },
+            "event_card_id": {
+              "$ref": "common.v1.schema.json#/$defs/Uuid"
+            },
+            "status": {
+              "enum": [
+                "available",
+                "triggered",
+                "expired",
+                "invalidated"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "commitment"
+          ],
+          "properties": {
+            "kind": {
+              "const": "agency.commitment_valid"
+            },
+            "commitment": {
+              "$ref": "#/$defs/AgencyCommitmentRef"
+            }
+          }
+        }
+      ]
+    },
+    "DecimalString": {
+      "type": "string",
+      "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"
+    },
+    "EffectOp": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/DefinitionRegisterOp"
+        },
+        {
+          "$ref": "#/$defs/DefinitionRetireOp"
+        },
+        {
+          "$ref": "#/$defs/EntityCreateOp"
+        },
+        {
+          "$ref": "#/$defs/EntityRetireOp"
+        },
+        {
+          "$ref": "#/$defs/ComponentReplaceOp"
+        },
+        {
+          "$ref": "#/$defs/ComponentRemoveOp"
+        },
+        {
+          "$ref": "#/$defs/RelationUpsertOp"
+        },
+        {
+          "$ref": "#/$defs/RelationRemoveOp"
+        },
+        {
+          "$ref": "#/$defs/LedgerPostOp"
+        },
+        {
+          "$ref": "#/$defs/EntityRelocateOp"
+        },
+        {
+          "$ref": "#/$defs/KnowledgeRecordOp"
+        },
+        {
+          "$ref": "#/$defs/MemoryAppendOp"
+        },
+        {
+          "$ref": "#/$defs/ScheduleUpsertOp"
+        },
+        {
+          "$ref": "#/$defs/ScheduleCancelOp"
+        },
+        {
+          "$ref": "#/$defs/ClockAdvanceOp"
+        },
+        {
+          "$ref": "#/$defs/StageOpenOp"
+        },
+        {
+          "$ref": "#/$defs/StageUpdateOp"
+        },
+        {
+          "$ref": "#/$defs/StageCloseOp"
+        },
+        {
+          "$ref": "#/$defs/GoalPlanUpsertOp"
+        },
+        {
+          "$ref": "#/$defs/GoalPlanCancelOp"
+        },
+        {
+          "$ref": "#/$defs/MaterializationRequestOp"
+        },
+        {
+          "$ref": "#/$defs/VisualBindingUpsertOp"
+        },
+        {
+          "$ref": "#/$defs/DomainEventEmitOp"
+        },
+        {
+          "$ref": "#/$defs/ControlBindingUpsertOp"
+        },
+        {
+          "$ref": "#/$defs/DayCycleTransitionOp"
+        },
+        {
+          "$ref": "#/$defs/StateMachineCreateOp"
+        },
+        {
+          "$ref": "#/$defs/StateMachineSetStateOp"
+        },
+        {
+          "$ref": "#/$defs/DialogueOpenOp"
+        },
+        {
+          "$ref": "#/$defs/DialogueTurnAppendOp"
+        },
+        {
+          "$ref": "#/$defs/DialogueCloseOp"
+        },
+        {
+          "$ref": "#/$defs/EventCardPublishOp"
+        },
+        {
+          "$ref": "#/$defs/EventCardTriggerOp"
+        },
+        {
+          "$ref": "#/$defs/EventCardInvalidateOp"
+        },
+        {
+          "$ref": "#/$defs/EventCardExpireOp"
+        },
+        {
+          "$ref": "#/$defs/EventBudgetOpenOp"
+        }
+      ]
+    },
+    "DefinitionRegisterOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "definition_id",
+        "definition_type",
+        "name",
+        "components",
+        "provenance"
+      ],
+      "properties": {
+        "op": {
+          "const": "definition.register"
+        },
+        "definition_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "definition_type": {
+          "$ref": "#/$defs/DefinitionTypeCatalogRef"
+        },
+        "name": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "summary": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "components": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ComponentValue"
+          }
+        },
+        "provenance": {
+          "$ref": "common.v1.schema.json#/$defs/Provenance"
+        }
+      }
+    },
+    "DefinitionRetireOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "definition",
+        "reason_code"
+      ],
+      "properties": {
+        "op": {
+          "const": "definition.retire"
+        },
+        "definition": {
+          "$ref": "common.v1.schema.json#/$defs/DynamicDefinitionRef"
+        },
+        "reason_code": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        }
+      }
+    },
+    "EntityCreateOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "entity_id",
+        "archetype",
+        "name",
+        "components",
+        "provenance"
+      ],
+      "properties": {
+        "op": {
+          "const": "entity.create"
+        },
+        "entity_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "archetype": {
+          "$ref": "common.v1.schema.json#/$defs/DefinitionRef"
+        },
+        "name": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "summary": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "components": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ComponentValue"
+          }
+        },
+        "provenance": {
+          "$ref": "common.v1.schema.json#/$defs/Provenance"
+        }
+      }
+    },
+    "EntityRetireOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "entity",
+        "reason_code"
+      ],
+      "properties": {
+        "op": {
+          "const": "entity.retire"
+        },
+        "entity": {
+          "$ref": "common.v1.schema.json#/$defs/EntityRef"
+        },
+        "reason_code": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        }
+      }
+    },
+    "ComponentReplaceOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "subject",
+        "component_type",
+        "ordinal",
+        "value"
+      ],
+      "properties": {
+        "op": {
+          "const": "component.replace"
+        },
+        "subject": {
+          "$ref": "common.v1.schema.json#/$defs/SubjectRef"
+        },
+        "component_type": {
+          "$ref": "#/$defs/ComponentTypeCatalogRef"
+        },
+        "ordinal": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "value": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        }
+      }
+    },
+    "ComponentRemoveOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "subject",
+        "component_type",
+        "ordinal"
+      ],
+      "properties": {
+        "op": {
+          "const": "component.remove"
+        },
+        "subject": {
+          "$ref": "common.v1.schema.json#/$defs/SubjectRef"
+        },
+        "component_type": {
+          "$ref": "#/$defs/ComponentTypeCatalogRef"
+        },
+        "ordinal": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "RelationUpsertOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "relation_id",
+        "relation_type",
+        "from",
+        "to",
+        "data",
+        "visibility",
+        "provenance"
+      ],
+      "properties": {
+        "op": {
+          "const": "relation.upsert"
+        },
+        "relation_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "relation_type": {
+          "$ref": "#/$defs/RelationTypeCatalogRef"
+        },
+        "from": {
+          "$ref": "common.v1.schema.json#/$defs/SubjectRef"
+        },
+        "to": {
+          "$ref": "common.v1.schema.json#/$defs/SubjectRef"
+        },
+        "data": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        },
+        "visibility": {
+          "$ref": "common.v1.schema.json#/$defs/Visibility"
+        },
+        "provenance": {
+          "$ref": "common.v1.schema.json#/$defs/Provenance"
+        }
+      }
+    },
+    "RelationRemoveOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "relation_id",
+        "reason_code"
+      ],
+      "properties": {
+        "op": {
+          "const": "relation.remove"
+        },
+        "relation_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "reason_code": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        }
+      }
+    },
+    "LedgerPostOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "ledger_id",
+        "transaction_id",
+        "unit_definition",
+        "entries",
+        "memo"
+      ],
+      "properties": {
+        "op": {
+          "const": "ledger.post"
+        },
+        "ledger_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "transaction_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "unit_definition": {
+          "$ref": "common.v1.schema.json#/$defs/DefinitionRef"
+        },
+        "entries": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "account",
+              "amount"
+            ],
+            "properties": {
+              "account": {
+                "$ref": "common.v1.schema.json#/$defs/SubjectRef"
+              },
+              "amount": {
+                "$ref": "#/$defs/DecimalString"
+              }
+            }
+          }
+        },
+        "memo": {
+          "type": "string",
+          "maxLength": 2000
+        }
+      }
+    },
+    "EntityRelocateOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "entity",
+        "destination",
+        "location_relation_type",
+        "mode"
+      ],
+      "properties": {
+        "op": {
+          "const": "entity.relocate"
+        },
+        "entity": {
+          "$ref": "common.v1.schema.json#/$defs/EntityRef"
+        },
+        "destination": {
+          "$ref": "common.v1.schema.json#/$defs/EntityRef"
+        },
+        "location_relation_type": {
+          "$ref": "#/$defs/RelationTypeCatalogRef"
+        },
+        "mode": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        }
+      }
+    },
+    "FactRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fact_id",
+        "claim_type",
+        "claim",
+        "visibility",
+        "provenance"
+      ],
+      "properties": {
+        "fact_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "claim_type": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "claim": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        },
+        "visibility": {
+          "$ref": "common.v1.schema.json#/$defs/Visibility"
+        },
+        "provenance": {
+          "$ref": "common.v1.schema.json#/$defs/Provenance"
+        }
+      }
+    },
+    "KnowledgeRecordOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "knower",
+        "fact",
+        "confidence"
+      ],
+      "properties": {
+        "op": {
+          "const": "knowledge.record"
+        },
+        "knower": {
+          "$ref": "common.v1.schema.json#/$defs/EntityRef"
+        },
+        "fact": {
+          "$ref": "#/$defs/FactRecord"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "MemoryAppendOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "actor",
+        "memory_id",
+        "source_event_id",
+        "summary",
+        "salience",
+        "visibility"
+      ],
+      "properties": {
+        "op": {
+          "const": "memory.append"
+        },
+        "actor": {
+          "$ref": "common.v1.schema.json#/$defs/EntityRef"
+        },
+        "memory_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "source_event_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "summary": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "salience": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "visibility": {
+          "$ref": "common.v1.schema.json#/$defs/Visibility"
+        }
+      }
+    },
+    "ScheduleUpsertOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "schedule_id",
+        "owner",
+        "due",
+        "signal_type",
+        "payload"
+      ],
+      "properties": {
+        "op": {
+          "const": "schedule.upsert"
+        },
+        "schedule_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "owner": {
+          "$ref": "common.v1.schema.json#/$defs/SubjectRef"
+        },
+        "due": {
+          "$ref": "common.v1.schema.json#/$defs/LogicalTime"
+        },
+        "signal_type": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "payload": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        }
+      }
+    },
+    "ScheduleCancelOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "schedule_id",
+        "reason_code"
+      ],
+      "properties": {
+        "op": {
+          "const": "schedule.cancel"
+        },
+        "schedule_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "reason_code": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        }
+      }
+    },
+    "ClockAdvanceOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "clock_id",
+        "from_tick",
+        "to_tick",
+        "reason_code"
+      ],
+      "properties": {
+        "op": {
+          "const": "clock.advance"
+        },
+        "clock_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "from_tick": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "to_tick": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "reason_code": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        }
+      }
+    },
+    "StageOpenOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "stage_instance_id",
+        "stage_module_lock",
+        "scene_id",
+        "participants",
+        "state",
+        "completion_rules"
+      ],
+      "properties": {
+        "op": {
+          "const": "stage.open"
+        },
+        "stage_instance_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "stage_module_lock": {
+          "$ref": "common.v1.schema.json#/$defs/StageModuleLock"
+        },
+        "scene_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "participants": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/EntityRef"
+          }
+        },
+        "state": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        },
+        "completion_rules": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/RuleRef"
+          }
+        }
+      }
+    },
+    "StageUpdateOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "stage_instance_id",
+        "revision",
+        "state",
+        "evidence_digest"
+      ],
+      "properties": {
+        "op": {
+          "const": "stage.update"
+        },
+        "stage_instance_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "state": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        },
+        "evidence_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        }
+      }
+    },
+    "StageCloseOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "stage_instance_id",
+        "revision",
+        "outcome_type",
+        "outcome"
+      ],
+      "properties": {
+        "op": {
+          "const": "stage.close"
+        },
+        "stage_instance_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "outcome_type": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "outcome": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        }
+      }
+    },
+    "GoalPlanUpsertOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "goal_plan",
+        "expected_revision"
+      ],
+      "properties": {
+        "op": {
+          "const": "goal_plan.upsert"
+        },
+        "goal_plan": {
+          "$ref": "#/$defs/GoalPlan"
+        },
+        "expected_revision": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "GoalPlanCancelOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "goal_plan_id",
+        "reason_code"
+      ],
+      "properties": {
+        "op": {
+          "const": "goal_plan.cancel"
+        },
+        "goal_plan_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "reason_code": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        }
+      }
+    },
+    "MaterializationRequestOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "request"
+      ],
+      "properties": {
+        "op": {
+          "const": "materialization.request"
+        },
+        "request": {
+          "$ref": "materialization.v1.schema.json#/$defs/MaterializationRequest"
+        }
+      }
+    },
+    "VisualBindingUpsertOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "binding"
+      ],
+      "properties": {
+        "op": {
+          "const": "visual_binding.upsert"
+        },
+        "binding": {
+          "$ref": "materialization.v1.schema.json#/$defs/VisualBindingDraft"
+        }
+      }
+    },
+    "DomainEventEmitOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "event_type",
+        "subjects",
+        "payload",
+        "visibility"
+      ],
+      "properties": {
+        "op": {
+          "const": "domain_event.emit"
+        },
+        "event_type": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "subjects": {
+          "type": "array",
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/SubjectRef"
+          }
+        },
+        "payload": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        },
+        "visibility": {
+          "$ref": "common.v1.schema.json#/$defs/Visibility"
+        }
+      }
+    },
+    "PacketProposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "proposal_id",
+        "cause_id",
+        "basis_revision",
+        "preconditions",
+        "deterministic_context_id",
+        "deterministic_context_digest",
+        "ops",
+        "proposed_by"
+      ],
+      "properties": {
+        "proposal_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "cause_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "basis_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "preconditions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PacketPrecondition"
+          }
+        },
+        "deterministic_context_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "deterministic_context_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "ops": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/EffectOp"
+          }
+        },
+        "proposed_by": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "plugin_id",
+            "operation_id",
+            "request_id"
+          ],
+          "properties": {
+            "plugin_id": {
+              "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+            },
+            "operation_id": {
+              "$ref": "common.v1.schema.json#/$defs/Identifier"
+            },
+            "request_id": {
+              "$ref": "common.v1.schema.json#/$defs/Uuid"
+            }
+          }
+        }
+      }
+    },
+    "ContentPacket": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "record_type",
+        "packet_id",
+        "cause_id",
+        "world_id",
+        "basis_revision",
+        "preconditions",
+        "deterministic_context",
+        "ops",
+        "source"
+      ],
+      "properties": {
+        "contract_version": {
+          "const": "world-runtime.v1"
+        },
+        "record_type": {
+          "const": "content.packet"
+        },
+        "packet_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "cause_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "world_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "basis_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "preconditions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PacketPrecondition"
+          }
+        },
+        "deterministic_context": {
+          "$ref": "common.v1.schema.json#/$defs/DeterministicContext"
+        },
+        "ops": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/EffectOp"
+          }
+        },
+        "source": {
+          "$ref": "#/$defs/PacketSource"
+        }
+      }
+    },
+    "ApplyPacketResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "record_type",
+        "packet_id",
+        "status",
+        "world_revision"
+      ],
+      "properties": {
+        "contract_version": {
+          "const": "world-runtime.v1"
+        },
+        "record_type": {
+          "const": "apply_packet.result"
+        },
+        "packet_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "status": {
+          "enum": [
+            "committed",
+            "rejected",
+            "duplicate"
+          ]
+        },
+        "world_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "committed_event_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+              },
+              "message": {
+                "type": "string",
+                "maxLength": 4000
+              },
+              "details": {
+                "$ref": "common.v1.schema.json#/$defs/JsonObject"
+              }
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "committed"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "committed_event_id"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "rejected"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "errors"
+            ],
+            "properties": {
+              "errors": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "DomainEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event_type",
+        "subjects",
+        "payload",
+        "visibility"
+      ],
+      "properties": {
+        "event_type": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "subjects": {
+          "type": "array",
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/SubjectRef"
+          }
+        },
+        "payload": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        },
+        "visibility": {
+          "$ref": "common.v1.schema.json#/$defs/Visibility"
+        }
+      }
+    },
+    "CommittedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "record_type",
+        "event_id",
+        "world_id",
+        "revision_before",
+        "revision_after",
+        "committed_at",
+        "packet",
+        "domain_events"
+      ],
+      "properties": {
+        "contract_version": {
+          "const": "world-runtime.v1"
+        },
+        "record_type": {
+          "const": "committed.event"
+        },
+        "event_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "world_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "revision_before": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "revision_after": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "committed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "packet": {
+          "$ref": "#/$defs/ContentPacket"
+        },
+        "domain_events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DomainEvent"
+          }
+        }
+      }
+    },
+    "WorldExtensionRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "goal_node_id",
+        "demand_id",
+        "reason_code"
+      ],
+      "properties": {
+        "request_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "goal_node_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "demand_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "reason_code": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        }
+      }
+    },
+    "GoalNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node_id",
+        "title",
+        "capability_requirement",
+        "arguments",
+        "depends_on",
+        "completion_rules",
+        "alternative_node_ids",
+        "state"
+      ],
+      "properties": {
+        "node_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "title": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "capability_requirement": {
+          "$ref": "#/$defs/CapabilityRequirement"
+        },
+        "arguments": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        },
+        "depends_on": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/Identifier"
+          }
+        },
+        "completion_rules": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/RuleRef"
+          }
+        },
+        "alternative_node_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/Identifier"
+          }
+        },
+        "world_extension": {
+          "$ref": "#/$defs/WorldExtensionRequest"
+        },
+        "state": {
+          "enum": [
+            "blocked",
+            "available",
+            "active",
+            "completed",
+            "failed",
+            "cancelled"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "capability_requirement": {
+                "properties": {
+                  "requirement_kind": {
+                    "const": "demand"
+                  }
+                },
+                "required": [
+                  "requirement_kind"
+                ]
+              }
+            },
+            "required": [
+              "capability_requirement"
+            ]
+          },
+          "then": {
+            "required": [
+              "world_extension"
+            ],
+            "properties": {
+              "state": {
+                "const": "blocked"
+              }
+            }
+          },
+          "else": {
+            "not": {
+              "required": [
+                "world_extension"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "GoalPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "record_type",
+        "plan_id",
+        "world_id",
+        "owner_actor_id",
+        "basis_revision",
+        "goal",
+        "expected_state",
+        "fact_refs",
+        "constraints",
+        "nodes",
+        "knowledge_scope",
+        "status",
+        "provenance",
+        "source_proposal_id",
+        "source_draft_digest",
+        "revision"
+      ],
+      "properties": {
+        "contract_version": {
+          "const": "world-runtime.v1"
+        },
+        "record_type": {
+          "const": "goal.plan"
+        },
+        "plan_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "world_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "owner_actor_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "basis_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "goal": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "expected_state": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        },
+        "fact_refs": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/Uuid"
+          }
+        },
+        "constraints": {
+          "type": "array",
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/RuleRef"
+          }
+        },
+        "nodes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/GoalNode"
+          }
+        },
+        "knowledge_scope": {
+          "enum": [
+            "player_known",
+            "system_discoverable"
+          ]
+        },
+        "status": {
+          "enum": [
+            "active",
+            "completed",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "failure_code": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "provenance": {
+          "$ref": "common.v1.schema.json#/$defs/Provenance"
+        },
+        "source_proposal_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "source_draft_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "RenderNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node_id",
+        "node_kind",
+        "slot_id",
+        "parameters"
+      ],
+      "properties": {
+        "node_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "node_kind": {
+          "enum": [
+            "scene",
+            "portrait",
+            "cg",
+            "overlay",
+            "text",
+            "interaction_anchor"
+          ]
+        },
+        "slot_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "subject": {
+          "$ref": "common.v1.schema.json#/$defs/SubjectRef"
+        },
+        "asset": {
+          "$ref": "common.v1.schema.json#/$defs/AssetContentRef"
+        },
+        "text": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "parameters": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        }
+      }
+    },
+    "GoalPlanView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "plan_id",
+        "goal",
+        "status",
+        "current_steps"
+      ],
+      "properties": {
+        "plan_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "goal": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "status": {
+          "enum": [
+            "active",
+            "completed",
+            "failed",
+            "cancelled",
+            "pending_model"
+          ]
+        },
+        "current_steps": {
+          "type": "array",
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+          }
+        }
+      }
+    },
+    "SessionView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "record_type",
+        "session_id",
+        "view_revision",
+        "basis_token",
+        "player_entity_id",
+        "world_time",
+        "render_nodes",
+        "goal_plans",
+        "notices",
+        "day_cycle",
+        "event_budget",
+        "event_cards",
+        "dialogues"
+      ],
+      "properties": {
+        "contract_version": {
+          "const": "world-runtime.v1"
+        },
+        "record_type": {
+          "const": "session.view"
+        },
+        "session_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "view_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "basis_token": {
+          "type": "string",
+          "minLength": 32,
+          "maxLength": 512
+        },
+        "player_entity_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "world_time": {
+          "$ref": "common.v1.schema.json#/$defs/LogicalTime"
+        },
+        "render_nodes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RenderNode"
+          }
+        },
+        "goal_plans": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GoalPlanView"
+          }
+        },
+        "notices": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "notice_id",
+              "severity",
+              "message"
+            ],
+            "properties": {
+              "notice_id": {
+                "$ref": "common.v1.schema.json#/$defs/Identifier"
+              },
+              "severity": {
+                "enum": [
+                  "info",
+                  "warning",
+                  "error"
+                ]
+              },
+              "message": {
+                "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+              }
+            }
+          }
+        },
+        "day_cycle": {
+          "$ref": "#/$defs/DayCycleState"
+        },
+        "event_cards": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EventCardView"
+          }
+        },
+        "dialogues": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DialogueView"
+          }
+        },
+        "event_budget": {
+          "$ref": "#/$defs/EventBudgetView"
+        }
+      }
+    },
+    "DynamicDefinitionState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "definition_id",
+        "revision",
+        "definition_type",
+        "name",
+        "components",
+        "state",
+        "provenance"
+      ],
+      "properties": {
+        "definition_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "definition_type": {
+          "$ref": "#/$defs/DefinitionTypeCatalogRef"
+        },
+        "name": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "components": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ComponentValue"
+          }
+        },
+        "state": {
+          "enum": [
+            "active",
+            "retired"
+          ]
+        },
+        "provenance": {
+          "$ref": "common.v1.schema.json#/$defs/Provenance"
+        }
+      }
+    },
+    "EntityState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entity_id",
+        "revision",
+        "archetype",
+        "name",
+        "components",
+        "state",
+        "provenance"
+      ],
+      "properties": {
+        "entity_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "archetype": {
+          "$ref": "common.v1.schema.json#/$defs/DefinitionRef"
+        },
+        "name": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "components": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ComponentValue"
+          }
+        },
+        "state": {
+          "enum": [
+            "active",
+            "retired"
+          ]
+        },
+        "provenance": {
+          "$ref": "common.v1.schema.json#/$defs/Provenance"
+        }
+      }
+    },
+    "RelationState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "relation_id",
+        "revision",
+        "relation_type",
+        "from",
+        "to",
+        "data",
+        "visibility",
+        "state",
+        "provenance"
+      ],
+      "properties": {
+        "relation_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "relation_type": {
+          "$ref": "#/$defs/RelationTypeCatalogRef"
+        },
+        "from": {
+          "$ref": "common.v1.schema.json#/$defs/SubjectRef"
+        },
+        "to": {
+          "$ref": "common.v1.schema.json#/$defs/SubjectRef"
+        },
+        "data": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        },
+        "visibility": {
+          "$ref": "common.v1.schema.json#/$defs/Visibility"
+        },
+        "state": {
+          "enum": [
+            "active",
+            "retired"
+          ]
+        },
+        "provenance": {
+          "$ref": "common.v1.schema.json#/$defs/Provenance"
+        }
+      }
+    },
+    "LedgerState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ledger_id",
+        "unit_definition",
+        "balances",
+        "last_transaction_id"
+      ],
+      "properties": {
+        "ledger_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "unit_definition": {
+          "$ref": "common.v1.schema.json#/$defs/DefinitionRef"
+        },
+        "balances": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "account",
+              "amount"
+            ],
+            "properties": {
+              "account": {
+                "$ref": "common.v1.schema.json#/$defs/SubjectRef"
+              },
+              "amount": {
+                "$ref": "#/$defs/DecimalString"
+              }
+            }
+          }
+        },
+        "last_transaction_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        }
+      }
+    },
+    "StageInstanceState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage_instance_id",
+        "revision",
+        "stage_module_lock",
+        "scene_id",
+        "participants",
+        "state",
+        "status",
+        "completion_rules"
+      ],
+      "properties": {
+        "stage_instance_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "stage_module_lock": {
+          "$ref": "common.v1.schema.json#/$defs/StageModuleLock"
+        },
+        "scene_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "participants": {
+          "type": "array",
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/EntityRef"
+          }
+        },
+        "state": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        },
+        "status": {
+          "enum": [
+            "open",
+            "closed"
+          ]
+        },
+        "completion_rules": {
+          "type": "array",
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/RuleRef"
+          }
+        }
+      }
+    },
+    "WorldState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "clock",
+        "dynamic_definitions",
+        "entities",
+        "relations",
+        "ledgers",
+        "facts",
+        "goal_plans",
+        "stage_instances",
+        "visual_bindings",
+        "control_bindings",
+        "day_cycle",
+        "state_machines",
+        "dialogues",
+        "event_budgets",
+        "event_cards"
+      ],
+      "properties": {
+        "clock": {
+          "$ref": "common.v1.schema.json#/$defs/LogicalTime"
+        },
+        "dynamic_definitions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DynamicDefinitionState"
+          }
+        },
+        "entities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EntityState"
+          }
+        },
+        "relations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RelationState"
+          }
+        },
+        "ledgers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LedgerState"
+          }
+        },
+        "facts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactRecord"
+          }
+        },
+        "goal_plans": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GoalPlan"
+          }
+        },
+        "stage_instances": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StageInstanceState"
+          }
+        },
+        "visual_bindings": {
+          "type": "array",
+          "items": {
+            "$ref": "materialization.v1.schema.json#/$defs/VisualBinding"
+          }
+        },
+        "control_bindings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ControlBinding"
+          }
+        },
+        "day_cycle": {
+          "$ref": "#/$defs/DayCycleState"
+        },
+        "state_machines": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StateMachineInstanceState"
+          }
+        },
+        "dialogues": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DialogueRecord"
+          }
+        },
+        "event_cards": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EventCardState"
+          }
+        },
+        "event_budgets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EventBudgetState"
+          }
+        }
+      }
+    },
+    "MigrationHistoryEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "migration_kind",
+        "source",
+        "target",
+        "implementation_digest",
+        "executed_at",
+        "result_digest"
+      ],
+      "properties": {
+        "migration_kind": {
+          "enum": [
+            "save_schema",
+            "content_upgrade"
+          ]
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "target": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "implementation_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "executed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "result_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        }
+      }
+    },
+    "SaveEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "record_type",
+        "save_schema_version",
+        "world_id",
+        "world_revision",
+        "engine_contract_version",
+        "root_bundle_lock",
+        "dependency_bundle_locks",
+        "rule_plugin_locks",
+        "stage_module_locks",
+        "world_state",
+        "event_cursor",
+        "asset_hashes",
+        "migration_history"
+      ],
+      "properties": {
+        "contract_version": {
+          "const": "world-runtime.v1"
+        },
+        "record_type": {
+          "const": "save.envelope"
+        },
+        "save_schema_version": {
+          "$ref": "common.v1.schema.json#/$defs/SemVer"
+        },
+        "world_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "world_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "engine_contract_version": {
+          "$ref": "common.v1.schema.json#/$defs/SemVer"
+        },
+        "root_bundle_lock": {
+          "$ref": "common.v1.schema.json#/$defs/PackLock"
+        },
+        "dependency_bundle_locks": {
+          "type": "array",
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/PackLock"
+          }
+        },
+        "rule_plugin_locks": {
+          "type": "array",
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/PluginLock"
+          }
+        },
+        "stage_module_locks": {
+          "type": "array",
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/StageModuleLock"
+          }
+        },
+        "world_state": {
+          "$ref": "#/$defs/WorldState"
+        },
+        "event_cursor": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "asset_hashes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/Sha256"
+          }
+        },
+        "migration_history": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MigrationHistoryEntry"
+          }
+        }
+      }
+    },
+    "SemanticOutcomeProposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcome_id",
+        "outcome_type",
+        "subjects",
+        "parameters",
+        "visibility"
+      ],
+      "properties": {
+        "outcome_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "outcome_type": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "subjects": {
+          "type": "array",
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/SubjectRef"
+          },
+          "minItems": 1
+        },
+        "parameters": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        },
+        "visibility": {
+          "$ref": "common.v1.schema.json#/$defs/Visibility"
+        },
+        "requires_agency_gate_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        }
+      }
+    },
+    "AgencyPolicy": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "policy_kind"
+          ],
+          "properties": {
+            "policy_kind": {
+              "const": "all"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "policy_kind"
+          ],
+          "properties": {
+            "policy_kind": {
+              "const": "any"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "policy_kind",
+            "minimum_acceptances"
+          ],
+          "properties": {
+            "policy_kind": {
+              "const": "threshold"
+            },
+            "minimum_acceptances": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      ]
+    },
+    "AgencyGate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "gate_id",
+        "protected_outcome_ids",
+        "participants",
+        "requirement",
+        "policy",
+        "commitment_evidence"
+      ],
+      "properties": {
+        "gate_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "protected_outcome_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/Identifier"
+          }
+        },
+        "participants": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/EntityRef"
+          }
+        },
+        "requirement": {
+          "$ref": "#/$defs/AgencyRequirement"
+        },
+        "policy": {
+          "$ref": "#/$defs/AgencyPolicy"
+        },
+        "commitment_evidence": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/AgencyCommitmentRef"
+          }
+        }
+      }
+    },
+    "AgencyDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "gate_id",
+        "stance",
+        "terms"
+      ],
+      "properties": {
+        "gate_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "stance": {
+          "enum": [
+            "accept",
+            "reject",
+            "counter",
+            "abstain"
+          ]
+        },
+        "terms": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        }
+      }
+    },
+    "EventSituation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event_type",
+        "summary",
+        "subjects",
+        "context",
+        "visibility"
+      ],
+      "properties": {
+        "event_type": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "summary": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "subjects": {
+          "type": "array",
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/SubjectRef"
+          },
+          "minItems": 1
+        },
+        "context": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        },
+        "visibility": {
+          "$ref": "common.v1.schema.json#/$defs/Visibility"
+        }
+      }
+    },
+    "WorldAutomaticEventProposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "proposal_kind",
+        "proposal_id",
+        "day",
+        "situation",
+        "candidate_outcomes",
+        "cost"
+      ],
+      "properties": {
+        "proposal_kind": {
+          "const": "automatic.world"
+        },
+        "proposal_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "day": {
+          "$ref": "common.v1.schema.json#/$defs/DayNumber"
+        },
+        "situation": {
+          "$ref": "#/$defs/EventSituation"
+        },
+        "candidate_outcomes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SemanticOutcomeProposal"
+          },
+          "minItems": 1
+        },
+        "cost": {
+          "$ref": "#/$defs/ZeroEventCost"
+        }
+      }
+    },
+    "CharacterAutomaticEventProposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "proposal_kind",
+        "proposal_id",
+        "day",
+        "situation",
+        "target_entity_ids",
+        "candidate_outcomes",
+        "agency_gates",
+        "cost"
+      ],
+      "properties": {
+        "proposal_kind": {
+          "const": "automatic.character"
+        },
+        "proposal_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "day": {
+          "$ref": "common.v1.schema.json#/$defs/DayNumber"
+        },
+        "situation": {
+          "$ref": "#/$defs/EventSituation"
+        },
+        "target_entity_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/Uuid"
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "candidate_outcomes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SemanticOutcomeProposal"
+          }
+        },
+        "agency_gates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AutomaticAgencyGate"
+          }
+        },
+        "cost": {
+          "$ref": "#/$defs/ZeroEventCost"
+        }
+      }
+    },
+    "AutomaticEventProposal": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/WorldAutomaticEventProposal"
+        },
+        {
+          "$ref": "#/$defs/CharacterAutomaticEventProposal"
+        }
+      ]
+    },
+    "EventCardProposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "proposal_id",
+        "source_dialogue_id",
+        "day",
+        "situation",
+        "title",
+        "summary",
+        "result_options",
+        "agency_gates"
+      ],
+      "properties": {
+        "proposal_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "source_dialogue_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "day": {
+          "$ref": "common.v1.schema.json#/$defs/DayNumber"
+        },
+        "situation": {
+          "$ref": "#/$defs/EventSituation"
+        },
+        "title": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "summary": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "result_options": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/EventCardOutcomeDraft"
+          }
+        },
+        "agency_gates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EventCardAgencyGate"
+          }
+        }
+      }
+    },
+    "StateTenure": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "tenure_kind"
+          ],
+          "properties": {
+            "tenure_kind": {
+              "const": "indefinite"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "tenure_kind",
+            "duration_days"
+          ],
+          "properties": {
+            "tenure_kind": {
+              "const": "days"
+            },
+            "duration_days": {
+              "$ref": "common.v1.schema.json#/$defs/DayDuration"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "tenure_kind",
+            "until_rule"
+          ],
+          "properties": {
+            "tenure_kind": {
+              "const": "until_rule"
+            },
+            "until_rule": {
+              "$ref": "common.v1.schema.json#/$defs/RuleRef"
+            }
+          }
+        }
+      ]
+    },
+    "StateContinuation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "continuation_kind"
+          ],
+          "properties": {
+            "continuation_kind": {
+              "const": "remain"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "continuation_kind"
+          ],
+          "properties": {
+            "continuation_kind": {
+              "const": "resume_previous"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "continuation_kind"
+          ],
+          "properties": {
+            "continuation_kind": {
+              "const": "machine_initial"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "continuation_kind",
+            "state"
+          ],
+          "properties": {
+            "continuation_kind": {
+              "const": "state"
+            },
+            "state": {
+              "$ref": "#/$defs/RuntimeMachineState"
+            }
+          }
+        }
+      ]
+    },
+    "MachineDecision": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "decision_kind"
+          ],
+          "properties": {
+            "decision_kind": {
+              "const": "keep"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "decision_kind",
+            "state",
+            "tenure",
+            "continuation"
+          ],
+          "properties": {
+            "decision_kind": {
+              "const": "set_state"
+            },
+            "tenure": {
+              "$ref": "#/$defs/StateTenure"
+            },
+            "continuation": {
+              "$ref": "#/$defs/StateContinuation"
+            },
+            "state": {
+              "$ref": "#/$defs/RuntimeMachineState"
+            }
+          }
+        }
+      ]
+    },
+    "CharacterReactionProposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reaction_id",
+        "impact",
+        "agency_decisions",
+        "self_outcomes",
+        "machine_decision",
+        "source_event"
+      ],
+      "properties": {
+        "reaction_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "impact": {
+          "enum": [
+            "none",
+            "changed"
+          ]
+        },
+        "agency_decisions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AgencyDecision"
+          }
+        },
+        "self_outcomes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SelfSubjectiveOutcomeProposal"
+          }
+        },
+        "machine_decision": {
+          "$ref": "#/$defs/MachineDecision"
+        },
+        "source_event": {
+          "$ref": "#/$defs/CharacterEventRef"
+        }
+      }
+    },
+    "ControlBinding": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "binding_id",
+            "binding_kind",
+            "entity_id",
+            "status"
+          ],
+          "properties": {
+            "binding_id": {
+              "$ref": "common.v1.schema.json#/$defs/Uuid"
+            },
+            "binding_kind": {
+              "const": "human"
+            },
+            "entity_id": {
+              "$ref": "common.v1.schema.json#/$defs/Uuid"
+            },
+            "status": {
+              "enum": [
+                "active",
+                "inactive"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "binding_id",
+            "binding_kind",
+            "entity_id",
+            "mind_profile",
+            "status"
+          ],
+          "properties": {
+            "binding_id": {
+              "$ref": "common.v1.schema.json#/$defs/Uuid"
+            },
+            "binding_kind": {
+              "const": "character_mind"
+            },
+            "entity_id": {
+              "$ref": "common.v1.schema.json#/$defs/Uuid"
+            },
+            "mind_profile": {
+              "$ref": "#/$defs/CharacterMindCatalogRef"
+            },
+            "status": {
+              "enum": [
+                "active",
+                "inactive"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "DayCycleState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "day",
+        "phase",
+        "phase_revision"
+      ],
+      "properties": {
+        "day": {
+          "$ref": "common.v1.schema.json#/$defs/DayNumber"
+        },
+        "phase": {
+          "enum": [
+            "autonomous",
+            "director_settlement",
+            "player"
+          ]
+        },
+        "phase_revision": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "StateMachineFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "frame_id",
+        "state",
+        "entered_day",
+        "tenure",
+        "continuation"
+      ],
+      "properties": {
+        "frame_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "entered_day": {
+          "$ref": "common.v1.schema.json#/$defs/DayNumber"
+        },
+        "tenure": {
+          "$ref": "#/$defs/StateTenure"
+        },
+        "continuation": {
+          "$ref": "#/$defs/StateContinuation"
+        },
+        "state": {
+          "$ref": "#/$defs/RuntimeMachineState"
+        }
+      }
+    },
+    "StateMachineInstanceState": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "instance_id",
+            "machine_scope",
+            "owner_entity_id",
+            "machine",
+            "frames",
+            "revision"
+          ],
+          "properties": {
+            "instance_id": {
+              "$ref": "common.v1.schema.json#/$defs/Uuid"
+            },
+            "machine_scope": {
+              "const": "character"
+            },
+            "owner_entity_id": {
+              "$ref": "common.v1.schema.json#/$defs/Uuid"
+            },
+            "machine": {
+              "$ref": "#/$defs/StateMachineCatalogRef"
+            },
+            "frames": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/StateMachineFrame"
+              },
+              "minItems": 1
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "instance_id",
+            "machine_scope",
+            "world_id",
+            "machine",
+            "frames",
+            "revision"
+          ],
+          "properties": {
+            "instance_id": {
+              "$ref": "common.v1.schema.json#/$defs/Uuid"
+            },
+            "machine_scope": {
+              "const": "world"
+            },
+            "world_id": {
+              "$ref": "common.v1.schema.json#/$defs/Uuid"
+            },
+            "machine": {
+              "$ref": "#/$defs/StateMachineCatalogRef"
+            },
+            "frames": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/StateMachineFrame"
+              },
+              "minItems": 1
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      ]
+    },
+    "DialogueParticipantRef": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "participant_kind",
+            "entity"
+          ],
+          "properties": {
+            "participant_kind": {
+              "const": "entity"
+            },
+            "entity": {
+              "$ref": "common.v1.schema.json#/$defs/EntityRef"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "participant_kind"
+          ],
+          "properties": {
+            "participant_kind": {
+              "const": "system"
+            }
+          }
+        }
+      ]
+    },
+    "DialogueTurn": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "turn_id",
+        "speaker",
+        "locale",
+        "text",
+        "occurred_at",
+        "source",
+        "agency_commitments"
+      ],
+      "properties": {
+        "turn_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "speaker": {
+          "$ref": "#/$defs/DialogueParticipantRef"
+        },
+        "locale": {
+          "type": "string",
+          "pattern": "^[a-z]{2,3}(?:-[A-Z]{2})?$"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000
+        },
+        "emotion_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "occurred_at": {
+          "$ref": "common.v1.schema.json#/$defs/LogicalTime"
+        },
+        "source": {
+          "$ref": "#/$defs/DialogueTurnSource"
+        },
+        "agency_commitments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AgencyCommitment"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "source": {
+                "properties": {
+                  "source_kind": {
+                    "const": "character_mind"
+                  }
+                },
+                "required": [
+                  "source_kind"
+                ]
+              }
+            },
+            "required": [
+              "source"
+            ]
+          },
+          "else": {
+            "properties": {
+              "agency_commitments": {
+                "maxItems": 0
+              }
+            }
+          }
+        }
+      ]
+    },
+    "DialogueRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dialogue_id",
+        "revision",
+        "day",
+        "participants",
+        "turns",
+        "status"
+      ],
+      "properties": {
+        "dialogue_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "day": {
+          "$ref": "common.v1.schema.json#/$defs/DayNumber"
+        },
+        "participants": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DialogueParticipantRef"
+          },
+          "minItems": 2,
+          "uniqueItems": true
+        },
+        "turns": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DialogueTurn"
+          },
+          "minItems": 1
+        },
+        "status": {
+          "enum": [
+            "active",
+            "closed"
+          ]
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "EventCardState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event_card_id",
+        "source_proposal_id",
+        "source_dialogue_id",
+        "day",
+        "title",
+        "summary",
+        "sealed_result",
+        "control",
+        "charge_id",
+        "cost",
+        "status",
+        "published_revision"
+      ],
+      "properties": {
+        "event_card_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "source_proposal_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "source_dialogue_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "day": {
+          "$ref": "common.v1.schema.json#/$defs/DayNumber"
+        },
+        "title": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "summary": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "sealed_result": {
+          "$ref": "#/$defs/SealedEventResult"
+        },
+        "control": {
+          "$ref": "#/$defs/ControlBindingRef"
+        },
+        "charge_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "cost": {
+          "$ref": "#/$defs/EventCost"
+        },
+        "status": {
+          "enum": [
+            "available",
+            "triggered",
+            "expired",
+            "invalidated"
+          ]
+        },
+        "published_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "terminal_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "triggered_event_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "invalidation_code": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "triggered"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "terminal_revision",
+              "triggered_event_id"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "expired",
+                  "invalidated"
+                ]
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "terminal_revision"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "invalidated"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "invalidation_code"
+            ]
+          }
+        }
+      ]
+    },
+    "EventCardView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event_card_id",
+        "day",
+        "title",
+        "summary",
+        "event_cost",
+        "status"
+      ],
+      "properties": {
+        "event_card_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "day": {
+          "$ref": "common.v1.schema.json#/$defs/DayNumber"
+        },
+        "title": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "summary": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "status": {
+          "enum": [
+            "available",
+            "triggered",
+            "expired",
+            "invalidated"
+          ]
+        },
+        "event_cost": {
+          "$ref": "#/$defs/EventCost"
+        }
+      }
+    },
+    "ControlBindingUpsertOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "binding"
+      ],
+      "properties": {
+        "op": {
+          "const": "control_binding.upsert"
+        },
+        "binding": {
+          "$ref": "#/$defs/ControlBinding"
+        }
+      }
+    },
+    "DayCycleTransitionOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "from_day",
+        "from_phase",
+        "to_day",
+        "to_phase"
+      ],
+      "properties": {
+        "op": {
+          "const": "day_cycle.transition"
+        },
+        "from_day": {
+          "$ref": "common.v1.schema.json#/$defs/DayNumber"
+        },
+        "from_phase": {
+          "enum": [
+            "autonomous",
+            "director_settlement",
+            "player"
+          ]
+        },
+        "to_day": {
+          "$ref": "common.v1.schema.json#/$defs/DayNumber"
+        },
+        "to_phase": {
+          "enum": [
+            "autonomous",
+            "director_settlement",
+            "player"
+          ]
+        }
+      }
+    },
+    "StateMachineSetStateOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "machine_instance_id",
+        "state",
+        "tenure",
+        "continuation"
+      ],
+      "properties": {
+        "op": {
+          "const": "state_machine.set_state"
+        },
+        "machine_instance_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "tenure": {
+          "$ref": "#/$defs/StateTenure"
+        },
+        "continuation": {
+          "$ref": "#/$defs/StateContinuation"
+        },
+        "state": {
+          "$ref": "#/$defs/RuntimeMachineState"
+        }
+      }
+    },
+    "EventCardPublishOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "event_card_id",
+        "source_proposal_id",
+        "source_dialogue_id",
+        "day",
+        "title",
+        "summary",
+        "sealed_result",
+        "control",
+        "charge_id",
+        "cost"
+      ],
+      "properties": {
+        "op": {
+          "const": "event_card.publish"
+        },
+        "event_card_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "source_proposal_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "source_dialogue_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "day": {
+          "$ref": "common.v1.schema.json#/$defs/DayNumber"
+        },
+        "title": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "summary": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "sealed_result": {
+          "$ref": "#/$defs/SealedEventResult"
+        },
+        "control": {
+          "$ref": "#/$defs/ControlBindingRef"
+        },
+        "charge_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "cost": {
+          "$ref": "#/$defs/EventCost"
+        }
+      }
+    },
+    "EventCardTriggerOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "event_card_id",
+        "control",
+        "sealed_result_digest",
+        "day"
+      ],
+      "properties": {
+        "op": {
+          "const": "event_card.trigger"
+        },
+        "event_card_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "control": {
+          "$ref": "#/$defs/ControlBindingRef"
+        },
+        "sealed_result_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "day": {
+          "$ref": "common.v1.schema.json#/$defs/DayNumber"
+        }
+      }
+    },
+    "EventCardExpireOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "event_card_id",
+        "control",
+        "expected_card_day"
+      ],
+      "properties": {
+        "op": {
+          "const": "event_card.expire"
+        },
+        "event_card_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "control": {
+          "$ref": "#/$defs/ControlBindingRef"
+        },
+        "expected_card_day": {
+          "$ref": "common.v1.schema.json#/$defs/DayNumber"
+        }
+      }
+    },
+    "CharacterEventRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_kind",
+        "proposal_id"
+      ],
+      "properties": {
+        "source_kind": {
+          "const": "automatic"
+        },
+        "proposal_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        }
+      }
+    },
+    "CharacterEventStimulus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stimulus_kind",
+        "proposal_id",
+        "day",
+        "situation",
+        "candidate_outcomes",
+        "agency_gates"
+      ],
+      "properties": {
+        "stimulus_kind": {
+          "const": "automatic"
+        },
+        "proposal_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "day": {
+          "$ref": "common.v1.schema.json#/$defs/DayNumber"
+        },
+        "situation": {
+          "$ref": "#/$defs/EventSituation"
+        },
+        "candidate_outcomes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SemanticOutcomeProposal"
+          }
+        },
+        "agency_gates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AutomaticAgencyGate"
+          }
+        }
+      }
+    },
+    "ControlBindingRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "binding_id"
+      ],
+      "properties": {
+        "binding_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        }
+      }
+    },
+    "EventCost": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "amount"
+      ],
+      "properties": {
+        "amount": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "ZeroEventCost": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "amount"
+      ],
+      "properties": {
+        "amount": {
+          "const": 0
+        }
+      }
+    },
+    "EventCharge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "charge_id",
+        "event_card_id",
+        "cost"
+      ],
+      "properties": {
+        "charge_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "event_card_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "cost": {
+          "$ref": "#/$defs/EventCost"
+        }
+      }
+    },
+    "EventBudgetState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "budget_id",
+        "control",
+        "day",
+        "capacity",
+        "charges"
+      ],
+      "properties": {
+        "budget_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "day": {
+          "$ref": "common.v1.schema.json#/$defs/DayNumber"
+        },
+        "capacity": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "charges": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EventCharge"
+          }
+        },
+        "control": {
+          "$ref": "#/$defs/ControlBindingRef"
+        }
+      }
+    },
+    "EventBudgetView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "day",
+        "capacity",
+        "spent",
+        "remaining"
+      ],
+      "properties": {
+        "day": {
+          "$ref": "common.v1.schema.json#/$defs/DayNumber"
+        },
+        "capacity": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "spent": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "remaining": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "EventBudgetOpenOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "budget_id",
+        "control",
+        "day",
+        "capacity"
+      ],
+      "properties": {
+        "op": {
+          "const": "event_budget.open"
+        },
+        "budget_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "day": {
+          "$ref": "common.v1.schema.json#/$defs/DayNumber"
+        },
+        "capacity": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "control": {
+          "$ref": "#/$defs/ControlBindingRef"
+        }
+      }
+    },
+    "RuntimeMachineState": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state_kind",
+            "state_id"
+          ],
+          "properties": {
+            "state_kind": {
+              "const": "defined"
+            },
+            "state_id": {
+              "$ref": "common.v1.schema.json#/$defs/Identifier"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state_kind",
+            "semantic_intent",
+            "parameters"
+          ],
+          "properties": {
+            "state_kind": {
+              "const": "semantic"
+            },
+            "semantic_intent": {
+              "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+            },
+            "parameters": {
+              "$ref": "common.v1.schema.json#/$defs/JsonObject"
+            }
+          }
+        }
+      ]
+    },
+    "PacketSource": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source_kind",
+            "proposal_id"
+          ],
+          "properties": {
+            "source_kind": {
+              "const": "rule_plugin"
+            },
+            "proposal_id": {
+              "$ref": "common.v1.schema.json#/$defs/Uuid"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source_kind",
+            "event_card_id",
+            "result_id",
+            "result_digest"
+          ],
+          "properties": {
+            "source_kind": {
+              "const": "sealed_event_result"
+            },
+            "event_card_id": {
+              "$ref": "common.v1.schema.json#/$defs/Uuid"
+            },
+            "result_id": {
+              "$ref": "common.v1.schema.json#/$defs/Uuid"
+            },
+            "result_digest": {
+              "$ref": "common.v1.schema.json#/$defs/Sha256"
+            }
+          }
+        }
+      ]
+    },
+    "EventOutcomeOp": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/DefinitionRegisterOp"
+        },
+        {
+          "$ref": "#/$defs/DefinitionRetireOp"
+        },
+        {
+          "$ref": "#/$defs/EntityCreateOp"
+        },
+        {
+          "$ref": "#/$defs/EntityRetireOp"
+        },
+        {
+          "$ref": "#/$defs/ComponentReplaceOp"
+        },
+        {
+          "$ref": "#/$defs/ComponentRemoveOp"
+        },
+        {
+          "$ref": "#/$defs/RelationUpsertOp"
+        },
+        {
+          "$ref": "#/$defs/RelationRemoveOp"
+        },
+        {
+          "$ref": "#/$defs/LedgerPostOp"
+        },
+        {
+          "$ref": "#/$defs/EntityRelocateOp"
+        },
+        {
+          "$ref": "#/$defs/KnowledgeRecordOp"
+        },
+        {
+          "$ref": "#/$defs/MemoryAppendOp"
+        },
+        {
+          "$ref": "#/$defs/ScheduleUpsertOp"
+        },
+        {
+          "$ref": "#/$defs/ScheduleCancelOp"
+        },
+        {
+          "$ref": "#/$defs/ClockAdvanceOp"
+        },
+        {
+          "$ref": "#/$defs/StageOpenOp"
+        },
+        {
+          "$ref": "#/$defs/GoalPlanUpsertOp"
+        },
+        {
+          "$ref": "#/$defs/GoalPlanCancelOp"
+        },
+        {
+          "$ref": "#/$defs/MaterializationRequestOp"
+        },
+        {
+          "$ref": "#/$defs/VisualBindingUpsertOp"
+        },
+        {
+          "$ref": "#/$defs/DomainEventEmitOp"
+        },
+        {
+          "$ref": "#/$defs/StateMachineSetStateOp"
+        }
+      ]
+    },
+    "NarrativeSegment": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/GeneratedNarrativeSegment"
+        },
+        {
+          "$ref": "#/$defs/DialogueTurnQuoteSegment"
+        }
+      ]
+    },
+    "EventResultPresentation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "presentation_id",
+        "segments"
+      ],
+      "properties": {
+        "presentation_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "segments": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/NarrativeSegment"
+          }
+        }
+      }
+    },
+    "EventCardOutcomeDraft": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "option_id",
+        "outcomes",
+        "presentation"
+      ],
+      "properties": {
+        "option_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "outcomes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/SemanticOutcomeProposal"
+          }
+        },
+        "presentation": {
+          "$ref": "#/$defs/EventResultPresentation"
+        }
+      }
+    },
+    "SealedEventResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "result_id",
+        "source_proposal_id",
+        "selected_option_id",
+        "adjudicated_at_revision",
+        "preconditions",
+        "deterministic_context_id",
+        "deterministic_context_digest",
+        "ops",
+        "presentation",
+        "result_digest"
+      ],
+      "properties": {
+        "result_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "source_proposal_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "selected_option_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "adjudicated_at_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "preconditions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PacketPrecondition"
+          }
+        },
+        "deterministic_context_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "deterministic_context_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "ops": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/EventOutcomeOp"
+          }
+        },
+        "presentation": {
+          "$ref": "#/$defs/EventResultPresentation"
+        },
+        "result_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        }
+      }
+    },
+    "EventCardInvalidateOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "event_card_id",
+        "control",
+        "reason_code"
+      ],
+      "properties": {
+        "op": {
+          "const": "event_card.invalidate"
+        },
+        "event_card_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "control": {
+          "$ref": "#/$defs/ControlBindingRef"
+        },
+        "reason_code": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        }
+      }
+    },
+    "CapabilityDemand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "demand_id",
+        "semantic_intent",
+        "description",
+        "allowed_archetypes",
+        "constraints"
+      ],
+      "properties": {
+        "demand_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "semantic_intent": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "description": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "allowed_archetypes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/GenerationArchetypeCatalogRef"
+          }
+        },
+        "constraints": {
+          "type": "array",
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/RuleRef"
+          }
+        }
+      }
+    },
+    "CapabilityRequirement": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "requirement_kind",
+            "capability"
+          ],
+          "properties": {
+            "requirement_kind": {
+              "const": "bound"
+            },
+            "capability": {
+              "$ref": "#/$defs/CapabilityCatalogRef"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "requirement_kind",
+            "demand"
+          ],
+          "properties": {
+            "requirement_kind": {
+              "const": "demand"
+            },
+            "demand": {
+              "$ref": "#/$defs/CapabilityDemand"
+            }
+          }
+        }
+      ]
+    },
+    "GoalNodeDraft": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node_key",
+        "title",
+        "capability_requirement",
+        "arguments",
+        "depends_on",
+        "completion_rules",
+        "alternative_node_keys"
+      ],
+      "properties": {
+        "node_key": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "title": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "capability_requirement": {
+          "$ref": "#/$defs/CapabilityRequirement"
+        },
+        "arguments": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        },
+        "depends_on": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/Identifier"
+          }
+        },
+        "completion_rules": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/RuleRef"
+          }
+        },
+        "alternative_node_keys": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/Identifier"
+          }
+        }
+      }
+    },
+    "GoalPlanDraft": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "goal",
+        "expected_state",
+        "fact_refs",
+        "constraints",
+        "nodes",
+        "knowledge_scope"
+      ],
+      "properties": {
+        "goal": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "expected_state": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        },
+        "fact_refs": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/Uuid"
+          }
+        },
+        "constraints": {
+          "type": "array",
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/RuleRef"
+          }
+        },
+        "nodes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/GoalNodeDraft"
+          }
+        },
+        "knowledge_scope": {
+          "enum": [
+            "player_known",
+            "system_discoverable"
+          ]
+        }
+      }
+    },
+    "GoalPlanProposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "proposal_id",
+        "owner_actor_id",
+        "draft"
+      ],
+      "properties": {
+        "proposal_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "owner_actor_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "draft": {
+          "$ref": "#/$defs/GoalPlanDraft"
+        }
+      }
+    },
+    "DynamicDefinitionDraft": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "definition_type",
+        "name",
+        "summary",
+        "components",
+        "rationale"
+      ],
+      "properties": {
+        "definition_type": {
+          "$ref": "#/$defs/DefinitionTypeCatalogRef"
+        },
+        "name": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "summary": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "components": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ComponentValue"
+          }
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8000
+        }
+      }
+    },
+    "DynamicDefinitionProposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "proposal_id",
+        "purpose",
+        "draft"
+      ],
+      "properties": {
+        "proposal_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "purpose": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "draft": {
+          "$ref": "#/$defs/DynamicDefinitionDraft"
+        }
+      }
+    },
+    "AgencyCommitmentDraft": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "semantic_intent",
+        "subjects",
+        "stance",
+        "terms",
+        "valid_through_day"
+      ],
+      "properties": {
+        "semantic_intent": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "subjects": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/SubjectRef"
+          }
+        },
+        "stance": {
+          "enum": [
+            "accept",
+            "counter"
+          ]
+        },
+        "terms": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        },
+        "valid_through_day": {
+          "$ref": "common.v1.schema.json#/$defs/DayNumber"
+        }
+      }
+    },
+    "AgencyCommitment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "commitment_id",
+        "semantic_intent",
+        "subjects",
+        "stance",
+        "terms",
+        "valid_through_day"
+      ],
+      "properties": {
+        "commitment_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "semantic_intent": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "subjects": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/SubjectRef"
+          }
+        },
+        "stance": {
+          "enum": [
+            "accept",
+            "counter"
+          ]
+        },
+        "terms": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        },
+        "valid_through_day": {
+          "$ref": "common.v1.schema.json#/$defs/DayNumber"
+        }
+      }
+    },
+    "AgencyCommitmentRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dialogue_id",
+        "turn_id",
+        "commitment_id"
+      ],
+      "properties": {
+        "dialogue_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "turn_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "commitment_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        }
+      }
+    },
+    "DialogueTurnSource": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source_kind",
+            "command_id"
+          ],
+          "properties": {
+            "source_kind": {
+              "const": "human"
+            },
+            "command_id": {
+              "$ref": "common.v1.schema.json#/$defs/Uuid"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source_kind",
+            "model_request_id",
+            "model_output_digest"
+          ],
+          "properties": {
+            "source_kind": {
+              "const": "character_mind"
+            },
+            "model_request_id": {
+              "$ref": "common.v1.schema.json#/$defs/Uuid"
+            },
+            "model_output_digest": {
+              "$ref": "common.v1.schema.json#/$defs/Sha256"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source_kind",
+            "model_request_id",
+            "model_output_digest"
+          ],
+          "properties": {
+            "source_kind": {
+              "const": "director_system"
+            },
+            "model_request_id": {
+              "$ref": "common.v1.schema.json#/$defs/Uuid"
+            },
+            "model_output_digest": {
+              "$ref": "common.v1.schema.json#/$defs/Sha256"
+            }
+          }
+        }
+      ]
+    },
+    "DialogueTurnView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "turn_id",
+        "speaker",
+        "locale",
+        "text",
+        "occurred_at"
+      ],
+      "properties": {
+        "turn_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "speaker": {
+          "$ref": "#/$defs/DialogueParticipantRef"
+        },
+        "locale": {
+          "type": "string",
+          "pattern": "^[a-z]{2,3}(?:-[A-Z]{2})?$"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000
+        },
+        "emotion_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "occurred_at": {
+          "$ref": "common.v1.schema.json#/$defs/LogicalTime"
+        }
+      }
+    },
+    "DialogueView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dialogue_id",
+        "day",
+        "participants",
+        "turns",
+        "status"
+      ],
+      "properties": {
+        "dialogue_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "day": {
+          "$ref": "common.v1.schema.json#/$defs/DayNumber"
+        },
+        "participants": {
+          "type": "array",
+          "minItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/DialogueParticipantRef"
+          }
+        },
+        "turns": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/DialogueTurnView"
+          }
+        },
+        "status": {
+          "enum": [
+            "active",
+            "closed"
+          ]
+        }
+      }
+    },
+    "DialogueOpenOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "dialogue_id",
+        "day",
+        "participants",
+        "first_turn"
+      ],
+      "properties": {
+        "op": {
+          "const": "dialogue.open"
+        },
+        "dialogue_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "day": {
+          "$ref": "common.v1.schema.json#/$defs/DayNumber"
+        },
+        "participants": {
+          "type": "array",
+          "minItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/DialogueParticipantRef"
+          }
+        },
+        "first_turn": {
+          "$ref": "#/$defs/HumanDialogueTurn"
+        }
+      }
+    },
+    "DialogueTurnAppendOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "dialogue_id",
+        "expected_revision",
+        "turn"
+      ],
+      "properties": {
+        "op": {
+          "const": "dialogue.turn.append"
+        },
+        "dialogue_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "expected_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "turn": {
+          "$ref": "#/$defs/DialogueTurn"
+        }
+      }
+    },
+    "DialogueCloseOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "dialogue_id",
+        "expected_revision",
+        "reason_code"
+      ],
+      "properties": {
+        "op": {
+          "const": "dialogue.close"
+        },
+        "dialogue_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "expected_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "reason_code": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        }
+      }
+    },
+    "DefinitionTypeCatalogRef": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CatalogRef"
+        },
+        {
+          "type": "object",
+          "required": [
+            "catalog_kind"
+          ],
+          "properties": {
+            "catalog_kind": {
+              "const": "definition_type"
+            }
+          }
+        }
+      ]
+    },
+    "ComponentTypeCatalogRef": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CatalogRef"
+        },
+        {
+          "type": "object",
+          "required": [
+            "catalog_kind"
+          ],
+          "properties": {
+            "catalog_kind": {
+              "const": "component_type"
+            }
+          }
+        }
+      ]
+    },
+    "RelationTypeCatalogRef": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CatalogRef"
+        },
+        {
+          "type": "object",
+          "required": [
+            "catalog_kind"
+          ],
+          "properties": {
+            "catalog_kind": {
+              "const": "relation_type"
+            }
+          }
+        }
+      ]
+    },
+    "CapabilityCatalogRef": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CatalogRef"
+        },
+        {
+          "type": "object",
+          "required": [
+            "catalog_kind"
+          ],
+          "properties": {
+            "catalog_kind": {
+              "const": "capability"
+            }
+          }
+        }
+      ]
+    },
+    "GenerationArchetypeCatalogRef": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CatalogRef"
+        },
+        {
+          "type": "object",
+          "required": [
+            "catalog_kind"
+          ],
+          "properties": {
+            "catalog_kind": {
+              "const": "generation_archetype"
+            }
+          }
+        }
+      ]
+    },
+    "StateMachineCatalogRef": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CatalogRef"
+        },
+        {
+          "type": "object",
+          "required": [
+            "catalog_kind"
+          ],
+          "properties": {
+            "catalog_kind": {
+              "const": "state_machine"
+            }
+          }
+        }
+      ]
+    },
+    "CharacterMindCatalogRef": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CatalogRef"
+        },
+        {
+          "type": "object",
+          "required": [
+            "catalog_kind"
+          ],
+          "properties": {
+            "catalog_kind": {
+              "const": "character_mind"
+            }
+          }
+        }
+      ]
+    },
+    "AgencyRequirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "semantic_intent",
+        "subjects",
+        "terms"
+      ],
+      "properties": {
+        "semantic_intent": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "subjects": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/SubjectRef"
+          }
+        },
+        "terms": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        }
+      }
+    },
+    "AutomaticAgencyGate": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/AgencyGate"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "commitment_evidence": {
+              "type": "array",
+              "maxItems": 0
+            }
+          }
+        }
+      ]
+    },
+    "EventCardAgencyGate": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/AgencyGate"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "commitment_evidence": {
+              "type": "array",
+              "minItems": 1
+            }
+          }
+        }
+      ]
+    },
+    "SelfSubjectiveOutcomeProposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcome_id",
+        "outcome_type",
+        "parameters",
+        "visibility"
+      ],
+      "properties": {
+        "outcome_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "outcome_type": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "parameters": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        },
+        "visibility": {
+          "$ref": "common.v1.schema.json#/$defs/Visibility"
+        }
+      }
+    },
+    "HumanDialogueTurn": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/DialogueTurn"
+        },
+        {
+          "type": "object",
+          "required": [
+            "speaker",
+            "source",
+            "agency_commitments"
+          ],
+          "properties": {
+            "speaker": {
+              "type": "object",
+              "required": [
+                "participant_kind"
+              ],
+              "properties": {
+                "participant_kind": {
+                  "const": "entity"
+                }
+              }
+            },
+            "source": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "source_kind",
+                "command_id"
+              ],
+              "properties": {
+                "source_kind": {
+                  "const": "human"
+                },
+                "command_id": {
+                  "$ref": "common.v1.schema.json#/$defs/Uuid"
+                }
+              }
+            },
+            "agency_commitments": {
+              "type": "array",
+              "maxItems": 0
+            }
+          }
+        }
+      ]
+    },
+    "CharacterMindDialogueTurn": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/DialogueTurn"
+        },
+        {
+          "type": "object",
+          "required": [
+            "speaker",
+            "source",
+            "agency_commitments"
+          ],
+          "properties": {
+            "speaker": {
+              "type": "object",
+              "required": [
+                "participant_kind"
+              ],
+              "properties": {
+                "participant_kind": {
+                  "const": "entity"
+                }
+              }
+            },
+            "source": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "source_kind",
+                "model_request_id",
+                "model_output_digest"
+              ],
+              "properties": {
+                "source_kind": {
+                  "const": "character_mind"
+                },
+                "model_request_id": {
+                  "$ref": "common.v1.schema.json#/$defs/Uuid"
+                },
+                "model_output_digest": {
+                  "$ref": "common.v1.schema.json#/$defs/Sha256"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "DirectorSystemDialogueTurn": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/DialogueTurn"
+        },
+        {
+          "type": "object",
+          "required": [
+            "speaker",
+            "source",
+            "agency_commitments"
+          ],
+          "properties": {
+            "speaker": {
+              "type": "object",
+              "required": [
+                "participant_kind"
+              ],
+              "properties": {
+                "participant_kind": {
+                  "const": "system"
+                }
+              }
+            },
+            "source": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "source_kind",
+                "model_request_id",
+                "model_output_digest"
+              ],
+              "properties": {
+                "source_kind": {
+                  "const": "director_system"
+                },
+                "model_request_id": {
+                  "$ref": "common.v1.schema.json#/$defs/Uuid"
+                },
+                "model_output_digest": {
+                  "$ref": "common.v1.schema.json#/$defs/Sha256"
+                }
+              }
+            },
+            "agency_commitments": {
+              "type": "array",
+              "maxItems": 0
+            }
+          }
+        }
+      ]
+    },
+    "GeneratedNarrativeSegment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "segment_kind",
+        "text"
+      ],
+      "properties": {
+        "segment_kind": {
+          "enum": [
+            "narration",
+            "system",
+            "notice"
+          ]
+        },
+        "text": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        }
+      }
+    },
+    "DialogueTurnQuoteSegment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "segment_kind",
+        "dialogue_id",
+        "turn_id"
+      ],
+      "properties": {
+        "segment_kind": {
+          "const": "dialogue_quote"
+        },
+        "dialogue_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "turn_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        }
+      }
+    },
+    "DialogueTurnQuoteView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "segment_kind",
+        "dialogue_id",
+        "turn_id",
+        "speaker",
+        "locale",
+        "text"
+      ],
+      "properties": {
+        "segment_kind": {
+          "const": "dialogue_quote"
+        },
+        "dialogue_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "turn_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "speaker": {
+          "$ref": "#/$defs/DialogueParticipantRef"
+        },
+        "locale": {
+          "type": "string",
+          "pattern": "^[a-z]{2,3}(?:-[A-Z]{2})?$"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000
+        },
+        "emotion_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        }
+      }
+    },
+    "NarrativeSegmentView": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/GeneratedNarrativeSegment"
+        },
+        {
+          "$ref": "#/$defs/DialogueTurnQuoteView"
+        }
+      ]
+    },
+    "EventResultPresentationView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "presentation_id",
+        "segments"
+      ],
+      "properties": {
+        "presentation_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "segments": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/NarrativeSegmentView"
+          }
+        }
+      }
+    },
+    "StateMachineCreateOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "instance"
+      ],
+      "properties": {
+        "op": {
+          "const": "state_machine.create"
+        },
+        "instance": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/StateMachineInstanceState"
+            },
+            {
+              "type": "object",
+              "required": [
+                "revision"
+              ],
+              "properties": {
+                "revision": {
+                  "const": 0
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

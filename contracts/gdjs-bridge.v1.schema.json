@@ -1,0 +1,1100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.luoxia.engine/contracts/gdjs-bridge.v1.schema.json",
+  "title": "Luoxia GDJS Bridge Contract v1",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/ClientEnvelope"
+    },
+    {
+      "$ref": "#/$defs/ServerEnvelope"
+    },
+    {
+      "$ref": "#/$defs/StageModuleManifest"
+    }
+  ],
+  "$defs": {
+    "ClientEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "envelope_type",
+        "message_id",
+        "session_id",
+        "sequence",
+        "message"
+      ],
+      "properties": {
+        "protocol_version": {
+          "const": "gdjs-bridge.v1"
+        },
+        "envelope_type": {
+          "const": "client"
+        },
+        "message_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "session_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "correlation_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "message": {
+          "$ref": "#/$defs/ClientMessage"
+        }
+      }
+    },
+    "ServerEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "envelope_type",
+        "message_id",
+        "session_id",
+        "sequence",
+        "message"
+      ],
+      "properties": {
+        "protocol_version": {
+          "const": "gdjs-bridge.v1"
+        },
+        "envelope_type": {
+          "const": "server"
+        },
+        "message_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "session_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "correlation_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "message": {
+          "$ref": "#/$defs/ServerMessage"
+        }
+      }
+    },
+    "ClientMessage": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ClientReady"
+        },
+        {
+          "$ref": "#/$defs/MapMove"
+        },
+        {
+          "$ref": "#/$defs/StageInput"
+        },
+        {
+          "$ref": "#/$defs/StageOutcomeProposal"
+        },
+        {
+          "$ref": "#/$defs/ClientAck"
+        },
+        {
+          "$ref": "#/$defs/ResyncRequest"
+        },
+        {
+          "$ref": "#/$defs/DialogueStart"
+        },
+        {
+          "$ref": "#/$defs/DialogueContinue"
+        },
+        {
+          "$ref": "#/$defs/EventCardTrigger"
+        },
+        {
+          "$ref": "#/$defs/PlayerDayEnd"
+        }
+      ]
+    },
+    "ClientReady": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "client_build_digest",
+        "gdjs_version",
+        "supported_protocols"
+      ],
+      "properties": {
+        "type": {
+          "const": "client.ready"
+        },
+        "client_build_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "gdjs_version": {
+          "$ref": "common.v1.schema.json#/$defs/SemVer"
+        },
+        "supported_protocols": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
+      }
+    },
+    "StageInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "basis_token",
+        "stage_instance_id",
+        "stage_revision",
+        "local_sequence",
+        "input_type",
+        "payload"
+      ],
+      "properties": {
+        "type": {
+          "const": "stage.input"
+        },
+        "basis_token": {
+          "type": "string",
+          "minLength": 32,
+          "maxLength": 512
+        },
+        "stage_instance_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "stage_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "local_sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "input_type": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "payload": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        }
+      }
+    },
+    "StageOutcomeProposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "command_id",
+        "basis_token",
+        "stage_instance_id",
+        "stage_revision",
+        "outcome_type",
+        "outcome",
+        "evidence_digest"
+      ],
+      "properties": {
+        "type": {
+          "const": "stage.outcome_proposal"
+        },
+        "command_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "basis_token": {
+          "type": "string",
+          "minLength": 32,
+          "maxLength": 512
+        },
+        "stage_instance_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "stage_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "outcome_type": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "outcome": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        },
+        "evidence_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        }
+      }
+    },
+    "ClientAck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "acked_message_id",
+        "view_revision"
+      ],
+      "properties": {
+        "type": {
+          "const": "client.ack"
+        },
+        "acked_message_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "view_revision": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "ResyncRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "current_view_revision",
+        "reason_code"
+      ],
+      "properties": {
+        "type": {
+          "const": "session.resync_request"
+        },
+        "current_view_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reason_code": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        }
+      }
+    },
+    "ServerMessage": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/SessionViewMessage"
+        },
+        {
+          "$ref": "#/$defs/SessionDeltaMessage"
+        },
+        {
+          "$ref": "#/$defs/CommandResult"
+        },
+        {
+          "$ref": "#/$defs/PresentationFrame"
+        },
+        {
+          "$ref": "#/$defs/StageOpen"
+        },
+        {
+          "$ref": "#/$defs/StageUpdate"
+        },
+        {
+          "$ref": "#/$defs/StageClose"
+        },
+        {
+          "$ref": "#/$defs/AssetBindingMessage"
+        },
+        {
+          "$ref": "#/$defs/ProtocolError"
+        },
+        {
+          "$ref": "#/$defs/DialogueReplyMessage"
+        }
+      ]
+    },
+    "SessionViewMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "view"
+      ],
+      "properties": {
+        "type": {
+          "const": "session.view"
+        },
+        "view": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/SessionView"
+        }
+      }
+    },
+    "ViewChange": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "change",
+            "node"
+          ],
+          "properties": {
+            "change": {
+              "const": "render_node.upsert"
+            },
+            "node": {
+              "$ref": "world-runtime.v1.schema.json#/$defs/RenderNode"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "change",
+            "node_id"
+          ],
+          "properties": {
+            "change": {
+              "const": "render_node.remove"
+            },
+            "node_id": {
+              "$ref": "common.v1.schema.json#/$defs/Identifier"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "change",
+            "goal_plans"
+          ],
+          "properties": {
+            "change": {
+              "const": "goal_plans.replace"
+            },
+            "goal_plans": {
+              "type": "array",
+              "items": {
+                "$ref": "world-runtime.v1.schema.json#/$defs/GoalPlanView"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "change",
+            "world_time"
+          ],
+          "properties": {
+            "change": {
+              "const": "world_time.set"
+            },
+            "world_time": {
+              "$ref": "common.v1.schema.json#/$defs/LogicalTime"
+            }
+          }
+        }
+      ]
+    },
+    "SessionDeltaMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "base_view_revision",
+        "view_revision",
+        "basis_token",
+        "changes"
+      ],
+      "properties": {
+        "type": {
+          "const": "session.delta"
+        },
+        "base_view_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "view_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "basis_token": {
+          "type": "string",
+          "minLength": 32,
+          "maxLength": 512
+        },
+        "changes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/ViewChange"
+          }
+        }
+      }
+    },
+    "CommandResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "command_id",
+        "status",
+        "view_revision"
+      ],
+      "properties": {
+        "type": {
+          "const": "command.result"
+        },
+        "command_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "status": {
+          "enum": [
+            "accepted",
+            "rejected",
+            "pending"
+          ]
+        },
+        "view_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "code": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "message": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        }
+      }
+    },
+    "PresentationOp": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "node"
+          ],
+          "properties": {
+            "op": {
+              "const": "render_node.upsert"
+            },
+            "node": {
+              "$ref": "world-runtime.v1.schema.json#/$defs/RenderNode"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "node_id"
+          ],
+          "properties": {
+            "op": {
+              "const": "render_node.remove"
+            },
+            "node_id": {
+              "$ref": "common.v1.schema.json#/$defs/Identifier"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "transition_id",
+            "parameters"
+          ],
+          "properties": {
+            "op": {
+              "const": "transition.play"
+            },
+            "transition_id": {
+              "$ref": "common.v1.schema.json#/$defs/Identifier"
+            },
+            "parameters": {
+              "$ref": "common.v1.schema.json#/$defs/JsonObject"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "camera_id",
+            "parameters"
+          ],
+          "properties": {
+            "op": {
+              "const": "camera.set"
+            },
+            "camera_id": {
+              "$ref": "common.v1.schema.json#/$defs/Identifier"
+            },
+            "parameters": {
+              "$ref": "common.v1.schema.json#/$defs/JsonObject"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "channel_id",
+            "asset",
+            "parameters"
+          ],
+          "properties": {
+            "op": {
+              "const": "audio.play"
+            },
+            "channel_id": {
+              "$ref": "common.v1.schema.json#/$defs/Identifier"
+            },
+            "asset": {
+              "$ref": "common.v1.schema.json#/$defs/AssetContentRef"
+            },
+            "parameters": {
+              "$ref": "common.v1.schema.json#/$defs/JsonObject"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "channel_id"
+          ],
+          "properties": {
+            "op": {
+              "const": "audio.stop"
+            },
+            "channel_id": {
+              "$ref": "common.v1.schema.json#/$defs/Identifier"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "effect_id",
+            "parameters"
+          ],
+          "properties": {
+            "op": {
+              "enum": [
+                "particle.play",
+                "weather.set"
+              ]
+            },
+            "effect_id": {
+              "$ref": "common.v1.schema.json#/$defs/Identifier"
+            },
+            "parameters": {
+              "$ref": "common.v1.schema.json#/$defs/JsonObject"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "event_card_id",
+            "presentation"
+          ],
+          "properties": {
+            "op": {
+              "const": "narrative.show"
+            },
+            "event_card_id": {
+              "$ref": "common.v1.schema.json#/$defs/Uuid"
+            },
+            "presentation": {
+              "$ref": "world-runtime.v1.schema.json#/$defs/EventResultPresentationView"
+            }
+          }
+        }
+      ]
+    },
+    "PresentationFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "frame_id",
+        "view_revision",
+        "operations"
+      ],
+      "properties": {
+        "type": {
+          "const": "presentation.frame"
+        },
+        "frame_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "view_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "operations": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/PresentationOp"
+          }
+        }
+      }
+    },
+    "StageOpen": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "stage_instance_id",
+        "stage_revision",
+        "module_id",
+        "scene_id",
+        "visible_context",
+        "allowed_input_types",
+        "bindings"
+      ],
+      "properties": {
+        "type": {
+          "const": "stage.open"
+        },
+        "stage_instance_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "stage_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "module_id": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "scene_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "visible_context": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        },
+        "allowed_input_types": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+          }
+        },
+        "bindings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ClientAssetBinding"
+          }
+        }
+      }
+    },
+    "StageUpdate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "stage_instance_id",
+        "stage_revision",
+        "visible_state"
+      ],
+      "properties": {
+        "type": {
+          "const": "stage.update"
+        },
+        "stage_instance_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "stage_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "visible_state": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        }
+      }
+    },
+    "StageClose": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "stage_instance_id",
+        "stage_revision",
+        "reason_code"
+      ],
+      "properties": {
+        "type": {
+          "const": "stage.close"
+        },
+        "stage_instance_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "stage_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reason_code": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        }
+      }
+    },
+    "ClientAssetBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "binding_id",
+        "render_node_id",
+        "slot_id",
+        "asset",
+        "fetch_uri"
+      ],
+      "properties": {
+        "binding_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "render_node_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "slot_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "asset": {
+          "$ref": "common.v1.schema.json#/$defs/AssetContentRef"
+        },
+        "fetch_uri": {
+          "type": "string",
+          "format": "uri",
+          "maxLength": 2048
+        }
+      }
+    },
+    "AssetBindingMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "binding"
+      ],
+      "properties": {
+        "type": {
+          "const": "asset.binding"
+        },
+        "binding": {
+          "$ref": "#/$defs/ClientAssetBinding"
+        }
+      }
+    },
+    "ProtocolError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "code",
+        "message",
+        "recoverability"
+      ],
+      "properties": {
+        "type": {
+          "const": "protocol.error"
+        },
+        "code": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 4000
+        },
+        "recoverability": {
+          "enum": [
+            "retry",
+            "resync",
+            "reconnect",
+            "fatal"
+          ]
+        },
+        "details": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        }
+      }
+    },
+    "StageModuleManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "envelope_type",
+        "module_id",
+        "api_version",
+        "implementation_version",
+        "implementation_digest",
+        "entrypoint",
+        "gdjs_version",
+        "world_write_access",
+        "scenes"
+      ],
+      "properties": {
+        "protocol_version": {
+          "const": "gdjs-bridge.v1"
+        },
+        "envelope_type": {
+          "const": "stage_module.manifest"
+        },
+        "module_id": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "api_version": {
+          "$ref": "common.v1.schema.json#/$defs/SemVer"
+        },
+        "implementation_version": {
+          "$ref": "common.v1.schema.json#/$defs/SemVer"
+        },
+        "implementation_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "entrypoint": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^(?![A-Za-z]:)(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+        },
+        "gdjs_version": {
+          "$ref": "common.v1.schema.json#/$defs/SemVer"
+        },
+        "world_write_access": {
+          "const": false
+        },
+        "depends_on_module_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+          }
+        },
+        "scenes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "scene_id",
+              "slot_ids",
+              "input_types",
+              "outcome_types"
+            ],
+            "properties": {
+              "scene_id": {
+                "$ref": "common.v1.schema.json#/$defs/Identifier"
+              },
+              "slot_ids": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "$ref": "common.v1.schema.json#/$defs/Identifier"
+                }
+              },
+              "input_types": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+                }
+              },
+              "outcome_types": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "DialogueStart": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "command_id",
+        "basis_token",
+        "recipient",
+        "locale",
+        "text"
+      ],
+      "properties": {
+        "type": {
+          "const": "dialogue.start"
+        },
+        "command_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "basis_token": {
+          "type": "string",
+          "minLength": 32,
+          "maxLength": 512
+        },
+        "recipient": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/DialogueParticipantRef"
+        },
+        "locale": {
+          "type": "string",
+          "pattern": "^[a-z]{2,3}(?:-[A-Z]{2})?$"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000
+        }
+      }
+    },
+    "DialogueContinue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "command_id",
+        "basis_token",
+        "dialogue_id",
+        "locale",
+        "text"
+      ],
+      "properties": {
+        "type": {
+          "const": "dialogue.continue"
+        },
+        "command_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "basis_token": {
+          "type": "string",
+          "minLength": 32,
+          "maxLength": 512
+        },
+        "dialogue_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "locale": {
+          "type": "string",
+          "pattern": "^[a-z]{2,3}(?:-[A-Z]{2})?$"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000
+        }
+      }
+    },
+    "EventCardTrigger": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "command_id",
+        "basis_token",
+        "event_card_id"
+      ],
+      "properties": {
+        "type": {
+          "const": "event_card.trigger"
+        },
+        "command_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "basis_token": {
+          "type": "string",
+          "minLength": 32,
+          "maxLength": 512
+        },
+        "event_card_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        }
+      }
+    },
+    "PlayerDayEnd": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "command_id",
+        "basis_token"
+      ],
+      "properties": {
+        "type": {
+          "const": "player_day.end"
+        },
+        "command_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "basis_token": {
+          "type": "string",
+          "minLength": 32,
+          "maxLength": 512
+        }
+      }
+    },
+    "DialogueReplyMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "dialogue_id",
+        "turn"
+      ],
+      "properties": {
+        "type": {
+          "const": "dialogue.reply"
+        },
+        "dialogue_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "turn": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/DialogueTurnView"
+        }
+      }
+    },
+    "MapMove": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "command_id",
+        "basis_token",
+        "destination"
+      ],
+      "properties": {
+        "type": {
+          "const": "map.move"
+        },
+        "command_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "basis_token": {
+          "type": "string",
+          "minLength": 32,
+          "maxLength": 512
+        },
+        "destination": {
+          "$ref": "common.v1.schema.json#/$defs/EntityRef"
+        }
+      }
+    }
+  }
+}
