@@ -29,11 +29,20 @@ apps/gdjs-host/               JSON Bridge 与 StageModule 端口
 ```
 
 - 七份 Draft 2020-12 Schema 在服务启动时统一加载并解析引用；未知合同、非法输入与关联字段不一致都会明确失败。
-- ContentBundle Loader 只接受纯 JSON，核对 `release.bundle_digest` 后再进入必须注入的语义门禁；没有 Excel、编译器字段或兼容入口。
-- World Core 对普通调用方只暴露 `applyPacket`；语义校验器与原子事务存储只能从组合入口注入，门禁和提交在同一锁定快照内顺序执行，不存在直接写 WorldState 的公共服务。
-- ModelGateway 与 RulePluginGateway 只接收通过 Schema 的消息，并校验请求、响应、摘要、锁与确定性上下文的关联关系。
+- ContentBundle Loader 只接受纯 JSON，核对 `release.bundle_digest` 后再进入语义门禁；`createContentBundleSemanticGate` 提供本包 ID 唯一性、本地引用解析、RuleRef 锁定、Prompt purpose 与 FieldValues 校验。没有 Excel、编译器字段或兼容入口。
+- **`createContentRuntimeCatalog`**（`@luoxia/world-core/composition`）对已 load 且 digest 锁定的 ContentBundle 建立进程内只读索引：实现 `StaticComponentDigestLookup`（按 `(bundle_id, bundle_digest, local_id)` 解析静态组件并对 `fields` 做 RFC 8785 SHA-256）；并解析 `RuleRef → WorldLaw.evaluator + rule_plugin DependencyLock`（`resolveRuleEvaluationBinding`）。禁止跨 digest 回退或按显示名猜测。
+- World Core 对普通调用方只暴露 `applyPacket`；语义校验器、纯状态变换与原子事务存储只能从组合入口注入，门禁和提交在同一锁定快照内顺序执行，不存在直接写 WorldState 的公共服务。`createPacketSemanticGate` 穷举全部 precondition/source；`createPacketStateTransition` 穷举全部 `EffectOp.op`，产出候选 WorldState、领域事件和物化请求（Store 不重新解释 EffectOp）。
+- `createSessionViewProjector` 从锁定快照与 Server 提供的会话/表现候选生成并 Schema 校验玩家可见 View；它不生成或验证 basis token，也不读取客户端未授权的世界字段。
+- ModelGateway 先把 WorldSnapshot 与 ModelRequest 校验并封成 prepared invocation；Provider 调用只接受 PostgreSQL Journal 在持久化并标记 dispatched 后签发的一次性 authorization。响应通过同一套 Schema、digest、correlation 与语义门禁后才形成 verified receipt；数据库恢复也只能经 `verifyRecorded` 重跑同一路径，`failed` 输出不会产生 proof。每个生产 Gateway 都拥有实例私有的来源集合，Journal、RulePluginGateway 与提案存储只注入其配对实例的只读 verifier；其他 Gateway 生成的对象一律无效。RulePluginGateway 每次调用都显式接收本次作用域 receipts，并在进入不可信 adapter 前核对 proof、world 与原输出精确成员；成功结果返回不可伪造的 verified RulePlugin receipt。
+- **RulePlugin ABI Host**（`RulePluginModuleV1` + `createRulePluginAbiRegistry`）只接受组合根显式注册的进程内模块：manifest 经 `rule-plugin.v1` 校验，`PluginLock`/`operation_id` 精确命中；禁止扫描目录、下载、默认或兜底插件。Kernel 由此构造唯一 `RulePluginAdapter`，并在内部组装生产 `RuleHoldEvaluator`：`rule.holds → rule.evaluate → Gateway → ValidationOutput.valid`；`deterministic_context` 取自当前 ContentPacket 原值，只读、不提案、不写世界。
 - GDJS Host 只收发通过 Bridge Schema 的 Envelope；StageModule 通过窄接口组合，不继承引擎基类，也没有 WorldState 写权限。
-- 当前尚未提供数据库、EffectOp executor、具体 RulePlugin、模型 Provider、内容包或 GDJS 实现；这些必须按已锁定端口继续实现，禁止临时内存真相或默认兜底。
+- `apps/server/migrations/0001_atomic_packet_store.sql` 是 PostgreSQL 18.x 的单一初始 DDL：WorldState、CommittedEvent 与 Materialization outbox 原子提交，同时保存 verified model invocation、RulePlugin PacketProposal 授权回执及每日唯一 Director 调用记录。`createPostgresAtomicPacketStore` 与持久化 adapter 都只接受 composition root 注入的 node-postgres `Pool` 和正式校验器，不读取连接串、不运行 migration、不重试事务。
+- `createPostgresRuntimeReaders` 提供严格的当前 WorldSnapshot 与按修订范围读取的有序 CommittedEvent；`createPostgresRulePluginProposalReceiptStore` 只接受 RulePluginGateway 的 verified receipt；`createPostgresRuntimeInvocationJournal` 为所有模型调用统一执行 prepared → dispatched/ambiguous → verified，并额外锁定每个 world/day 唯一的 Director 日结调用。dispatched 后没有持久化 verified receipt 时明确阻塞且不能再次签发 Provider 调用权；Director 返回只代表可继续日结，不代表 NPC 反应和世界提交已经完成。
+- **ExactDecimal + 零和账本**：Kernel 内建唯一 `ExactDecimal`（`BigInt` coefficient + scale）实现 `DecimalAmountComparer` 与 `LedgerPostArithmetic`；`fromValidatedDecimalString` 只消费已通过 WorldRuntime Schema 的金额串，不复制合同正则；禁止浮点与舍入；`ledger.post` 精确零和、同账户合并、保留原序并追加新账户，零余额不删、无铸币旁路。
+- **`createRuntimeContentActivation`**：部署组合根显式传入 `Pool`、Provider、不可信 ContentBundle JSON、`RulePluginModuleV1[]` 与合同校验器；经 Loader 后注册**唯一** Catalog，校验 content_pack / 拒绝 unsupported 依赖，**只收集** required rule_plugin 身份；Kernel 内**唯一** ABI 校验并接线。返回 Kernel 与 Bundle 身份。
+- **Model Invocation Assembly**：`ModelProvider.invoke(ResolvedModelInvocation)` 接收已验证 request + 有序 Prompt 文本；Catalog 锁定查询 PromptFragment / DirectorProfile / CharacterMind；`kernel.models.*` 五种闭合构造（日结/对话事件/System 对话/角色对话/角色反应），View 仅从锁定快照投影。ModelProtocol 缓存身份改为 digest/内容地址（已删除人工 revision 与随机 context id）。
+- **`createRuntimeExecutionKernel`**：注入 `Pool`、contracts、digest、Provider、modules、`requiredRulePluginDependencies`、catalog。无公开 `executeModel(candidate)` 旁路。`executeRulePlugin` / `mutations` 仍可用。
+- health-only `main` 不接激活。无真实 Provider、无日结编排、无引擎内示例内容/插件。
 
 ## 启动骨架服务
 
@@ -46,3 +55,13 @@ npm start -- --contracts=contracts --host=127.0.0.1 --port=8000
 ```
 
 启动后可访问 `GET /api/health`。`--contracts`、`--host`、`--port` 均为必填配置，进程不会猜测默认值。
+
+## PostgreSQL Store migration
+
+先由部署流程显式执行 migration；应用启动不会自动建表。`DATABASE_URL` 必须由部署环境提供：
+
+```powershell
+psql "$env:DATABASE_URL" -v ON_ERROR_STOP=1 -f apps/server/migrations/0001_atomic_packet_store.sql
+```
+
+本机没有可用的 `psql`，Docker daemon 也未运行，因此本次仅完成编译、Schema 加载与静态验证，未宣称 PostgreSQL live 验证。

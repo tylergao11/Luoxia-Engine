@@ -766,6 +766,126 @@
         }
       }
     },
+    "KnowledgeState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "knower_entity_id",
+        "fact_id",
+        "confidence"
+      ],
+      "properties": {
+        "knower_entity_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "fact_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "MemoryRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "memory_id",
+        "actor_entity_id",
+        "source_event_id",
+        "summary",
+        "salience",
+        "visibility"
+      ],
+      "properties": {
+        "memory_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "actor_entity_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "source_event_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "summary": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "salience": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "visibility": {
+          "$ref": "common.v1.schema.json#/$defs/Visibility"
+        }
+      }
+    },
+    "ScheduleState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schedule_id",
+        "owner",
+        "due",
+        "signal_type",
+        "payload",
+        "status"
+      ],
+      "properties": {
+        "schedule_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "owner": {
+          "$ref": "common.v1.schema.json#/$defs/SubjectRef"
+        },
+        "due": {
+          "$ref": "common.v1.schema.json#/$defs/LogicalTime"
+        },
+        "signal_type": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "payload": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        },
+        "status": {
+          "enum": [
+            "active",
+            "cancelled"
+          ]
+        },
+        "cancel_reason_code": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "status"
+            ],
+            "properties": {
+              "status": {
+                "const": "cancelled"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "cancel_reason_code"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "cancel_reason_code"
+              ]
+            }
+          }
+        }
+      ]
+    },
     "KnowledgeRecordOp": {
       "type": "object",
       "additionalProperties": false,
@@ -1067,7 +1187,7 @@
           "const": "materialization.request"
         },
         "request": {
-          "$ref": "materialization.v1.schema.json#/$defs/MaterializationRequest"
+          "$ref": "materialization.v1.schema.json#/$defs/MaterializationRequestDraft"
         }
       }
     },
@@ -1240,6 +1360,18 @@
         },
         "source": {
           "$ref": "#/$defs/PacketSource"
+        }
+      }
+    },
+    "PacketCommitIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event_id"
+      ],
+      "properties": {
+        "event_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
         }
       }
     },
@@ -2048,6 +2180,9 @@
         "relations",
         "ledgers",
         "facts",
+        "knowledge",
+        "memories",
+        "schedules",
         "goal_plans",
         "stage_instances",
         "visual_bindings",
@@ -2090,6 +2225,24 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/FactRecord"
+          }
+        },
+        "knowledge": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/KnowledgeState"
+          }
+        },
+        "memories": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MemoryRecord"
+          }
+        },
+        "schedules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ScheduleState"
           }
         },
         "goal_plans": {
@@ -2142,6 +2295,27 @@
           "items": {
             "$ref": "#/$defs/EventBudgetState"
           }
+        }
+      }
+    },
+    "WorldSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "world_id",
+        "world_revision",
+        "world_state"
+      ],
+      "properties": {
+        "world_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "world_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "world_state": {
+          "$ref": "#/$defs/WorldState"
         }
       }
     },

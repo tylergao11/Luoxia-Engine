@@ -24,19 +24,97 @@ export type WorldStateDocument = ValidatedJsonObject<
   typeof CONTRACT_REF.worldState
 >;
 
+export type WorldSnapshotDocument = ValidatedJsonObject<
+  typeof CONTRACT_REF.worldSnapshot
+>;
+
 export type CommittedEventDocument = ValidatedJsonObject<
   typeof CONTRACT_REF.committedEvent
+>;
+
+export type PacketCommitIdentityDocument = ValidatedJsonObject<
+  typeof CONTRACT_REF.packetCommitIdentity
+>;
+
+export type DomainEventDocument = ValidatedJsonObject<
+  typeof CONTRACT_REF.domainEvent
+>;
+
+export type MaterializationRequestDocument = ValidatedJsonObject<
+  typeof CONTRACT_REF.materializationRequest
+>;
+
+export type SessionViewDocument = ValidatedJsonObject<
+  typeof CONTRACT_REF.sessionView
 >;
 
 export interface PacketSemanticGate {
   assertApplicable(
     packet: ContentPacketDocument,
-    snapshot: WorldStateDocument,
+    snapshot: WorldSnapshotDocument,
   ): Promise<void>;
 }
 
-export interface PacketCommitPreparation {
+export interface PacketTransitionCandidates {
   readonly nextWorldStateCandidate: unknown;
+  readonly domainEventCandidates: readonly unknown[];
+  readonly materializationRequestCandidates: readonly unknown[];
+}
+
+export interface PacketStateTransition {
+  apply(
+    packet: ContentPacketDocument,
+    snapshot: WorldSnapshotDocument,
+    commitIdentity: PacketCommitIdentityDocument,
+  ): PacketTransitionCandidates;
+}
+
+export interface SessionViewProjectionInput {
+  readonly snapshot: WorldSnapshotDocument;
+  readonly sessionId: string;
+  readonly viewRevision: number;
+  readonly basisToken: string;
+  readonly controlBindingId: string;
+  readonly renderNodeCandidates: readonly unknown[];
+  readonly noticeCandidates: readonly unknown[];
+}
+
+export interface SessionViewProjector {
+  project(input: SessionViewProjectionInput): SessionViewDocument;
+}
+
+export {
+  createPacketSemanticGate,
+  type DecimalAmountComparer,
+  type PacketContentDigest,
+  type PacketSemanticGateDependencies,
+  type RuleHoldEvaluator,
+  type RulePluginProposalReceiptLookup,
+  type StaticComponentDigestLookup,
+} from "./packet-semantic-gate.js";
+
+export {
+  createPacketStateTransition,
+  type LedgerPostArithmetic,
+  type PacketStateTransitionDependencies,
+} from "./packet-state-transition.js";
+
+export {
+  createSessionViewProjector,
+  type SessionViewProjectorDependencies,
+} from "./session-view-projection.js";
+
+export {
+  createContentRuntimeCatalog,
+  type BundleLockRef,
+  type ContentRuntimeCatalog,
+  type ContentRuntimeCatalogDependencies,
+  type RuleEvaluationBinding,
+  type RuleRefLike,
+  type StaticDefinitionRefLike,
+} from "./content-runtime-catalog.js";
+
+export interface PacketCommitPreparation {
   readonly committedEventCandidate: unknown;
   readonly resultCandidate: unknown;
 }
@@ -46,12 +124,26 @@ export interface AuthorizedPacketCommit {
   readonly nextWorldState: WorldStateDocument;
   readonly committedEvent: CommittedEventDocument;
   readonly result: ApplyPacketResultDocument;
+  readonly materializationRequests: readonly MaterializationRequestDocument[];
 }
 
 export interface LockedWorldTransaction {
   readDuplicateResult(packet: ContentPacketDocument): Promise<unknown | undefined>;
   readSnapshot(): Promise<unknown>;
-  prepare(packet: ContentPacketDocument): Promise<PacketCommitPreparation>;
+  /**
+   * Creates an unpersisted identity candidate for this apply attempt.
+   * It must not reserve a row or mutate storage before all candidates validate.
+   */
+  createCommitIdentityCandidate(
+    packet: ContentPacketDocument,
+  ): Promise<unknown>;
+  prepare(
+    packet: ContentPacketDocument,
+    commitIdentity: PacketCommitIdentityDocument,
+    nextWorldState: WorldStateDocument,
+    domainEvents: readonly DomainEventDocument[],
+    materializationRequests: readonly MaterializationRequestDocument[],
+  ): Promise<PacketCommitPreparation>;
   commit(prepared: AuthorizedPacketCommit): Promise<void>;
 }
 
@@ -67,6 +159,7 @@ export interface AtomicPacketStore {
 export interface WorldCoreDependencies {
   readonly contracts: ContractValidator;
   readonly semanticGate: PacketSemanticGate;
+  readonly stateTransition: PacketStateTransition;
   readonly store: AtomicPacketStore;
 }
 
@@ -79,11 +172,13 @@ export function createWorldCore(
 class DefaultWorldAuthority implements WorldAuthority {
   readonly #contracts: ContractValidator;
   readonly #semanticGate: PacketSemanticGate;
+  readonly #stateTransition: PacketStateTransition;
   readonly #store: AtomicPacketStore;
 
   public constructor(dependencies: WorldCoreDependencies) {
     this.#contracts = dependencies.contracts;
     this.#semanticGate = dependencies.semanticGate;
+    this.#stateTransition = dependencies.stateTransition;
     this.#store = dependencies.store;
   }
 
@@ -111,15 +206,44 @@ class DefaultWorldAuthority implements WorldAuthority {
         }
 
         const snapshot = this.#contracts.assertObject(
-          CONTRACT_REF.worldState,
+          CONTRACT_REF.worldSnapshot,
           await transaction.readSnapshot(),
         );
+        assertSnapshotMatchesPacket(packet.value, snapshot.value);
         await this.#semanticGate.assertApplicable(packet, snapshot);
 
-        const preparation = await transaction.prepare(packet);
+        const commitIdentity = this.#contracts.assertObject(
+          CONTRACT_REF.packetCommitIdentity,
+          await transaction.createCommitIdentityCandidate(packet),
+        );
+        const transition = this.#stateTransition.apply(
+          packet,
+          snapshot,
+          commitIdentity,
+        );
         const nextWorldState = this.#contracts.assertObject(
           CONTRACT_REF.worldState,
-          preparation.nextWorldStateCandidate,
+          transition.nextWorldStateCandidate,
+        );
+        const domainEvents = Object.freeze(
+          transition.domainEventCandidates.map((candidate) =>
+            this.#contracts.assertObject(CONTRACT_REF.domainEvent, candidate),
+          ),
+        );
+        const materializationRequests = Object.freeze(
+          transition.materializationRequestCandidates.map((candidate) =>
+            this.#contracts.assertObject(
+              CONTRACT_REF.materializationRequest,
+              candidate,
+            ),
+          ),
+        );
+        const preparation = await transaction.prepare(
+          packet,
+          commitIdentity,
+          nextWorldState,
+          domainEvents,
+          materializationRequests,
         );
         const committedEvent = this.#contracts.assertObject(
           CONTRACT_REF.committedEvent,
@@ -131,7 +255,13 @@ class DefaultWorldAuthority implements WorldAuthority {
         );
 
         assertPacketResult(packet.value, result.value, "committed");
-        assertCommittedEvent(packet.value, committedEvent.value, result.value);
+        assertCommittedEvent(
+          packet.value,
+          commitIdentity.value,
+          domainEvents,
+          committedEvent.value,
+          result.value,
+        );
 
         await transaction.commit(
           Object.freeze({
@@ -139,9 +269,44 @@ class DefaultWorldAuthority implements WorldAuthority {
             nextWorldState,
             committedEvent,
             result,
+            materializationRequests,
           }),
         );
         return result;
+      },
+    );
+  }
+}
+
+function assertSnapshotMatchesPacket(
+  packet: JsonObject,
+  snapshot: JsonObject,
+): void {
+  const packetWorldId = expectString(packet, "world_id", "ContentPacket");
+  const snapshotWorldId = expectString(snapshot, "world_id", "WorldSnapshot");
+  const packetBasisRevision = expectInteger(
+    packet,
+    "basis_revision",
+    "ContentPacket",
+  );
+  const snapshotWorldRevision = expectInteger(
+    snapshot,
+    "world_revision",
+    "WorldSnapshot",
+  );
+
+  if (
+    snapshotWorldId !== packetWorldId ||
+    snapshotWorldRevision !== packetBasisRevision
+  ) {
+    throw new EngineFault(
+      "world.apply_packet.snapshot_mismatch",
+      "Locked world snapshot does not match the submitted packet",
+      {
+        packet_world_id: packetWorldId,
+        snapshot_world_id: snapshotWorldId,
+        packet_basis_revision: packetBasisRevision,
+        snapshot_world_revision: snapshotWorldRevision,
       },
     );
   }
@@ -176,6 +341,8 @@ function assertPacketResult(
 
 function assertCommittedEvent(
   packet: JsonObject,
+  commitIdentity: JsonObject,
+  domainEvents: readonly DomainEventDocument[],
   event: JsonObject,
   result: JsonObject,
 ): void {
@@ -184,6 +351,11 @@ function assertCommittedEvent(
     "CommittedEvent.packet",
   );
   const eventId = expectString(event, "event_id", "CommittedEvent");
+  const allocatedEventId = expectString(
+    commitIdentity,
+    "event_id",
+    "PacketCommitIdentity",
+  );
   const resultEventId = expectString(
     result,
     "committed_event_id",
@@ -211,20 +383,31 @@ function assertCommittedEvent(
   );
   const packetWorldId = expectString(packet, "world_id", "ContentPacket");
   const eventWorldId = expectString(event, "world_id", "CommittedEvent");
+  const eventDomainEvents = expectProperty(
+    event,
+    "domain_events",
+    "CommittedEvent",
+  );
+  const expectedDomainEvents = domainEvents.map(
+    (domainEvent) => domainEvent.value,
+  );
 
   if (
     !jsonEquals(packet, eventPacket) ||
+    eventId !== allocatedEventId ||
     eventId !== resultEventId ||
     eventRevision !== resultRevision ||
     revisionBefore !== packetBasisRevision ||
     eventRevision !== revisionBefore + 1 ||
-    eventWorldId !== packetWorldId
+    eventWorldId !== packetWorldId ||
+    !jsonEquals(eventDomainEvents, expectedDomainEvents)
   ) {
     throw new EngineFault(
       "world.apply_packet.commit_artifact_mismatch",
       "Prepared world state, committed event, and result are not one atomic commit",
       {
         event_id: eventId,
+        allocated_event_id: allocatedEventId,
         result_event_id: resultEventId,
         event_revision: eventRevision,
         result_revision: resultRevision,

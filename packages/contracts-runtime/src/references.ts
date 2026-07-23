@@ -24,14 +24,22 @@ export function definitionRef<
 }
 
 export const CONTRACT_REF = Object.freeze({
+  uuid: definitionRef(CONTRACT_ID.common, "Uuid"),
+  dayNumber: definitionRef(CONTRACT_ID.common, "DayNumber"),
   contentBundle: CONTRACT_ID.contentBundle,
   worldState: definitionRef(CONTRACT_ID.worldRuntime, "WorldState"),
+  worldSnapshot: definitionRef(CONTRACT_ID.worldRuntime, "WorldSnapshot"),
   contentPacket: definitionRef(CONTRACT_ID.worldRuntime, "ContentPacket"),
   packetProposal: definitionRef(CONTRACT_ID.worldRuntime, "PacketProposal"),
+  packetCommitIdentity: definitionRef(
+    CONTRACT_ID.worldRuntime,
+    "PacketCommitIdentity",
+  ),
   applyPacketResult: definitionRef(
     CONTRACT_ID.worldRuntime,
     "ApplyPacketResult",
   ),
+  domainEvent: definitionRef(CONTRACT_ID.worldRuntime, "DomainEvent"),
   committedEvent: definitionRef(CONTRACT_ID.worldRuntime, "CommittedEvent"),
   sessionView: definitionRef(CONTRACT_ID.worldRuntime, "SessionView"),
   modelRequest: definitionRef(CONTRACT_ID.modelProtocol, "ModelRequest"),

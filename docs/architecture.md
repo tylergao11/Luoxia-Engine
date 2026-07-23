@@ -136,7 +136,7 @@ ContentBundle 直接初始化角色行动状态机、世界状态机、角色私
   → 玩家结束当日；仍 available 的当日卡过期且不退款
 ```
 
-等待模型、并行任务与重试属于 Runtime 的编排工作状态，不写入 WorldState。NPC 反应落地后不在当天重新唤醒 Director；后续 Director 调用自然读取最新世界投影与客观轨迹。任何必要模型响应缺失都会使当前编排保持未完成，不生成无影响、跳过或替代结果。
+等待模型与并行任务属于 Runtime 的编排工作状态，不写入 WorldState。NPC 反应落地后不在当天重新唤醒 Director；后续 Director 调用自然读取最新世界投影与客观轨迹。任何必要模型响应缺失都会使当前编排保持未完成，不生成无影响、跳过或替代结果，也不自动重调同一次模型调用。
 
 ### 5.2.3 事件权力、移动与派发模式
 
@@ -159,12 +159,12 @@ ContentBundle 直接初始化角色行动状态机、世界状态机、角色私
 
 ```text
 加载 available 卡片与 SealedEventResult
-  → Core 固定校验 card.day = current day、player phase、卡片控制权、sealed digest，再校验封存的额外必要前置条件
-      ├─ 成立：封存 ops + event_card.trigger 原子提交，再展示封存叙事
-      └─ 不成立：event_card.invalidate 原子提交，明确显示失效原因码
+  → Core 固定校验 card.day = current day、player phase、卡片控制权、sealed digest 与确定性上下文
+      ├─ trigger：Packet.preconditions 精确等于 sealed.preconditions；全部成立后只允许封存 ops + 匹配的 event_card.trigger
+      └─ invalidate：Packet.preconditions 必须为空；同一锁定快照中至少一条 sealed precondition 真实不成立后，只允许一个匹配的 event_card.invalidate，reason_code 固定为 event_card.precondition_failed
 ```
 
-`expired` 只表示跨日未处理；`invalidated` 表示点击时必要条件已不成立。两者均不退款。`event_card.trigger` 的 StateApplier 语义固定要求 available、同一 control、card.day 与当前 day 相等且 digest 一致，不能由插件或空 preconditions 放宽；从 player phase 离开时，同一个 `day_cycle.advance` Packet 必须穷举并 expire 当日全部未处理卡，进入下一次 player phase 时在同一 Packet 打开该日唯一 EventBudget。若卡片结果是发起决斗，封存的结果只能是打开权威 StageInstance，胜负仍由后续 `stage_outcome.resolve` 决定，不能提前封存胜者。
+`expired` 只表示跨日未处理；`invalidated` 表示点击时必要条件已不成立。两者均不退款。未知 precondition、协议形状错误或规则/摘要依赖故障不能伪装成卡片失效，必须作为原错误拒绝整包。`event_card.trigger` 的 StateApplier 语义固定要求 available、同一 control、card.day 与当前 day 相等且 digest 一致，不能由插件或空 preconditions 放宽；从 player phase 离开时，同一个 `day_cycle.advance` Packet 必须穷举并 expire 当日全部未处理卡，进入下一次 player phase 时在同一 Packet 打开该日唯一 EventBudget。若卡片结果是发起决斗，封存的结果只能是打开权威 StageInstance，胜负仍由后续 `stage_outcome.resolve` 决定，不能提前封存胜者。
 
 ### 5.2.5 Character Mind 对自身状态机负责
 
@@ -225,16 +225,34 @@ EventCard 点击路径只复用已经裁决的封存结果：
 
 ```text
 event_card.trigger command
-  → Core 校验卡片生命周期与 SealedEventResult.preconditions
+  → Core 校验卡片生命周期、SealedEventResult 身份与 trigger / invalidate 互斥分支
   → ContentPacket(source_kind = sealed_event_result)
-  → apply_packet(封存 EventOutcomeOp[] + event_card.trigger)
+  → apply_packet(封存 EventOutcomeOp[] + event_card.trigger，或单一 event_card.invalidate)
 ```
 
-`ContentPacket.source` 明确区分 `rule_plugin` 与 `sealed_event_result`。后者必须引用 WorldState 中同一 card/result/digest，Core 不能借此拼装新结果。相同 packet 重试必须幂等；前置条件不匹配时完整拒绝，不做“尽量应用”。
+`ContentPacket.source` 明确区分 `rule_plugin` 与 `sealed_event_result`。后者必须引用 WorldState 中同一 card/result/digest，Core 不能借此拼装新结果。trigger 分支必须携带并通过全部封存前置条件；invalidate 分支不得执行任何封存 op，只能在封存条件真实失败时提交固定失效码。相同 packet 重试必须幂等；不做“尽量应用”。
 
 `EffectOp` 是闭合、版本化的引擎语法。对话只能由 human 首轮打开，之后只允许 `dialogue.turn.append` 与 `dialogue.close`；每次追加携带 expected revision，既有 turn、来源摘要与 AgencyCommitment 永远不可覆盖、删除或重排。动态 NPC 只可通过 `state_machine.create` 建立一个引用既有 StateMachine 的实例，不得生成新状态机 executor。`EventOutcomeOp` 是 EffectOp 的严格子集，允许结果改变定义、实体、组件、关系、账本、位置、知识、记忆、日程、时间、目标、状态机，或打开 Stage；它禁止嵌套发布/触发卡片、打开预算、写对话、改变控制权和直接推进日循环。
 
+### 7.1 Exact Decimal 与零和账本
+
+`DecimalString` 的合法形状**只**由 `world-runtime` Schema 定义；ExactDecimal 通过 `fromValidatedDecimalString` 只消费已校验串，不复制合同正则、不声明第二套合法格式。解析异常视为内部不变量破坏。求值使用 `BigInt coefficient + scale`，比较器与过账算术共用同一路径。禁止 `Number`、浮点、舍入与固定小数位；写出时去除多余前后零，负零规范化为 `"0"`。
+
+`ledger.post` 的全部 entries 合并同账户后必须精确零和；不提供铸币旁路——增发与销毁只能通过对手账户完成，是否允许由世界规则与前置条件裁决。算术层不拦截负余额。原 `LedgerState.balances` 账户必须唯一；过账保留原账户顺序，新账户按 entries 中首次出现顺序追加，零余额不删除。`ledger.balance_at_least` 使用同一 ExactDecimal 比较。
+
+`apply_packet` 在世界锁内依次完成幂等查询、同事务快照、语义门禁，并为本次提交生成一个尚未持久化、经 Schema 校验的 `PacketCommitIdentity` 候选；生成候选不得预留记录或修改存储。该身份作为调用参数传给唯一的 EffectOp Handler Map，不能成为 StateTransition 单例的构造依赖。Handler Map 一次产出候选 WorldState、按 op 顺序投影的 DomainEvent 与 MaterializationRequest；三类结果分别通过正式 Schema 后才交给事务 prepare。`MaterializationRequestOp` 只携带不含提交身份和生命周期的 Draft，Handler Map 必须注入本次 event ID 并创建 `pending` 正式请求。`domain_event.emit` 的唯一落点是 `CommittedEvent.domain_events`，`materialization.request` 的当前记录进入与世界提交原子的 Materialization Ledger / outbox，二者都不进入 WorldState；AtomicPacketStore 只能持久化这些已验证结果，禁止重新扫描 Packet 实现第二套 EffectOp 语义。
+
+v1 的唯一权威 Store 是 PostgreSQL 18.x，由 Server composition root 以 node-postgres `Pool` 显式注入。一份初始 SQL migration 创建 `worlds`、`committed_events`、`materialization_requests`、模型调用记录、RulePlugin 提案授权回执与每日 Director 调用记录：WorldState 是 `worlds.state_document` 的唯一当前真相，CommittedEvent 是不可变事件真相，物化请求以同一事务 outbox 记录；其他表只保存正式合同原文和编排身份，不保存第二份世界状态。JSONB 只能保存已经过对应 Schema 的完整合同，列、revision 与 JSON 关键身份字段必须由数据库约束相互校验。所有 Store 都不读取环境变量、不创建 Pool、不自动执行 migration，也不重试事务。
+
+每次 `apply_packet` 使用同一 PoolClient 执行 `BEGIN ISOLATION LEVEL READ COMMITTED`，先锁定目标 world，再在锁内查询全局 packet_id 幂等记录、读取快照、生成未持久化 event ID、prepare 全部候选并逐项核验，最后依次写入 CommittedEvent、Materialization outbox，使用 revision CAS 更新 WorldState；只有完整 authorized commit 或精确 duplicate 才由外层物理 COMMIT，其余情况一律 ROLLBACK。Save Schema migration、Content Upgrade 与数据库 DDL migration 是三条独立流程：前两者不得借数据库 schema 变更重解释世界，DDL migration 也不得改写已提交世界或内容锁。
+
+Runtime 读侧按 `world_id` 重新校验当前 WorldSnapshot，或按明确的排他起点与包含终点读取连续、有序的 CommittedEvent 区间；数据库列与每份合同文档的身份不一致都视为存储损坏。RulePlugin PacketProposal 只有在 RulePluginGateway 完成请求证据、响应关联和 operation 语义校验并签发 opaque receipt 后才能持久化；授权记录保存原 RulePluginRequest、RulePluginResponse 与精确 PacketProposal，World Core 仍只通过 `RulePluginProposalReceiptLookup` 取得重新校验后的正式 Proposal。
+
 普通 Packet 不包含模型草稿、资产 URI 或 GDJS 指令。唯一例外是 `EventCardPublishOp` 内已封存的卡片标题、摘要与结果叙事：这些字段是惰性的表现数据，不参与规则求值，只有结果成功提交后才经 `narrative.show` 展示。模型与客户端仍不能提交 ContentPacket 或 EffectOp；RulePlugin 只能返回 PacketProposal，由 Core 重新校验并封装。
+
+### 7.2 Runtime Content Activation
+
+部署组合根通过 `createRuntimeContentActivation` 显式提供 `Pool`、`ContractValidator`、`JsonDigest`、`ModelProvider`、不可信 ContentBundle JSON 列表与受信 `RulePluginModuleV1[]`。激活路径固定为：ContentBundle Loader（Schema + digest + 语义门禁）→ 单一 `ContentRuntimeCatalog.register` → 校验 required `content_pack` 与拒绝 required `stage_module`/`asset_provider` → **收集** required `rule_plugin` 依赖身份（不创建 ABI）→ 构造与该 Catalog 一致的 `RuntimeExecutionKernel`。Kernel **内部唯一** ABI 注册表校验收集到的 rule_plugin 依赖并构造 Adapter。返回 Kernel 与已验证 `(pack_id, bundle_digest)` 身份列表，不复制内容文档。禁止默认目录、内容扫描、环境变量猜路径、内置示例包或示例插件。引擎仓库不承载具体世界内容或具体 RulePlugin 实现。
 
 ## 8. RulePlugin
 
@@ -248,6 +266,26 @@ event_card.trigger command
 - 随机只返回 ChoiceSpec；DeterministicContext 由 Core 签发 context ID、digest 与 token，插件响应必须原样回显，Core 比对后才可封装 Packet；
 - 插件 API 版本与实现 digest 被存档锁定，缺少依赖时拒绝加载，不启用通用兜底规则；
 - 内容包只声明通用 capability/plugin ID 与配置，组合根解析实现，World Core 不按世界 import 代码。
+
+### 8.1 进程内 ABI Host 与 rule.holds
+
+Runtime Kernel 不接受任意 `RulePluginAdapter` 旁路注入。组合根必须显式提供 `RulePluginModuleV1[]`（`manifest` + `resolve`）；ABI Host 在构造期用 `rule-plugin.v1` Schema 校验每个 manifest，按 `PluginLock` 与 `implementation_digest` 去重，并要求每个 `operation_id` 唯一且声明 `operation_kind`。请求到达时，`plugin_lock` 与 `operation_id`/`operation_kind` 必须精确命中已注册模块，否则失败。禁止目录扫描、动态下载、默认插件、兜底插件与内容硬编码。
+
+`ContentPacket` 前置条件 `rule.holds` 的生产求值路径固定为：
+
+```text
+RuleRef
+  → Content Runtime Catalog（WorldLaw.evaluator + rule_plugin DependencyLock）
+  → ABI 以 package_id + integrity_sha256 命中已注册 manifest，取出完整 PluginLock
+  → 组装 operation_kind=rule.evaluate 的 RulePluginRequest
+       readonly_world = 当前门禁锁定 WorldSnapshot
+       deterministic_context = 当前 ContentPacket 原值
+       request_id 仅作关联，不进入规则语义或存档
+  → RulePluginGateway（Schema + 语义门禁 + 同一 ABI Adapter）
+  → 仅 ValidationOutput.valid 映射为 holds 布尔；reject / choice.required 明确失败
+```
+
+ContentBundle 的 `DependencyLock` 不含 `api_version`；`PluginLock.api_version` 只来自已注册 manifest，不用 `DependencyLock.version` 猜测。`DependencyLock.version` 必须等于 `manifest.implementation_version`。Catalog 无法解析绑定或 ABI 未注册实现时立即失败，不猜测映射。`rule.holds` 求值只读，不生成 PacketProposal，不调用 `apply_packet`。
 
 未来开放第三方包时保留同一协议，把 Host 替换为签名与沙箱执行，不改变 World Core。
 
@@ -276,6 +314,8 @@ GDJS 只认识固定渲染原语、通用交互消息和不透明内容 ID，不
 `map.move` 只携带目标地点；actor 从鉴权 Session 的 human ControlBinding 推导，内容包的 `navigation_resolver` 决定可达性并产生位置提案。成功位移通过 SessionView 返回，失败通过 CommandResult 明确拒绝，不转交 Director。
 
 服务端只能推送 SessionView、对话回复、CommandResult、PresentationFrame、Stage open/update/close、AssetBinding 与协议错误。SessionView 与 DialogueReply 只携带 DialogueView/DialogueTurnView；模型请求 ID、输出摘要、AgencyCommitment 与内部 dialogue revision 永不下发客户端。卡片结果叙事只在封存结果成功提交后，通过 `narrative.show` 发送；其中 `dialogue_quote` 由服务端从不可变 DialogueTurn 投影为 DialogueTurnQuoteView，Director 不能提供 speaker 或 text。
+
+SessionView 由 World Core 的纯投影端口从锁定 WorldSnapshot 生成：它只依据会话指定的 active human ControlBinding 确定玩家，并按玩家与当日筛选预算、卡片、GoalPlan 和对话；Dialogue 的参与者与 speaker 只投影稳定身份，不携带 `expected_revision`。session ID、view revision、basis token 以及 RenderNode/Notice 候选只由 Server 或 Stage 表现层提供；Core 不签发或校验 token，不缓存，不按 world/content 猜表现，也不把候选写回 WorldState。最终完整 View 必须通过正式 Schema，客户端永远不能取得未投影的世界字段。
 
 每条命令携带 command/message ID、session ID 与会话级 `basisToken`，用于幂等、并发拒绝和因果追踪。客户端不接收会因隐藏事实变化而泄密的全局 world revision。SessionView delta 只能应用到匹配的 view revision，否则全量重同步；不支持的新渲染原语明确报协议不兼容，不按内容包补客户端分支。
 
@@ -323,11 +363,15 @@ CharacterMind.dialogue     → reply + AgencyCommitmentDraft[]
 CharacterMind.react        → CharacterReactionProposal[]
 ```
 
-不存在独立 `System.*`、`Narrator.render` 或 `materialization.spec` 文本模型入口。`request_kind` 是 ModelRequest 的唯一入口 discriminator；ModelResponse 必须回显 request_kind、resident_context_digest、dynamic_input_digest 与 output_digest，Core 与 pending request 全量比对后才生成 VerifiedModelOutputRef，任何角色或缓存摘要不匹配都直接拒绝且无兜底。Character Mind 的 commitment 只是未落地证据草案：Core 必须验证响应角色与证明，再经 append-only 对话 Packet 写入；Director、System、客户端和内容包均无 commitment 写入口。EventCard 结果叙事由 Director 与语义结果一同提出并在发卡时封存，但 NPC 原话只能引用既有 turn；资产引擎直接根据 Definition、ArtProfile、MaterializationProfile 与视觉槽生成规格。
+不存在独立 `System.*`、`Narrator.render` 或 `materialization.spec` 文本模型入口。`request_kind` 是 ModelRequest 的唯一入口 discriminator；ModelResponse 必须回显 request_kind、resident_context_digest、dynamic_input_digest 与 output_digest。ModelGateway 先把已经 Schema 验证的 WorldSnapshot 与 ModelRequest 封成 prepared invocation；Provider 调用只接受持久化 Journal 在数据库确认 dispatched 后签发的一次性 opaque authorization。响应必须再经过 Schema、digest、correlation 与入口语义门禁，之后才能把 snapshot、request、response、VerifiedModelOutputRef、world ID 与观察 revision 封成同一份 verified receipt；从数据库恢复时也只能通过同一 Gateway 重新验证全部四份合同，禁止公开 seal 工厂。prepared invocation 与 verified receipt 的来源集合属于具体 Gateway 实例；Journal、RulePluginGateway 与提案存储只能持有配对生产实例的只读 verifier，不接受另一实例生成的对象。`failed` 输出直接成为 EngineFault，绝不签发 proof。五种入口分别校验输入与输出关联：Character resident、主观角色、知识 viewer 与角色状态机 owner 必须是同一 Entity；对话必须 active 且回复当前最后 human turn；daily/event card 的 day、actor、dialogue、proposal/outcome/gate 引用必须闭合；Character.react 必须对每个 stimulus 恰好返回一个 reaction，并精确覆盖该角色参与的 gate。Character Mind 的 commitment 只是未落地证据草案：Runtime 仅可新增 commitment_id，其余字段必须逐项保留 verified draft，再经 append-only 对话 Packet 写入。Director、System、客户端和内容包均无 commitment 写入口。EventCard 结果叙事由 Director 与语义结果一同提出并在发卡时封存，但 NPC 原话只能引用既有 turn；资产引擎直接根据 Definition、ArtProfile、MaterializationProfile 与视觉槽生成规格。
+
+RulePluginGateway 不保存全局模型证明，也不按 request ID 猜测证明。每次 `resolve` 必须显式传入本次作用域的 verified model receipts（没有模型输入时也传空数组），并在调用 RulePlugin adapter 前确认请求内每个 proof 与某一 receipt 完全一致、receipt 属于同一 world，且 proposal、reply、commitment 或 reaction 是原 ModelResponse 的精确成员。模型 proof 的 `basis_revision` 表示模型观察世界的 revision；连续裁决同一次模型输出时它可以小于当前 RulePluginRequest revision，但不得大于当前 revision。PacketProposal 仍必须使用本次 RulePluginRequest 的当前 basis revision。
+
+所有模型调用共用同一持久化 Journal 与 `model_invocations` 状态真相：prepared 请求与精确 WorldSnapshot 先落库，随后通过数据库状态转换进入 `dispatched_ambiguous`，事务提交后才签发一次性 Provider 调用权；该状态如果没有持久化 verified response/proof，就表示结果未知且任何进程都不得重新调用模型。`Director.daily_settlement` 额外以数据库唯一约束保证每个 `(world_id, day)` 只有一次 prepared 请求。完整 Director receipt 落库后状态只到 `response_verified`；这不等价于日结完成，NPC 反应、规则裁决和全部世界提交的完成证据属于后续业务编排，不由本基础 Journal 伪造。
 
 ### 12.1 常驻区与动态区
 
-每次 ModelRequest 明确拆成 `resident_context` 与动态 `input`。Provider Adapter 必须按下列顺序组装 Prompt：
+每次 ModelRequest 明确拆成 `resident_context` 与动态 `input`。Runtime 通过 Prompt materializer 从锁定 ContentBundle 解析有序 Prompt 文本；Provider 接收内部 `ResolvedModelInvocation`（已验证 request + 与 CacheBlockRef 逐项匹配的有序 blocks + Director event_context digests）。组装顺序：
 
 ```text
 常驻前缀：common_blocks
@@ -337,17 +381,15 @@ CharacterMind.react        → CharacterReactionProposal[]
   → objective traces / dialogue / event batch
 ```
 
-Director 的 common_blocks 固定放 Engine 契约、Director 核心 Prompt 与内容包静态上下文；event_context 固定放事件合同、Capability Catalog 与 World Law Catalog；三个模式只替换最后的 mode_block。因此同一 Director 的三个模式可命中共同前缀，模式内可命中完整常驻前缀。
+缓存身份只使用内容地址 `block_id` / `resident_key` 与 `content_digest` / `resident_digest`；**禁止**人工 `block_revision`、`resident_revision`、`context_revision` 与无所有者的随机 resident/context UUID。任一常驻源变化必须产生新 digest，不得原地覆盖。Prompt 文本是只读派生物；ContentBundle 仍是唯一真相。
 
-Character Mind 的 common_blocks 固定放角色协议，persona_blocks 固定放不可变身份、背景与性格，mode_block 区分 dialogue/react。动态主观知识、记忆窗口、行动状态机与本次对话/事件数组永远在尾部。不同角色不得共享 persona cache key。
-
-`request_id`、时间戳、`basis_revision`、world revision、游标和本次输入摘要不得插入常驻前缀。每个块按规范化字节计算 digest；任一常驻源变化必须产生新 revision/digest，不得原地覆盖。缓存未命中只允许增加延迟与 Token，绝不能改变语义、缩减输入或启用另一套 Prompt。
+Kernel 只暴露闭合 `kernel.models.*`（五种 request_kind）；WorldView / KnowledgeView / Dialogue 等只能从锁定 WorldSnapshot 投影，调用方不得传入任意 View JSON。不存在公开的 `executeModel(scope, candidate)` 旁路。
 
 ### 12.2 隔离与失败
 
 Director 不读取角色完整私有 Prompt、私有缓存或未表达的内心。角色之间也不共享私有上下文。ResidentContextRef、缓存与投影都只是可丢弃派生物；WorldState、ContentBundle lock、允许可见的 transcript 和 CommittedEvent 才是真相。
 
-同一日终结算中，Runtime 先按目标 Entity 聚合 CharacterEvent；同一 Character Mind 一次接收事件数组，不同 Character Mind 异步并行。全部必要反应经过规则处理后结算才完成。模型失败、等待与重试只属于编排状态，不写入 WorldState，也不产生默认 `no_effect`、跳过或兜底回答。
+同一日终结算中，Runtime 先按目标 Entity 聚合 CharacterEvent；同一 Character Mind 一次接收事件数组，不同 Character Mind 异步并行。全部必要反应经过规则处理后结算才完成。模型失败与等待只属于编排状态，不写入 WorldState，也不产生默认 `no_effect`、跳过或兜底回答。已经进入持久化 dispatched 状态的模型调用不自动重试；缺少 verified receipt 时保持明确阻塞。
 
 ## 13. ContentBundle JSON
 

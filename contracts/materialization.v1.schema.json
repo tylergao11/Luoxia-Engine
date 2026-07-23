@@ -43,6 +43,64 @@
         }
       }
     },
+    "MaterializationRequestDraft": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "world_id",
+        "subject",
+        "subject_revision",
+        "slot_id",
+        "materialization_profile",
+        "art_profile",
+        "generation_spec_digest",
+        "reuse_scopes",
+        "fallback"
+      ],
+      "properties": {
+        "request_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "world_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "subject": {
+          "$ref": "common.v1.schema.json#/$defs/SubjectRef"
+        },
+        "subject_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "slot_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "materialization_profile": {
+          "$ref": "#/$defs/ProfileRef"
+        },
+        "art_profile": {
+          "$ref": "#/$defs/ProfileRef"
+        },
+        "generation_spec_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "reuse_scopes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "session",
+              "pack",
+              "reviewed_shared"
+            ]
+          }
+        },
+        "fallback": {
+          "$ref": "common.v1.schema.json#/$defs/AssetContentRef"
+        }
+      }
+    },
     "MaterializationRequest": {
       "type": "object",
       "additionalProperties": false,

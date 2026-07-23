@@ -853,16 +853,11 @@
       "additionalProperties": false,
       "required": [
         "block_id",
-        "block_revision",
         "content_digest"
       ],
       "properties": {
         "block_id": {
           "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
-        },
-        "block_revision": {
-          "type": "integer",
-          "minimum": 0
         },
         "content_digest": {
           "$ref": "common.v1.schema.json#/$defs/Sha256"
@@ -873,8 +868,6 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "context_id",
-        "context_revision",
         "context_digest",
         "event_contract_digest",
         "content_bundle_digest",
@@ -882,13 +875,6 @@
         "world_law_catalog_digest"
       ],
       "properties": {
-        "context_id": {
-          "$ref": "common.v1.schema.json#/$defs/Uuid"
-        },
-        "context_revision": {
-          "type": "integer",
-          "minimum": 0
-        },
         "context_digest": {
           "$ref": "common.v1.schema.json#/$defs/Sha256"
         },
@@ -912,7 +898,6 @@
       "required": [
         "context_kind",
         "resident_key",
-        "resident_revision",
         "resident_digest",
         "director_id",
         "common_blocks",
@@ -926,10 +911,6 @@
         },
         "resident_key": {
           "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
-        },
-        "resident_revision": {
-          "type": "integer",
-          "minimum": 0
         },
         "resident_digest": {
           "$ref": "common.v1.schema.json#/$defs/Sha256"
@@ -965,7 +946,6 @@
       "required": [
         "context_kind",
         "resident_key",
-        "resident_revision",
         "resident_digest",
         "entity_id",
         "mind_profile",
@@ -980,10 +960,6 @@
         },
         "resident_key": {
           "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
-        },
-        "resident_revision": {
-          "type": "integer",
-          "minimum": 0
         },
         "resident_digest": {
           "$ref": "common.v1.schema.json#/$defs/Sha256"

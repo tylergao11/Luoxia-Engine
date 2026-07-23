@@ -465,7 +465,12 @@
             "art_profile",
             "materialization_profile",
             "asset",
-            "binding"
+            "binding",
+            "state_machine",
+            "machine_state",
+            "machine_transition",
+            "character_mind",
+            "director_profile"
           ]
         },
         "owner_type_id": {

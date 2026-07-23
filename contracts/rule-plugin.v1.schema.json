@@ -324,7 +324,7 @@
           "minimum": 0
         },
         "readonly_world": {
-          "$ref": "world-runtime.v1.schema.json#/$defs/WorldState"
+          "$ref": "world-runtime.v1.schema.json#/$defs/WorldSnapshot"
         },
         "deterministic_context": {
           "$ref": "common.v1.schema.json#/$defs/DeterministicContext"
@@ -801,6 +801,7 @@
           }
         },
         "result_digest": {
+          "description": "Lowercase SHA-256 of the RFC 8785 canonical UTF-8 bytes of this ContentUpgradeOutput object with the result_digest member omitted.",
           "$ref": "common.v1.schema.json#/$defs/Sha256"
         }
       }
