@@ -114,6 +114,17 @@ export {
   type StaticDefinitionRefLike,
 } from "./content-runtime-catalog.js";
 
+export {
+  createDeterministicContextAuthority,
+  type DeterministicContextAuthority,
+  type DeterministicContextAuthorityDependencies,
+  type DeterministicContextDigest,
+  type DeterministicContextDocument,
+  type DeterministicContextIdFactory,
+  type DeterministicContextIssueInput,
+  type DeterministicContextTokenCodec,
+} from "./deterministic-context-authority.js";
+
 export interface PacketCommitPreparation {
   readonly committedEventCandidate: unknown;
   readonly resultCandidate: unknown;

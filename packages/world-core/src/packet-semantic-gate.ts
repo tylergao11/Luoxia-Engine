@@ -13,6 +13,7 @@ import {
 
 import type {
   ContentPacketDocument,
+  DeterministicContextAuthority,
   PacketSemanticGate,
   WorldSnapshotDocument,
 } from "./composition.js";
@@ -76,6 +77,8 @@ export interface PacketSemanticGateDependencies {
   readonly ruleHoldEvaluator: RuleHoldEvaluator;
   readonly proposalReceiptLookup: RulePluginProposalReceiptLookup;
   readonly staticComponentDigestLookup: StaticComponentDigestLookup;
+  /** Sole DeterministicContext authenticity authority for this composition. */
+  readonly deterministicContextAuthority: DeterministicContextAuthority;
 }
 
 const PRECONDITION_KINDS = [
@@ -159,7 +162,14 @@ class DefaultPacketSemanticGate implements PacketSemanticGate {
     };
 
     assertPacketIdentity(context);
-    assertDeterministicContextShape(context);
+    this.#dependencies.deterministicContextAuthority.assertAuthentic(
+      expectProperty(
+        packetValue,
+        "deterministic_context",
+        "ContentPacket",
+      ),
+      context.worldId,
+    );
     await assertPacketSource(context);
     await assertAllPreconditions(
       asObjectArray(
@@ -181,29 +191,6 @@ function assertPacketIdentity(context: EvaluationContext): void {
     "packet.basis_revision",
     context.worldRevision,
     expectInteger(context.packet, "basis_revision", "ContentPacket"),
-  );
-}
-
-function assertDeterministicContextShape(context: EvaluationContext): void {
-  const deterministicContext = expectJsonObject(
-    expectProperty(
-      context.packet,
-      "deterministic_context",
-      "ContentPacket",
-    ),
-    "ContentPacket.deterministic_context",
-  );
-  assertEqual(
-    "deterministic_context.issuer",
-    "world_core",
-    expectString(deterministicContext, "issuer", "DeterministicContext"),
-  );
-  expectString(deterministicContext, "context_id", "DeterministicContext");
-  expectString(deterministicContext, "context_digest", "DeterministicContext");
-  expectString(deterministicContext, "issuer_token", "DeterministicContext");
-  expectJsonObject(
-    expectProperty(deterministicContext, "logical_time", "DeterministicContext"),
-    "DeterministicContext.logical_time",
   );
 }
 

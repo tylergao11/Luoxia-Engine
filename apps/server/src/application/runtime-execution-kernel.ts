@@ -3,10 +3,16 @@ import type {
   JsonDigest,
 } from "@luoxia/contracts-runtime";
 import {
+  createDeterministicContextAuthority,
   createPacketSemanticGate,
   createPacketStateTransition,
   createWorldCore,
   type ContentRuntimeCatalog,
+  type DeterministicContextAuthority,
+  type DeterministicContextDocument,
+  type DeterministicContextIdFactory,
+  type DeterministicContextIssueInput,
+  type DeterministicContextTokenCodec,
   type RulePluginProposalReceiptLookup,
 } from "@luoxia/world-core/composition";
 import type { Pool } from "pg";
@@ -78,6 +84,13 @@ export interface RuntimeExecutionKernelDependencies {
   readonly requiredRulePluginDependencies: readonly RulePluginDependencyIdentity[];
   /** Locked ContentBundle index; also supplies StaticComponentDigestLookup. */
   readonly contentRuntimeCatalog: ContentRuntimeCatalog;
+  /**
+   * Server HMAC TokenCodec for DeterministicContext.issuer_token.
+   * Built at composition root from an explicit keyring; no defaults.
+   */
+  readonly deterministicContextTokenCodec: DeterministicContextTokenCodec;
+  /** Server-owned context_id factory; Authority is the only caller. */
+  readonly deterministicContextIdFactory: DeterministicContextIdFactory;
 }
 
 export type { RulePluginModuleV1 } from "./rule-plugin-abi.js";
@@ -94,6 +107,11 @@ export interface RuntimeExecutionKernelReaders {
  * Unique runtime execution entry for model and RulePlugin work.
  * Provenance is locked inside one composition and is not caller-assemblable.
  */
+export type DeterministicContextIssuePort = Pick<
+  DeterministicContextAuthority,
+  "issue"
+>;
+
 export interface RuntimeExecutionKernel {
   readonly readers: RuntimeExecutionKernelReaders;
   /** Authoritative ContentPacket construction; does not apply packets. */
@@ -104,6 +122,11 @@ export interface RuntimeExecutionKernel {
    * Closed model invocation surfaces only. No arbitrary ModelRequest candidate bypass.
    */
   readonly models: RuntimeModelFacades;
+  /**
+   * Sole DeterministicContext issue entry for future day-cycle / dialogue orchestration.
+   * Does not implement orchestration itself.
+   */
+  readonly deterministicContexts: DeterministicContextIssuePort;
   executeRulePlugin(
     candidate: unknown,
     modelInvocations: readonly VerifiedModelInvocationReceipt[],
@@ -133,6 +156,14 @@ export function createRuntimeExecutionKernel(
       recordedInvocationVerifier: modelGateway,
     });
 
+  // Sole DeterministicContext Authority for this kernel (Gate + RulePlugin share it).
+  const deterministicContextAuthority = createDeterministicContextAuthority({
+    contracts: dependencies.contracts,
+    digest: dependencies.digest,
+    tokenCodec: dependencies.deterministicContextTokenCodec,
+    contextIdFactory: dependencies.deterministicContextIdFactory,
+  });
+
   // Sole RulePlugin ABI instance for this kernel (activation does not create another).
   const rulePluginAbi = createRulePluginAbiRegistry({
     contracts: dependencies.contracts,
@@ -148,6 +179,7 @@ export function createRuntimeExecutionKernel(
     digest: dependencies.digest,
     adapter: rulePluginAdapter,
     modelProvenance: modelGateway.provenance,
+    deterministicContextAuthority,
   });
 
   const proposalReceiptStore: RulePluginProposalReceiptStore =
@@ -201,6 +233,7 @@ export function createRuntimeExecutionKernel(
     ruleHoldEvaluator,
     proposalReceiptLookup: readers.proposalReceipts,
     staticComponentDigestLookup: dependencies.contentRuntimeCatalog,
+    deterministicContextAuthority,
   });
   const stateTransition = createPacketStateTransition({
     ledgerArithmetic,
@@ -227,11 +260,20 @@ export function createRuntimeExecutionKernel(
     journal,
   });
 
+  const deterministicContexts: DeterministicContextIssuePort = Object.freeze({
+    issue(
+      input: DeterministicContextIssueInput,
+    ): DeterministicContextDocument {
+      return deterministicContextAuthority.issue(input);
+    },
+  });
+
   const kernel: RuntimeExecutionKernel = {
     readers,
     packets,
     mutations,
     models,
+    deterministicContexts,
     executeRulePlugin(
       candidate: unknown,
       modelInvocations: readonly VerifiedModelInvocationReceipt[],

@@ -2,6 +2,7 @@ import type {
   ContractValidator,
   JsonDigest,
 } from "@luoxia/contracts-runtime";
+import type { DeterministicContextAuthority } from "@luoxia/world-core/composition";
 
 import {
   RulePluginGateway,
@@ -15,6 +16,7 @@ export interface RulePluginGatewayDependencies {
   readonly digest: JsonDigest;
   readonly adapter: RulePluginAdapter;
   readonly modelProvenance: ModelInvocationProvenanceVerifier;
+  readonly deterministicContextAuthority: DeterministicContextAuthority;
 }
 
 /**
@@ -32,5 +34,6 @@ export function createRulePluginGateway(
     dependencies.adapter,
     createRulePluginSemanticGate(dependencies.digest),
     dependencies.modelProvenance,
+    dependencies.deterministicContextAuthority,
   );
 }

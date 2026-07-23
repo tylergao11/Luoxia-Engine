@@ -11,6 +11,8 @@ import {
   type ValidatedJsonObject,
 } from "@luoxia/contracts-runtime";
 
+import type { DeterministicContextAuthority } from "@luoxia/world-core/composition";
+
 import type {
   ModelInvocationProvenanceVerifier,
   VerifiedModelInvocationReceipt,
@@ -66,6 +68,7 @@ export class RulePluginGateway {
   readonly #adapter: RulePluginAdapter;
   readonly #semanticGate: RulePluginSemanticGate;
   readonly #modelProvenance: ModelInvocationProvenanceVerifier;
+  readonly #deterministicContextAuthority: DeterministicContextAuthority;
   readonly #verifiedReceipts = new WeakSet<object>();
   public readonly provenance: RulePluginInvocationProvenanceVerifier;
 
@@ -75,12 +78,14 @@ export class RulePluginGateway {
     adapter: RulePluginAdapter,
     semanticGate: RulePluginSemanticGate,
     modelProvenance: ModelInvocationProvenanceVerifier,
+    deterministicContextAuthority: DeterministicContextAuthority,
   ) {
     this.#contracts = contracts;
     this.#digest = digest;
     this.#adapter = adapter;
     this.#semanticGate = semanticGate;
     this.#modelProvenance = modelProvenance;
+    this.#deterministicContextAuthority = deterministicContextAuthority;
     this.provenance = Object.freeze({
       isVerified: (
         value: unknown,
@@ -107,6 +112,21 @@ export class RulePluginGateway {
       request,
       scopedModelInvocations,
     );
+
+    const readonlyWorld = expectJsonObject(
+      expectProperty(request.value, "readonly_world", "RulePluginRequest"),
+      "RulePluginRequest.readonly_world",
+    );
+    const worldId = expectString(readonlyWorld, "world_id", "WorldSnapshot");
+    this.#deterministicContextAuthority.assertAuthentic(
+      expectProperty(
+        request.value,
+        "deterministic_context",
+        "RulePluginRequest",
+      ),
+      worldId,
+    );
+
     const rawResponse = await this.#adapter.resolve(request);
     const response = this.#contracts.assertObject(
       CONTRACT_REF.rulePluginResponse,

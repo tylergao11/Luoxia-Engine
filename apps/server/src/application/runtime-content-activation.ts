@@ -14,6 +14,11 @@ import {
 import { createContentRuntimeCatalog } from "@luoxia/world-core/composition";
 import type { Pool } from "pg";
 
+import { createNodeDeterministicContextIdFactory } from "../adapters/crypto/context-id-factory.js";
+import {
+  createHmacDeterministicContextTokenCodec,
+  type DeterministicContextHmacKeyring,
+} from "../adapters/crypto/deterministic-context-hmac-token-codec.js";
 import type { ModelProvider } from "./model-gateway.js";
 import type { RulePluginDependencyIdentity } from "./rule-plugin-abi.js";
 import type { RulePluginModuleV1 } from "./rule-plugin-abi.js";
@@ -42,7 +47,14 @@ export interface RuntimeContentActivationInput {
    * Required field — no default empty array, overload, or compatibility entry.
    */
   readonly stageModuleManifestCandidates: readonly unknown[];
+  /**
+   * Explicit HMAC keyring for DeterministicContext issuer_token.
+   * Required — no default keyring, env read, or auto-generated secrets.
+   */
+  readonly deterministicContextHmacKeyring: DeterministicContextHmacKeyring;
 }
+
+export type { DeterministicContextHmacKeyring } from "../adapters/crypto/deterministic-context-hmac-token-codec.js";
 
 export interface ActivatedBundleIdentity {
   readonly pack_id: string;
@@ -143,6 +155,12 @@ export async function createRuntimeContentActivation(
     requiredStageModuleRoots,
   );
 
+  const deterministicContextTokenCodec =
+    createHmacDeterministicContextTokenCodec({
+      digest: input.digest,
+      keyring: input.deterministicContextHmacKeyring,
+    });
+
   const kernel = createRuntimeExecutionKernel({
     pool: input.pool,
     contracts: input.contracts,
@@ -153,6 +171,8 @@ export async function createRuntimeContentActivation(
       ...requiredRulePluginDependencies,
     ]),
     contentRuntimeCatalog: catalog,
+    deterministicContextTokenCodec,
+    deterministicContextIdFactory: createNodeDeterministicContextIdFactory(),
   });
 
   const bundles = Object.freeze(

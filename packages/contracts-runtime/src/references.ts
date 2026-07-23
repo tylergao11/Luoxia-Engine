@@ -26,6 +26,10 @@ export function definitionRef<
 export const CONTRACT_REF = Object.freeze({
   uuid: definitionRef(CONTRACT_ID.common, "Uuid"),
   dayNumber: definitionRef(CONTRACT_ID.common, "DayNumber"),
+  deterministicContext: definitionRef(
+    CONTRACT_ID.common,
+    "DeterministicContext",
+  ),
   contentBundle: CONTRACT_ID.contentBundle,
   worldState: definitionRef(CONTRACT_ID.worldRuntime, "WorldState"),
   worldSnapshot: definitionRef(CONTRACT_ID.worldRuntime, "WorldSnapshot"),

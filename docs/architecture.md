@@ -222,12 +222,22 @@ Director EventProposal / CharacterReactionProposal / StageOutcomeProposal / vali
   → apply_packet 原子提交或完整拒绝
 ```
 
+#### DeterministicContext 权威签发与验真
+
+`DeterministicContext` 由 World Core 的唯一 `DeterministicContextAuthority` 签发与验真；Packet Semantic Gate 与 RulePlugin Gateway 只调用该 Authority，不得各自实现 digest 或 MAC。
+
+- **context_digest**：RFC 8785 JCS UTF-8 SHA-256。对已通过正式 Schema 的完整 `DeterministicContext` 排除自引用的 `context_digest` 与 `issuer_token` 后求摘要；因此当前签名范围是 `context_id`、`issuer`、`logical_time`、`random_choices`、`external_results`，未来新增合同字段也会自动进入摘要，代码不得维护第二份允许字段表。
+- **external_results**：每一项的 `content_digest` 必须等于其 `payload` 的 JCS SHA-256。
+- **issuer_token**：Server 侧 HMAC-SHA256 TokenCodec；MAC 输入为固定 envelope 的 JCS 文本 `{ v: 1, world_id, context_digest }`，绑定 **world_id + context_digest**。不绑定 `basis_revision`，不设 TTL，以便 EventCard 在后续 revision 复用封存上下文。
+- **密钥**：仅由部署组合根显式注入 keyring（`activeKeyId` + `keys`）；无环境变量读取、默认密钥或自动生成。active key 签发；仍配置的全部 key 可验旧 token（rotation）。删除 key 后旧 token 明确失败。HMAC 密钥至少 32 字节；验真使用 `timingSafeEqual`；错误不得泄漏密钥或 MAC。
+- **接线顺序**：ContentPacket 在 packet identity 之后、source/preconditions 之前验真；RulePluginRequest 在进入不可信 adapter 之前按 `readonly_world.world_id` 验真。`context_id` 仅由 Authority 经注入的 ID factory 生成。
+
 EventCard 点击路径只复用已经裁决的封存结果：
 
 ```text
 event_card.trigger command
   → Core 校验卡片生命周期、SealedEventResult 身份与 trigger / invalidate 互斥分支
-  → ContentPacket(source_kind = sealed_event_result)
+  → ContentPacket(source_kind = sealed_event_result)  // 携带原 deterministic_context，不重新签发
   → apply_packet(封存 EventOutcomeOp[] + event_card.trigger，或单一 event_card.invalidate)
 ```
 
