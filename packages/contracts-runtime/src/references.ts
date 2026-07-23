@@ -1,3 +1,5 @@
+import type { ValidatedJsonObject } from "./validated-json.js";
+
 export const CONTRACT_ID = Object.freeze({
   common: "https://schemas.luoxia.engine/contracts/common.v1.schema.json",
   contentBundle:
@@ -33,6 +35,7 @@ export const CONTRACT_REF = Object.freeze({
   contentBundle: CONTRACT_ID.contentBundle,
   worldState: definitionRef(CONTRACT_ID.worldRuntime, "WorldState"),
   worldSnapshot: definitionRef(CONTRACT_ID.worldRuntime, "WorldSnapshot"),
+  worldContentLock: definitionRef(CONTRACT_ID.worldRuntime, "WorldContentLock"),
   contentPacket: definitionRef(CONTRACT_ID.worldRuntime, "ContentPacket"),
   packetProposal: definitionRef(CONTRACT_ID.worldRuntime, "PacketProposal"),
   packetCommitIdentity: definitionRef(
@@ -79,3 +82,7 @@ export const CONTRACT_REF = Object.freeze({
     "MaterializationRequest",
   ),
 } as const);
+
+export type WorldContentLockDocument = ValidatedJsonObject<
+  typeof CONTRACT_REF.worldContentLock
+>;

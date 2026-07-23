@@ -5,11 +5,9 @@ import {
   expectJsonObject,
   expectProperty,
   expectString,
-  type ContractValidator,
   type JsonDigest,
   type JsonObject,
 } from "@luoxia/contracts-runtime";
-import type { ContentRuntimeCatalog } from "@luoxia/world-core/composition";
 
 import type {
   ModelGateway,
@@ -17,11 +15,10 @@ import type {
   WorldSnapshotDocument,
 } from "./model-gateway.js";
 import type { PostgresRuntimeInvocationJournal } from "../adapters/postgres/runtime-invocation-journal.js";
-import {
-  createPromptMaterializer,
-  type CharacterMode,
-  type DirectorMode,
-  type PromptMaterializer,
+import type {
+  CharacterMode,
+  DirectorMode,
+  PromptMaterializer,
 } from "./prompt-materializer.js";
 import {
   projectCharacterSubjectiveView,
@@ -31,35 +28,20 @@ import {
   projectObjectiveTracesEmpty,
   readDayNumber,
 } from "./model-view-projection.js";
-import type {
-  RuntimeWorldReader,
-  StoredModelInvocation,
-} from "./runtime-persistence.js";
-
-export interface ContentProfileLock {
-  readonly bundle_id: string;
-  readonly bundle_digest: string;
-}
-
-export interface DirectorContentLock extends ContentProfileLock {
-  readonly director_id: string;
-}
-
-export interface CharacterContentLock extends ContentProfileLock {
-  readonly mind_id: string;
-}
+import type { StoredModelInvocation } from "./runtime-persistence.js";
+import type { RuntimeWorldBindingResolver } from "./runtime-world-binding.js";
 
 export interface RuntimeModelFacades {
   directorDailySettlement(input: {
     readonly worldId: string;
-    readonly content: DirectorContentLock;
+    readonly directorId: string;
     readonly model_profile_id: string;
   }): Promise<VerifiedModelInvocationReceipt>;
 
   directorDialogueEvents(input: {
     readonly worldId: string;
     readonly dialogueId: string;
-    readonly content: DirectorContentLock;
+    readonly directorId: string;
     readonly model_profile_id: string;
   }): Promise<VerifiedModelInvocationReceipt>;
 
@@ -67,7 +49,7 @@ export interface RuntimeModelFacades {
     readonly worldId: string;
     readonly dialogueId: string;
     readonly playerEntityId: string;
-    readonly content: DirectorContentLock;
+    readonly directorId: string;
     readonly model_profile_id: string;
   }): Promise<VerifiedModelInvocationReceipt>;
 
@@ -76,7 +58,6 @@ export interface RuntimeModelFacades {
     readonly entityId: string;
     readonly dialogueId: string;
     readonly latestPlayerTurnId: string;
-    readonly content: CharacterContentLock;
     readonly model_profile_id: string;
   }): Promise<VerifiedModelInvocationReceipt>;
 
@@ -84,33 +65,23 @@ export interface RuntimeModelFacades {
     readonly worldId: string;
     readonly entityId: string;
     readonly events: readonly JsonObject[];
-    readonly content: CharacterContentLock;
     readonly model_profile_id: string;
   }): Promise<VerifiedModelInvocationReceipt>;
 }
 
 export function createRuntimeModelFacades(input: {
-  readonly contracts: ContractValidator;
   readonly digest: JsonDigest;
-  readonly catalog: ContentRuntimeCatalog;
-  readonly worlds: RuntimeWorldReader;
+  readonly worldBindingResolver: RuntimeWorldBindingResolver;
+  readonly materializer: PromptMaterializer;
   readonly modelGateway: ModelGateway;
   readonly journal: PostgresRuntimeInvocationJournal;
-  readonly materializer?: PromptMaterializer;
 }): RuntimeModelFacades {
-  void input.contracts;
-  const materializer =
-    input.materializer ??
-    createPromptMaterializer({
-      catalog: input.catalog,
-      digest: input.digest,
-    });
   const assembly = new ModelRequestAssembly({
     digest: input.digest,
-    worlds: input.worlds,
+    worldBindingResolver: input.worldBindingResolver,
     modelGateway: input.modelGateway,
     journal: input.journal,
-    materializer,
+    materializer: input.materializer,
   });
   return Object.freeze({
     directorDailySettlement: (
@@ -133,20 +104,20 @@ export function createRuntimeModelFacades(input: {
 
 class ModelRequestAssembly {
   readonly #digest: JsonDigest;
-  readonly #worlds: RuntimeWorldReader;
+  readonly #worldBindingResolver: RuntimeWorldBindingResolver;
   readonly #modelGateway: ModelGateway;
   readonly #journal: PostgresRuntimeInvocationJournal;
   readonly #materializer: PromptMaterializer;
 
   public constructor(input: {
     readonly digest: JsonDigest;
-    readonly worlds: RuntimeWorldReader;
+    readonly worldBindingResolver: RuntimeWorldBindingResolver;
     readonly modelGateway: ModelGateway;
     readonly journal: PostgresRuntimeInvocationJournal;
     readonly materializer: PromptMaterializer;
   }) {
     this.#digest = input.digest;
-    this.#worlds = input.worlds;
+    this.#worldBindingResolver = input.worldBindingResolver;
     this.#modelGateway = input.modelGateway;
     this.#journal = input.journal;
     this.#materializer = input.materializer;
@@ -154,7 +125,7 @@ class ModelRequestAssembly {
 
   public directorDailySettlement(input: {
     readonly worldId: string;
-    readonly content: DirectorContentLock;
+    readonly directorId: string;
     readonly model_profile_id: string;
   }): Promise<VerifiedModelInvocationReceipt> {
     return this.#runDirector("daily_settlement", input, async (ctx) => {
@@ -169,7 +140,7 @@ class ModelRequestAssembly {
   public directorDialogueEvents(input: {
     readonly worldId: string;
     readonly dialogueId: string;
-    readonly content: DirectorContentLock;
+    readonly directorId: string;
     readonly model_profile_id: string;
   }): Promise<VerifiedModelInvocationReceipt> {
     return this.#runDirector("dialogue_events", input, async (ctx) => {
@@ -185,7 +156,7 @@ class ModelRequestAssembly {
     readonly worldId: string;
     readonly dialogueId: string;
     readonly playerEntityId: string;
-    readonly content: DirectorContentLock;
+    readonly directorId: string;
     readonly model_profile_id: string;
   }): Promise<VerifiedModelInvocationReceipt> {
     return this.#runDirector("system_dialogue", input, async (ctx) => {
@@ -206,7 +177,6 @@ class ModelRequestAssembly {
     readonly entityId: string;
     readonly dialogueId: string;
     readonly latestPlayerTurnId: string;
-    readonly content: CharacterContentLock;
     readonly model_profile_id: string;
   }): Promise<VerifiedModelInvocationReceipt> {
     return this.#runCharacter("dialogue", input, async (ctx) =>
@@ -226,7 +196,6 @@ class ModelRequestAssembly {
     readonly worldId: string;
     readonly entityId: string;
     readonly events: readonly JsonObject[];
-    readonly content: CharacterContentLock;
     readonly model_profile_id: string;
   }): Promise<VerifiedModelInvocationReceipt> {
     if (input.events.length === 0) {
@@ -252,7 +221,7 @@ class ModelRequestAssembly {
     mode: DirectorMode,
     input: {
       readonly worldId: string;
-      readonly content: DirectorContentLock;
+      readonly directorId: string;
       readonly model_profile_id: string;
     },
     buildInput: (ctx: {
@@ -260,16 +229,18 @@ class ModelRequestAssembly {
       readonly snapshot: WorldSnapshotDocument;
     }) => Promise<JsonObject>,
   ): Promise<VerifiedModelInvocationReceipt> {
-    const snapshot = await this.#loadSnapshot(input.worldId);
+    const worldBinding = await this.#worldBindingResolver.resolveCurrent(
+      input.worldId,
+    );
+    const snapshot = worldBinding.record.snapshot;
     const worldState = expectJsonObject(
       expectProperty(snapshot.value, "world_state", "WorldSnapshot"),
       "WorldSnapshot.world_state",
     );
     const dynamicInput = await buildInput({ worldState, snapshot });
     const materialized = this.#materializer.materializeDirector({
-      bundle_id: input.content.bundle_id,
-      bundle_digest: input.content.bundle_digest,
-      director_id: input.content.director_id,
+      contentBinding: worldBinding.contentBinding,
+      directorId: input.directorId,
       mode,
     });
     const requestKind =
@@ -294,7 +265,6 @@ class ModelRequestAssembly {
     input: {
       readonly worldId: string;
       readonly entityId: string;
-      readonly content: CharacterContentLock;
       readonly model_profile_id: string;
     },
     buildInput: (ctx: {
@@ -302,17 +272,18 @@ class ModelRequestAssembly {
       readonly snapshot: WorldSnapshotDocument;
     }) => Promise<JsonObject>,
   ): Promise<VerifiedModelInvocationReceipt> {
-    const snapshot = await this.#loadSnapshot(input.worldId);
+    const worldBinding = await this.#worldBindingResolver.resolveCurrent(
+      input.worldId,
+    );
+    const snapshot = worldBinding.record.snapshot;
     const worldState = expectJsonObject(
       expectProperty(snapshot.value, "world_state", "WorldSnapshot"),
       "WorldSnapshot.world_state",
     );
     const dynamicInput = await buildInput({ worldState, snapshot });
     const materialized = this.#materializer.materializeCharacter({
-      bundle_id: input.content.bundle_id,
-      bundle_digest: input.content.bundle_digest,
-      mind_id: input.content.mind_id,
-      entity_id: input.entityId,
+      contentBinding: worldBinding.contentBinding,
+      entityId: input.entityId,
       mode,
     });
     const requestKind =
@@ -326,10 +297,6 @@ class ModelRequestAssembly {
       eventContext: undefined,
       dynamicInput,
     });
-  }
-
-  async #loadSnapshot(worldId: string): Promise<WorldSnapshotDocument> {
-    return this.#worlds.readCurrent(worldId);
   }
 
   async #invoke(input: {

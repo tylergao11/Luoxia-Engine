@@ -22,6 +22,7 @@ import {
 import type { ModelProvider } from "./model-gateway.js";
 import type { RulePluginDependencyIdentity } from "./rule-plugin-abi.js";
 import type { RulePluginModuleV1 } from "./rule-plugin-abi.js";
+import { collectRulePluginOperationRequirements } from "./rule-plugin-operation-requirement.js";
 import {
   createRuntimeExecutionKernel,
   type RuntimeExecutionKernel,
@@ -129,6 +130,19 @@ export async function createRuntimeContentActivation(
     catalog.register(record.loaded);
   }
 
+  const rulePluginOperationRequirements =
+    collectRulePluginOperationRequirements({
+      contracts: input.contracts,
+      catalog,
+      bundles: records.map((record) =>
+        Object.freeze({
+          packId: record.packId,
+          packVersion: record.packVersion,
+          bundleDigest: record.bundleDigest,
+        }),
+      ),
+    });
+
   const stageModules = createStageModuleRegistry({
     contracts: input.contracts,
     manifestCandidates: input.stageModuleManifestCandidates,
@@ -170,6 +184,7 @@ export async function createRuntimeContentActivation(
     requiredRulePluginDependencies: Object.freeze([
       ...requiredRulePluginDependencies,
     ]),
+    rulePluginOperationRequirements,
     contentRuntimeCatalog: catalog,
     deterministicContextTokenCodec,
     deterministicContextIdFactory: createNodeDeterministicContextIdFactory(),

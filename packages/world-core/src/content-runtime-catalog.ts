@@ -8,6 +8,7 @@ import {
   jsonEquals,
   type JsonObject,
   type JsonValue,
+  type WorldContentLockDocument,
 } from "@luoxia/contracts-runtime/portable";
 
 import type {
@@ -49,6 +50,28 @@ export interface BundleLockRef {
   readonly bundle_digest: string;
 }
 
+export type { WorldContentLockDocument };
+
+/**
+ * Exact binding from WorldContentLock to registered ContentBundle WorldDefinition.
+ * Holds original frozen objects from registration — not a second DTO model.
+ */
+export interface WorldContentBinding {
+  readonly packId: string;
+  readonly packVersion: string;
+  readonly bundleDigest: string;
+  readonly worldDefinition: JsonObject;
+  readonly eventBudget: JsonObject;
+  readonly calendarResolver: {
+    readonly operation: JsonObject;
+    readonly dependency: JsonObject;
+  };
+  readonly navigationResolver: {
+    readonly operation: JsonObject;
+    readonly dependency: JsonObject;
+  };
+}
+
 export interface ContentRuntimeCatalog extends StaticComponentDigestLookup {
   register(loaded: LoadedContentBundle): void;
   hasBundle(bundleId: string, bundleDigest: string): boolean;
@@ -60,6 +83,13 @@ export interface ContentRuntimeCatalog extends StaticComponentDigestLookup {
   resolveRuleEvaluationBinding(
     rule: RuleRefLike,
   ): RuleEvaluationBinding | undefined;
+  /**
+   * Exact resolve of WorldContentLock to WorldDefinition + required rule_plugin
+   * calendar/navigation resolvers. Never guesses first/single/default world.
+   */
+  resolveWorldContentBinding(
+    lock: WorldContentLockDocument,
+  ): WorldContentBinding;
   findPromptFragment(
     ref: BundleLockRef & { readonly prompt_id: string },
   ): JsonObject | undefined;
@@ -75,6 +105,11 @@ export interface ContentRuntimeCatalog extends StaticComponentDigestLookup {
   /** Ordered capability objects for event-context digests (same bundle lock). */
   listCapabilities(ref: BundleLockRef): readonly JsonObject[] | undefined;
   listWorldLaws(ref: BundleLockRef): readonly JsonObject[] | undefined;
+  /**
+   * Registration-order WorldDefinitions for a locked bundle.
+   * Missing bundle returns undefined; does not pick a default world.
+   */
+  listWorldDefinitions(ref: BundleLockRef): readonly JsonObject[] | undefined;
 }
 
 export interface ContentRuntimeCatalogDependencies {
@@ -83,9 +118,14 @@ export interface ContentRuntimeCatalogDependencies {
 
 interface IndexedBundle {
   readonly packId: string;
+  readonly packVersion: string;
   readonly bundleDigest: string;
   readonly document: JsonObject;
   readonly definitions: ReadonlyMap<string, JsonObject>;
+  /** WorldDefinition.world_id → original WorldDefinition object. */
+  readonly worlds: ReadonlyMap<string, JsonObject>;
+  /** Registration-order WorldDefinition objects (no sort, no default pick). */
+  readonly worldsOrdered: readonly JsonObject[];
   readonly worldLaws: ReadonlyMap<string, JsonObject>;
   readonly worldLawsOrdered: readonly JsonObject[];
   readonly dependencies: ReadonlyMap<string, JsonObject>;
@@ -121,6 +161,7 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
       "bundle.manifest",
     );
     const packId = expectString(manifest, "pack_id", "manifest");
+    const packVersion = expectString(manifest, "pack_version", "manifest");
     const bundleDigest = loaded.bundleDigest;
     if (bundleDigest.length !== 64) {
       throw new EngineFault(
@@ -306,13 +347,41 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
       characterMindsByEntityId.set(entityId, mind);
     }
 
+    const worldsList = asObjectArray(
+      expectProperty(bundle, "worlds", "bundle"),
+      "bundle.worlds",
+    );
+    const worlds = new Map<string, JsonObject>();
+    for (const worldDefinition of worldsList) {
+      const worldDefinitionId = expectString(
+        worldDefinition,
+        "world_id",
+        "WorldDefinition",
+      );
+      if (worlds.has(worldDefinitionId)) {
+        throw new EngineFault(
+          "content.catalog.duplicate_world_id",
+          `Duplicate WorldDefinition.world_id ${worldDefinitionId} in registered ContentBundle`,
+          {
+            pack_id: packId,
+            bundle_digest: bundleDigest,
+            world_id: worldDefinitionId,
+          },
+        );
+      }
+      worlds.set(worldDefinitionId, worldDefinition);
+    }
+
     this.#bundles.set(
       key,
       Object.freeze({
         packId,
+        packVersion,
         bundleDigest,
         document: root,
         definitions,
+        worlds,
+        worldsOrdered: Object.freeze([...worldsList]),
         worldLaws,
         worldLawsOrdered: Object.freeze([...worldLawsList]),
         dependencies,
@@ -371,38 +440,16 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
       "PluginOperationRef",
     );
 
-    const dependency = indexed.dependencies.get(dependencyId);
-    if (dependency === undefined) {
-      throw new EngineFault(
-        "content.catalog.rule_dependency_missing",
-        "WorldLaw evaluator dependency_id is not registered in ContentBundle.dependencies",
-        {
-          pack_id: rule.bundle_id,
-          bundle_digest: rule.bundle_digest,
-          rule_id: rule.rule_id,
-          dependency_id: dependencyId,
-        },
-      );
-    }
-
-    const dependencyKind = expectString(
-      dependency,
-      "dependency_kind",
-      "DependencyLock",
+    const dependency = resolveRequiredRulePluginDependency(
+      indexed,
+      evaluator,
+      {
+        binding: "rule_evaluation",
+        pack_id: rule.bundle_id,
+        bundle_digest: rule.bundle_digest,
+        rule_id: rule.rule_id,
+      },
     );
-    if (dependencyKind !== "rule_plugin") {
-      throw new EngineFault(
-        "content.catalog.rule_dependency_kind",
-        "rule.evaluate binding requires dependency_kind=rule_plugin",
-        {
-          pack_id: rule.bundle_id,
-          bundle_digest: rule.bundle_digest,
-          rule_id: rule.rule_id,
-          dependency_id: dependencyId,
-          dependency_kind: dependencyKind,
-        },
-      );
-    }
 
     return Object.freeze({
       law,
@@ -411,6 +458,128 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
         operation_id: operationId,
       }),
       dependency,
+    });
+  }
+
+  public resolveWorldContentBinding(
+    lock: WorldContentLockDocument,
+  ): WorldContentBinding {
+    const lockValue = lock.value;
+    const rootBundleLock = expectJsonObject(
+      expectProperty(lockValue, "root_bundle_lock", "WorldContentLock"),
+      "WorldContentLock.root_bundle_lock",
+    );
+    const packId = expectString(rootBundleLock, "pack_id", "PackLock");
+    const packVersion = expectString(rootBundleLock, "pack_version", "PackLock");
+    const bundleDigest = expectString(
+      rootBundleLock,
+      "bundle_digest",
+      "PackLock",
+    );
+    const worldDefinitionId = expectString(
+      lockValue,
+      "world_definition_id",
+      "WorldContentLock",
+    );
+
+    const indexed = this.#bundles.get(bundleKey(packId, bundleDigest));
+    if (indexed === undefined) {
+      throw new EngineFault(
+        "content.catalog.world_bundle_missing",
+        "WorldContentLock root_bundle_lock is not registered in ContentRuntimeCatalog",
+        {
+          pack_id: packId,
+          pack_version: packVersion,
+          bundle_digest: bundleDigest,
+          world_definition_id: worldDefinitionId,
+        },
+      );
+    }
+
+    if (indexed.packVersion !== packVersion) {
+      throw new EngineFault(
+        "content.catalog.world_pack_version_mismatch",
+        "WorldContentLock pack_version does not match registered ContentBundle pack_version",
+        {
+          pack_id: packId,
+          lock_pack_version: packVersion,
+          registered_pack_version: indexed.packVersion,
+          bundle_digest: bundleDigest,
+        },
+      );
+    }
+
+    const worldDefinition = indexed.worlds.get(worldDefinitionId);
+    if (worldDefinition === undefined) {
+      throw new EngineFault(
+        "content.catalog.world_definition_missing",
+        "WorldContentLock.world_definition_id is not present in the registered ContentBundle",
+        {
+          pack_id: packId,
+          bundle_digest: bundleDigest,
+          world_definition_id: worldDefinitionId,
+        },
+      );
+    }
+
+    const calendarOperation = expectJsonObject(
+      expectProperty(
+        worldDefinition,
+        "calendar_resolver",
+        "WorldDefinition",
+      ),
+      "WorldDefinition.calendar_resolver",
+    );
+    const navigationOperation = expectJsonObject(
+      expectProperty(
+        worldDefinition,
+        "navigation_resolver",
+        "WorldDefinition",
+      ),
+      "WorldDefinition.navigation_resolver",
+    );
+    const eventBudget = expectJsonObject(
+      expectProperty(worldDefinition, "event_budget", "WorldDefinition"),
+      "WorldDefinition.event_budget",
+    );
+
+    const calendarDependency = resolveRequiredRulePluginDependency(
+      indexed,
+      calendarOperation,
+      {
+        binding: "world_resolver",
+        pack_id: packId,
+        bundle_digest: bundleDigest,
+        world_definition_id: worldDefinitionId,
+        resolver: "calendar_resolver",
+      },
+    );
+    const navigationDependency = resolveRequiredRulePluginDependency(
+      indexed,
+      navigationOperation,
+      {
+        binding: "world_resolver",
+        pack_id: packId,
+        bundle_digest: bundleDigest,
+        world_definition_id: worldDefinitionId,
+        resolver: "navigation_resolver",
+      },
+    );
+
+    return Object.freeze({
+      packId: indexed.packId,
+      packVersion: indexed.packVersion,
+      bundleDigest: indexed.bundleDigest,
+      worldDefinition,
+      eventBudget,
+      calendarResolver: Object.freeze({
+        operation: calendarOperation,
+        dependency: calendarDependency,
+      }),
+      navigationResolver: Object.freeze({
+        operation: navigationOperation,
+        dependency: navigationDependency,
+      }),
     });
   }
 
@@ -456,6 +625,13 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
   public listWorldLaws(ref: BundleLockRef): readonly JsonObject[] | undefined {
     return this.#bundles.get(bundleKey(ref.bundle_id, ref.bundle_digest))
       ?.worldLawsOrdered;
+  }
+
+  public listWorldDefinitions(
+    ref: BundleLockRef,
+  ): readonly JsonObject[] | undefined {
+    return this.#bundles.get(bundleKey(ref.bundle_id, ref.bundle_digest))
+      ?.worldsOrdered;
   }
 
   public async findValueDigest(input: {
@@ -567,6 +743,94 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
     const fields = expectProperty(component, "fields", "ComponentInstance");
     return this.#digest.sha256(fields);
   }
+}
+
+/**
+ * Shared resolver for PluginOperationRef → required rule_plugin DependencyLock.
+ * Returns the original dependency object from the indexed bundle (no copy).
+ */
+function resolveRequiredRulePluginDependency(
+  indexed: IndexedBundle,
+  operationRef: JsonObject,
+  context:
+    | {
+        readonly binding: "rule_evaluation";
+        readonly pack_id: string;
+        readonly bundle_digest: string;
+        readonly rule_id: string;
+      }
+    | {
+        readonly binding: "world_resolver";
+        readonly pack_id: string;
+        readonly bundle_digest: string;
+        readonly world_definition_id: string;
+        readonly resolver: "calendar_resolver" | "navigation_resolver";
+      },
+): JsonObject {
+  const dependencyId = expectString(
+    operationRef,
+    "dependency_id",
+    "PluginOperationRef",
+  );
+  expectString(operationRef, "operation_id", "PluginOperationRef");
+
+  const dependency = indexed.dependencies.get(dependencyId);
+  const faultDetails =
+    context.binding === "rule_evaluation"
+      ? Object.freeze({
+          pack_id: context.pack_id,
+          bundle_digest: context.bundle_digest,
+          rule_id: context.rule_id,
+          dependency_id: dependencyId,
+        })
+      : Object.freeze({
+          pack_id: context.pack_id,
+          bundle_digest: context.bundle_digest,
+          world_definition_id: context.world_definition_id,
+          resolver: context.resolver,
+          dependency_id: dependencyId,
+        });
+  if (dependency === undefined) {
+    throw new EngineFault(
+      context.binding === "rule_evaluation"
+        ? "content.catalog.rule_dependency_missing"
+        : "content.catalog.world_resolver_dependency_missing",
+      context.binding === "rule_evaluation"
+        ? "WorldLaw evaluator dependency_id is not registered in ContentBundle.dependencies"
+        : "WorldDefinition resolver dependency_id is not registered in ContentBundle.dependencies",
+      faultDetails,
+    );
+  }
+
+  const dependencyKind = expectString(
+    dependency,
+    "dependency_kind",
+    "DependencyLock",
+  );
+  if (dependencyKind !== "rule_plugin") {
+    throw new EngineFault(
+      context.binding === "rule_evaluation"
+        ? "content.catalog.rule_dependency_kind"
+        : "content.catalog.world_resolver_dependency_kind",
+      context.binding === "rule_evaluation"
+        ? "rule.evaluate binding requires dependency_kind=rule_plugin"
+        : "WorldDefinition resolver requires dependency_kind=rule_plugin",
+      Object.freeze({ ...faultDetails, dependency_kind: dependencyKind }),
+    );
+  }
+
+  if (context.binding === "world_resolver") {
+    const required = dependency["required"];
+    if (required !== true) {
+      throw new EngineFault(
+        "content.catalog.world_resolver_dependency_not_required",
+        "WorldDefinition resolver DependencyLock.required must be true",
+        faultDetails,
+      );
+    }
+  }
+
+  return dependency;
 }
 
 function bundleKey(bundleId: string, bundleDigest: string): string {

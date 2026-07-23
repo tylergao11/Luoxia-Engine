@@ -6,12 +6,16 @@ CREATE TABLE luoxia_engine.worlds (
   world_id uuid PRIMARY KEY,
   revision bigint NOT NULL,
   state_document jsonb NOT NULL,
+  world_content_lock_document jsonb NOT NULL,
   updated_at timestamptz NOT NULL,
   CONSTRAINT worlds_revision_safe_integer CHECK (
     revision >= 0 AND revision <= 9007199254740991
   ),
   CONSTRAINT worlds_state_document_object CHECK (
     jsonb_typeof(state_document) = 'object'
+  ),
+  CONSTRAINT worlds_world_content_lock_document_object CHECK (
+    jsonb_typeof(world_content_lock_document) = 'object'
   )
 );
 

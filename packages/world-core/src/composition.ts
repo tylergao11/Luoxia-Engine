@@ -112,6 +112,8 @@ export {
   type RuleEvaluationBinding,
   type RuleRefLike,
   type StaticDefinitionRefLike,
+  type WorldContentBinding,
+  type WorldContentLockDocument,
 } from "./content-runtime-catalog.js";
 
 export {

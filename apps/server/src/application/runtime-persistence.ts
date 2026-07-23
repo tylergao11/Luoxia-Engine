@@ -4,6 +4,7 @@ import type {
   WorldSnapshotDocument,
 } from "@luoxia/world-core/composition";
 import type { ApplyPacketResultDocument } from "@luoxia/world-core";
+import type { WorldContentLockDocument } from "@luoxia/contracts-runtime/portable";
 
 import type {
   ModelRequestDocument,
@@ -21,8 +22,17 @@ import type {
   VerifiedRulePluginInvocationReceipt,
 } from "./rule-plugin-gateway.js";
 
+/**
+ * One runtime world row fact: authoritative snapshot + immutable content lock.
+ * Both documents come from the same PostgreSQL SELECT.
+ */
+export interface RuntimeWorldRecord {
+  readonly snapshot: WorldSnapshotDocument;
+  readonly worldContentLock: WorldContentLockDocument;
+}
+
 export interface RuntimeWorldReader {
-  readCurrent(worldId: string): Promise<WorldSnapshotDocument>;
+  readCurrent(worldId: string): Promise<RuntimeWorldRecord>;
 }
 
 export interface CommittedEventRevisionRange {

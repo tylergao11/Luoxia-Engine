@@ -6,7 +6,10 @@ import {
   type JsonObject,
   type JsonValue,
 } from "@luoxia/contracts-runtime";
-import type { ContentRuntimeCatalog } from "@luoxia/world-core/composition";
+import type {
+  ContentRuntimeCatalog,
+  WorldContentBinding,
+} from "@luoxia/world-core/composition";
 
 export type DirectorMode =
   | "daily_settlement"
@@ -36,17 +39,14 @@ export interface MaterializedResidentContext {
 
 export interface PromptMaterializer {
   materializeDirector(input: {
-    readonly bundle_id: string;
-    readonly bundle_digest: string;
-    readonly director_id: string;
+    readonly contentBinding: WorldContentBinding;
+    readonly directorId: string;
     readonly mode: DirectorMode;
   }): MaterializedResidentContext;
 
   materializeCharacter(input: {
-    readonly bundle_id: string;
-    readonly bundle_digest: string;
-    readonly mind_id: string;
-    readonly entity_id: string;
+    readonly contentBinding: WorldContentBinding;
+    readonly entityId: string;
     readonly mode: CharacterMode;
   }): MaterializedResidentContext;
 }
@@ -68,22 +68,39 @@ class DefaultPromptMaterializer implements PromptMaterializer {
   }
 
   public materializeDirector(input: {
-    readonly bundle_id: string;
-    readonly bundle_digest: string;
-    readonly director_id: string;
+    readonly contentBinding: WorldContentBinding;
+    readonly directorId: string;
     readonly mode: DirectorMode;
   }): MaterializedResidentContext {
+    const packId = input.contentBinding.packId;
+    const bundleDigest = input.contentBinding.bundleDigest;
+    const worldDefinitionId = expectString(
+      input.contentBinding.worldDefinition,
+      "world_id",
+      "WorldDefinition",
+    );
+
     const profile = this.#catalog.findDirectorProfile({
-      bundle_id: input.bundle_id,
-      bundle_digest: input.bundle_digest,
-      director_id: input.director_id,
+      bundle_id: packId,
+      bundle_digest: bundleDigest,
+      director_id: input.directorId,
     });
     if (profile === undefined) {
-      throw unresolved(
-        "director_profile",
-        input.bundle_id,
-        input.bundle_digest,
-        input.director_id,
+      throw unresolved("director_profile", packId, bundleDigest, input.directorId);
+    }
+
+    const profileWorldId = expectString(profile, "world_id", "DirectorProfile");
+    if (profileWorldId !== worldDefinitionId) {
+      throw new EngineFault(
+        "prompt.materializer.director_world_mismatch",
+        "DirectorProfile.world_id must equal the WorldContentLock WorldDefinition.world_id",
+        {
+          director_id: input.directorId,
+          director_world_id: profileWorldId,
+          world_definition_id: worldDefinitionId,
+          pack_id: packId,
+          bundle_digest: bundleDigest,
+        },
       );
     }
 
@@ -93,8 +110,8 @@ class DefaultPromptMaterializer implements PromptMaterializer {
     );
     const commonBlocks = coreIds.map((promptId) =>
       this.#materializeFragment({
-        bundle_id: input.bundle_id,
-        bundle_digest: input.bundle_digest,
+        bundle_id: packId,
+        bundle_digest: bundleDigest,
         prompt_id: promptId,
         expectedPurposePrefix: "director_",
       }),
@@ -112,15 +129,15 @@ class DefaultPromptMaterializer implements PromptMaterializer {
       "DirectorProfile",
     );
     const modeBlock = this.#materializeFragment({
-      bundle_id: input.bundle_id,
-      bundle_digest: input.bundle_digest,
+      bundle_id: packId,
+      bundle_digest: bundleDigest,
       prompt_id: modePromptId,
       expectedPurposePrefix: "director_",
     });
 
     const eventContext = this.#materializeEventContext({
-      bundle_id: input.bundle_id,
-      bundle_digest: input.bundle_digest,
+      bundle_id: packId,
+      bundle_digest: bundleDigest,
     });
 
     const ordered_blocks = Object.freeze([...commonBlocks, modeBlock]);
@@ -135,9 +152,9 @@ class DefaultPromptMaterializer implements PromptMaterializer {
       }),
     );
     const resident_key = namespacedKey([
-      input.bundle_id,
+      packId,
       "director",
-      input.director_id,
+      input.directorId,
       input.mode,
     ]);
 
@@ -145,7 +162,7 @@ class DefaultPromptMaterializer implements PromptMaterializer {
       context_kind: "director",
       resident_key,
       resident_digest,
-      director_id: input.director_id,
+      director_id: input.directorId,
       common_blocks: commonRefs,
       event_context: eventContext.ref,
       mode: input.mode,
@@ -160,28 +177,29 @@ class DefaultPromptMaterializer implements PromptMaterializer {
   }
 
   public materializeCharacter(input: {
-    readonly bundle_id: string;
-    readonly bundle_digest: string;
-    readonly mind_id: string;
-    readonly entity_id: string;
+    readonly contentBinding: WorldContentBinding;
+    readonly entityId: string;
     readonly mode: CharacterMode;
   }): MaterializedResidentContext {
-    const profile = this.#catalog.findCharacterMindProfile({
-      bundle_id: input.bundle_id,
-      bundle_digest: input.bundle_digest,
-      mind_id: input.mind_id,
+    const packId = input.contentBinding.packId;
+    const bundleDigest = input.contentBinding.bundleDigest;
+
+    const profile = this.#catalog.findCharacterMindByEntityId({
+      bundle_id: packId,
+      bundle_digest: bundleDigest,
+      entity_id: input.entityId,
     });
     if (profile === undefined) {
       throw unresolved(
-        "character_mind",
-        input.bundle_id,
-        input.bundle_digest,
-        input.mind_id,
+        "character_mind_by_entity",
+        packId,
+        bundleDigest,
+        input.entityId,
       );
     }
 
-    // Character protocol block: first persona prompt doubles as common protocol source
-    // when content authors place shared rules in persona_prompt_ids[0]; all persona ids are persona_blocks.
+    const mindId = expectString(profile, "mind_id", "CharacterMindProfile");
+
     const personaIds = asStringArray(
       expectProperty(profile, "persona_prompt_ids", "CharacterMindProfile"),
       "CharacterMindProfile.persona_prompt_ids",
@@ -190,22 +208,22 @@ class DefaultPromptMaterializer implements PromptMaterializer {
       throw new EngineFault(
         "prompt.materializer.persona_empty",
         "CharacterMindProfile.persona_prompt_ids must contain at least one prompt",
-        { mind_id: input.mind_id },
+        { mind_id: mindId, entity_id: input.entityId },
       );
     }
 
     const commonBlocks = [
       this.#materializeFragment({
-        bundle_id: input.bundle_id,
-        bundle_digest: input.bundle_digest,
+        bundle_id: packId,
+        bundle_digest: bundleDigest,
         prompt_id: personaIds[0] as string,
         expectedPurposePrefix: "character_",
       }),
     ];
     const personaBlocks = personaIds.map((promptId) =>
       this.#materializeFragment({
-        bundle_id: input.bundle_id,
-        bundle_digest: input.bundle_digest,
+        bundle_id: packId,
+        bundle_digest: bundleDigest,
         prompt_id: promptId,
         expectedPurposePrefix: "character_",
       }),
@@ -217,8 +235,8 @@ class DefaultPromptMaterializer implements PromptMaterializer {
       "CharacterMindProfile",
     );
     const modeBlock = this.#materializeFragment({
-      bundle_id: input.bundle_id,
-      bundle_digest: input.bundle_digest,
+      bundle_id: packId,
+      bundle_digest: bundleDigest,
       prompt_id: modePromptId,
       expectedPurposePrefix: "character_",
     });
@@ -233,13 +251,13 @@ class DefaultPromptMaterializer implements PromptMaterializer {
     const modeRef = cacheBlockRef(modeBlock);
     const mind_profile: JsonObject = Object.freeze({
       catalog_kind: "character_mind",
-      bundle_id: input.bundle_id,
-      bundle_digest: input.bundle_digest,
-      local_id: input.mind_id,
+      bundle_id: packId,
+      bundle_digest: bundleDigest,
+      local_id: mindId,
     });
     const resident_digest = this.#digest.sha256(
       Object.freeze({
-        entity_id: input.entity_id,
+        entity_id: input.entityId,
         mind_profile,
         common_blocks: commonRefs,
         persona_blocks: personaRefs,
@@ -248,9 +266,9 @@ class DefaultPromptMaterializer implements PromptMaterializer {
       }),
     );
     const resident_key = namespacedKey([
-      input.bundle_id,
+      packId,
       "character",
-      input.mind_id,
+      mindId,
       input.mode,
     ]);
 
@@ -258,7 +276,7 @@ class DefaultPromptMaterializer implements PromptMaterializer {
       context_kind: "character",
       resident_key,
       resident_digest,
-      entity_id: input.entity_id,
+      entity_id: input.entityId,
       mind_profile,
       common_blocks: commonRefs,
       persona_blocks: personaRefs,
@@ -292,8 +310,10 @@ class DefaultPromptMaterializer implements PromptMaterializer {
       );
     }
     const purpose = expectString(fragment, "purpose", "PromptFragment");
-    if (!purpose.startsWith(input.expectedPurposePrefix) && purpose !== "system_persona") {
-      // Allow exact family purposes; system_persona may appear in character packs for System skin.
+    if (
+      !purpose.startsWith(input.expectedPurposePrefix) &&
+      purpose !== "system_persona"
+    ) {
       if (
         input.expectedPurposePrefix === "director_" &&
         !purpose.startsWith("director_")
@@ -337,10 +357,11 @@ class DefaultPromptMaterializer implements PromptMaterializer {
       );
     }
 
-    const capability_catalog_digest = this.#digest.sha256(capabilities as JsonValue);
+    const capability_catalog_digest = this.#digest.sha256(
+      capabilities as JsonValue,
+    );
     const world_law_catalog_digest = this.#digest.sha256(worldLaws as JsonValue);
     const content_bundle_digest = input.bundle_digest;
-    // Event contract is engine-fixed model-protocol / world-runtime surface; digest the locked kind set.
     const event_contract_digest = this.#digest.sha256(
       Object.freeze({
         contract: "model-protocol.v1",
@@ -383,7 +404,6 @@ function cacheBlockRef(block: MaterializedPromptBlock): JsonObject {
 }
 
 function namespacedKey(parts: readonly string[]): string {
-  // Flatten identifiers into a NamespacedIdentifier: each segment must be valid.
   const segments: string[] = [];
   for (const part of parts) {
     for (const piece of part.split(".")) {

@@ -56,6 +56,16 @@ export interface RulePluginAbiRegistry {
     readonly operationKind: string;
   }): void;
 
+  /**
+   * Module + operation exact hit for a ContentBundle DependencyLock identity.
+   * Reuses requireModuleForDependency and requireOperation; no second index.
+   */
+  requireOperationForDependency(input: {
+    readonly dependency: RulePluginDependencyIdentity;
+    readonly operationId: string;
+    readonly operationKind: string;
+  }): RegisteredRulePluginModule;
+
   createAdapter(): RulePluginAdapter;
 }
 
@@ -118,6 +128,20 @@ class DefaultRulePluginAbiRegistry implements RulePluginAbiRegistry {
     }
 
     return registered;
+  }
+
+  public requireOperationForDependency(input: {
+    readonly dependency: RulePluginDependencyIdentity;
+    readonly operationId: string;
+    readonly operationKind: string;
+  }): RegisteredRulePluginModule {
+    const module = this.requireModuleForDependency(input.dependency);
+    this.requireOperation({
+      module,
+      operationId: input.operationId,
+      operationKind: input.operationKind,
+    });
+    return module;
   }
 
   public requireOperation(input: {

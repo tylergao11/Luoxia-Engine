@@ -1,6 +1,7 @@
-import type {
-  ContractValidator,
-  JsonDigest,
+import {
+  EngineFault,
+  type ContractValidator,
+  type JsonDigest,
 } from "@luoxia/contracts-runtime";
 import {
   createDeterministicContextAuthority,
@@ -47,12 +48,15 @@ import {
   createRuntimeModelFacades,
   type RuntimeModelFacades,
 } from "./model-request-assembly.js";
+import { createPromptMaterializer } from "./prompt-materializer.js";
 import { createRuleHoldEvaluator } from "./rule-hold-evaluator.js";
+import { createRuntimeWorldBindingResolver } from "./runtime-world-binding.js";
 import {
   createRulePluginAbiRegistry,
   type RulePluginDependencyIdentity,
   type RulePluginModuleV1,
 } from "./rule-plugin-abi.js";
+import type { RulePluginOperationRequirement } from "./rule-plugin-operation-requirement.js";
 import { createRulePluginGateway } from "./rule-plugin-composition.js";
 import type { VerifiedRulePluginInvocationReceipt } from "./rule-plugin-gateway.js";
 import type {
@@ -82,6 +86,11 @@ export interface RuntimeExecutionKernelDependencies {
    * Validated against the kernel's unique ABI registry at construction.
    */
   readonly requiredRulePluginDependencies: readonly RulePluginDependencyIdentity[];
+  /**
+   * Content-derived operation requirements (WorldLaw.evaluator, navigation_resolver).
+   * Validated against the sole ABI registry before Gateway construction.
+   */
+  readonly rulePluginOperationRequirements: readonly RulePluginOperationRequirement[];
   /** Locked ContentBundle index; also supplies StaticComponentDigestLookup. */
   readonly contentRuntimeCatalog: ContentRuntimeCatalog;
   /**
@@ -172,6 +181,28 @@ export function createRuntimeExecutionKernel(
   for (const required of dependencies.requiredRulePluginDependencies) {
     rulePluginAbi.requireModuleForDependency(required);
   }
+  for (const requirement of dependencies.rulePluginOperationRequirements) {
+    try {
+      rulePluginAbi.requireOperationForDependency({
+        dependency: requirement.dependency,
+        operationId: requirement.operationId,
+        operationKind: requirement.operationKind,
+      });
+    } catch (error: unknown) {
+      if (error instanceof EngineFault) {
+        throw new EngineFault(error.code, error.message, {
+          ...(error.details ?? {}),
+          ...requirement.source,
+          operation_id: requirement.operationId,
+          operation_kind: requirement.operationKind,
+          package_id: requirement.dependency.package_id,
+          version: requirement.dependency.version,
+          integrity_sha256: requirement.dependency.integrity_sha256,
+        });
+      }
+      throw error;
+    }
+  }
   const rulePluginAdapter = rulePluginAbi.createAdapter();
 
   const rulePluginGateway = createRulePluginGateway({
@@ -251,11 +282,18 @@ export function createRuntimeExecutionKernel(
     rulePluginProvenance: rulePluginGateway.provenance,
   });
 
-  const models = createRuntimeModelFacades({
-    contracts: dependencies.contracts,
-    digest: dependencies.digest,
-    catalog: dependencies.contentRuntimeCatalog,
+  const worldBindingResolver = createRuntimeWorldBindingResolver({
     worlds: readers.worlds,
+    catalog: dependencies.contentRuntimeCatalog,
+  });
+  const materializer = createPromptMaterializer({
+    catalog: dependencies.contentRuntimeCatalog,
+    digest: dependencies.digest,
+  });
+  const models = createRuntimeModelFacades({
+    digest: dependencies.digest,
+    worldBindingResolver,
+    materializer,
     modelGateway,
     journal,
   });

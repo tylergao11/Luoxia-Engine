@@ -261,7 +261,7 @@ class DefaultAuthoritativePacketBuilder implements AuthoritativePacketBuilder {
     readonly resultDigest: string;
     readonly deterministicContext: JsonObject;
   }> {
-    const snapshot = await this.#worlds.readCurrent(input.worldId);
+    const { snapshot } = await this.#worlds.readCurrent(input.worldId);
     const worldId = expectString(snapshot.value, "world_id", "WorldSnapshot");
     const currentRevision = expectInteger(
       snapshot.value,

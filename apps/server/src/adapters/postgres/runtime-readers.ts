@@ -6,11 +6,9 @@ import {
   expectProperty,
   expectString,
   type ContractValidator,
+  type WorldContentLockDocument,
 } from "@luoxia/contracts-runtime/portable";
-import type {
-  CommittedEventDocument,
-  WorldSnapshotDocument,
-} from "@luoxia/world-core/composition";
+import type { CommittedEventDocument } from "@luoxia/world-core/composition";
 import type { ApplyPacketResultDocument } from "@luoxia/world-core";
 import type { Pool, PoolClient } from "pg";
 
@@ -20,6 +18,7 @@ import type {
   CommittedPacketReader,
   CommittedPacketRecord,
   RuntimeWorldReader,
+  RuntimeWorldRecord,
 } from "../../application/runtime-persistence.js";
 import {
   assertSafeUnsignedInteger,
@@ -63,10 +62,10 @@ class PostgresRuntimeReadersAdapter
     this.#contracts = dependencies.contracts;
   }
 
-  public async readCurrent(worldId: string): Promise<WorldSnapshotDocument> {
+  public async readCurrent(worldId: string): Promise<RuntimeWorldRecord> {
     const verifiedWorldId = assertUuid(this.#contracts, worldId);
     return withPostgresClient(this.#pool, (client) =>
-      readWorldSnapshot(client, this.#contracts, verifiedWorldId),
+      readWorldRecord(client, this.#contracts, verifiedWorldId),
     );
   }
 
@@ -108,13 +107,13 @@ class PostgresRuntimeReadersAdapter
       this.#pool,
       "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
       async (client) => {
-        const snapshot = await readWorldSnapshot(
+        const record = await readWorldRecord(
           client,
           this.#contracts,
           worldId,
         );
         const currentRevision = expectInteger(
-          snapshot.value,
+          record.snapshot.value,
           "world_revision",
           "WorldSnapshot",
         );
@@ -232,6 +231,7 @@ interface WorldRow {
   readonly world_id: string;
   readonly revision_text: string;
   readonly state_document: unknown;
+  readonly world_content_lock_document: unknown;
 }
 
 interface CommittedEventRow {
@@ -248,15 +248,20 @@ interface CommittedPacketRow extends CommittedEventRow {
   readonly result_document: unknown;
 }
 
-async function readWorldSnapshot(
+/**
+ * One SELECT yields both WorldSnapshot and WorldContentLock for the same row.
+ * apply_packet never mutates world_content_lock_document.
+ */
+async function readWorldRecord(
   client: PoolClient,
   contracts: ContractValidator,
   worldId: string,
-): Promise<WorldSnapshotDocument> {
+): Promise<RuntimeWorldRecord> {
   const query = await client.query<WorldRow>(
     `SELECT world_id::text AS world_id,
             revision::text AS revision_text,
-            state_document
+            state_document,
+            world_content_lock_document
        FROM luoxia_engine.worlds
       WHERE world_id = $1::uuid`,
     [worldId],
@@ -308,7 +313,16 @@ async function readWorldSnapshot(
       { world_id: worldId, revision },
     );
   }
-  return snapshot;
+
+  const worldContentLock: WorldContentLockDocument = contracts.assertObject(
+    CONTRACT_REF.worldContentLock,
+    row.world_content_lock_document,
+  );
+
+  return Object.freeze({
+    snapshot,
+    worldContentLock,
+  });
 }
 
 function validateCommittedEventRow(
