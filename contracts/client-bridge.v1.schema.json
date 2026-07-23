@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.luoxia.engine/contracts/gdjs-bridge.v1.schema.json",
-  "title": "Luoxia GDJS Bridge Contract v1",
+  "$id": "https://schemas.luoxia.engine/contracts/client-bridge.v1.schema.json",
+  "title": "Luoxia Client Bridge Contract v1",
   "oneOf": [
     {
       "$ref": "#/$defs/ClientEnvelope"
@@ -27,7 +27,7 @@
       ],
       "properties": {
         "protocol_version": {
-          "const": "gdjs-bridge.v1"
+          "const": "client-bridge.v1"
         },
         "envelope_type": {
           "const": "client"
@@ -63,7 +63,7 @@
       ],
       "properties": {
         "protocol_version": {
-          "const": "gdjs-bridge.v1"
+          "const": "client-bridge.v1"
         },
         "envelope_type": {
           "const": "server"
@@ -126,7 +126,6 @@
       "required": [
         "type",
         "client_build_digest",
-        "gdjs_version",
         "supported_protocols"
       ],
       "properties": {
@@ -135,9 +134,6 @@
         },
         "client_build_digest": {
           "$ref": "common.v1.schema.json#/$defs/Sha256"
-        },
-        "gdjs_version": {
-          "$ref": "common.v1.schema.json#/$defs/SemVer"
         },
         "supported_protocols": {
           "type": "array",
@@ -844,13 +840,12 @@
         "implementation_version",
         "implementation_digest",
         "entrypoint",
-        "gdjs_version",
         "world_write_access",
         "scenes"
       ],
       "properties": {
         "protocol_version": {
-          "const": "gdjs-bridge.v1"
+          "const": "client-bridge.v1"
         },
         "envelope_type": {
           "const": "stage_module.manifest"
@@ -872,9 +867,6 @@
           "minLength": 1,
           "maxLength": 512,
           "pattern": "^(?![A-Za-z]:)(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
-        },
-        "gdjs_version": {
-          "$ref": "common.v1.schema.json#/$defs/SemVer"
         },
         "world_write_access": {
           "const": false

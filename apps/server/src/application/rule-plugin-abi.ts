@@ -33,8 +33,6 @@ export interface RegisteredRulePluginModule {
   readonly manifest: RulePluginManifestDocument;
   readonly pluginLock: JsonObject;
   readonly implementationVersion: string;
-  /** operation_id → operation_kind */
-  readonly operations: ReadonlyMap<string, string>;
 }
 
 export interface RulePluginDependencyIdentity {
@@ -75,6 +73,10 @@ export function createRulePluginAbiRegistry(
 class DefaultRulePluginAbiRegistry implements RulePluginAbiRegistry {
   readonly #byPluginLockKey = new Map<string, RegisteredRulePluginModule>();
   readonly #byIntegrityKey = new Map<string, RegisteredRulePluginModule>();
+  readonly #operationsByModule = new Map<
+    RegisteredRulePluginModule,
+    ReadonlyMap<string, string>
+  >();
 
   public constructor(dependencies: RulePluginAbiRegistryDependencies) {
     for (const module of dependencies.modules) {
@@ -123,7 +125,22 @@ class DefaultRulePluginAbiRegistry implements RulePluginAbiRegistry {
     readonly operationId: string;
     readonly operationKind: string;
   }): void {
-    const declaredKind = input.module.operations.get(input.operationId);
+    const operations = this.#operationsByModule.get(input.module);
+    if (operations === undefined) {
+      throw new EngineFault(
+        "rule_plugin.abi.module_not_registered",
+        "RulePlugin module must be the registered object returned by this ABI registry",
+        {
+          plugin_id: expectString(
+            input.module.pluginLock,
+            "plugin_id",
+            "PluginLock",
+          ),
+        },
+      );
+    }
+
+    const declaredKind = operations.get(input.operationId);
     if (declaredKind === undefined) {
       throw new EngineFault(
         "rule_plugin.abi.operation_not_declared",
@@ -228,7 +245,6 @@ class DefaultRulePluginAbiRegistry implements RulePluginAbiRegistry {
       manifest,
       pluginLock,
       implementationVersion,
-      operations,
     });
 
     const lockKey = pluginLockKeyOf(pluginLock);
@@ -254,6 +270,7 @@ class DefaultRulePluginAbiRegistry implements RulePluginAbiRegistry {
 
     this.#byPluginLockKey.set(lockKey, registered);
     this.#byIntegrityKey.set(integrityKey, registered);
+    this.#operationsByModule.set(registered, operations);
   }
 
   async #resolve(request: RulePluginRequestDocument): Promise<unknown> {

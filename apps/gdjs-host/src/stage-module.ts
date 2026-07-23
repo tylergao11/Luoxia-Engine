@@ -1,11 +1,10 @@
 import {
   CONTRACT_REF,
+  type StageModuleManifestDocument,
   type ValidatedJsonObject,
 } from "@luoxia/contracts-runtime/portable";
 
-export type StageModuleManifestDocument = ValidatedJsonObject<
-  typeof CONTRACT_REF.stageModuleManifest
->;
+export type { StageModuleManifestDocument } from "@luoxia/contracts-runtime/portable";
 
 export type StageOpenDocument = ValidatedJsonObject<
   typeof CONTRACT_REF.stageOpen

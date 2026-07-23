@@ -2,8 +2,8 @@ export const CONTRACT_ID = Object.freeze({
   common: "https://schemas.luoxia.engine/contracts/common.v1.schema.json",
   contentBundle:
     "https://schemas.luoxia.engine/contracts/content-bundle.v1.schema.json",
-  gdjsBridge:
-    "https://schemas.luoxia.engine/contracts/gdjs-bridge.v1.schema.json",
+  clientBridge:
+    "https://schemas.luoxia.engine/contracts/client-bridge.v1.schema.json",
   materialization:
     "https://schemas.luoxia.engine/contracts/materialization.v1.schema.json",
   modelProtocol:
@@ -60,15 +60,16 @@ export const CONTRACT_REF = Object.freeze({
     CONTRACT_ID.rulePlugin,
     "RulePluginResponse",
   ),
-  clientEnvelope: definitionRef(CONTRACT_ID.gdjsBridge, "ClientEnvelope"),
-  serverEnvelope: definitionRef(CONTRACT_ID.gdjsBridge, "ServerEnvelope"),
+  clientEnvelope: definitionRef(CONTRACT_ID.clientBridge, "ClientEnvelope"),
+  serverEnvelope: definitionRef(CONTRACT_ID.clientBridge, "ServerEnvelope"),
   stageModuleManifest: definitionRef(
-    CONTRACT_ID.gdjsBridge,
+    CONTRACT_ID.clientBridge,
     "StageModuleManifest",
   ),
-  stageOpen: definitionRef(CONTRACT_ID.gdjsBridge, "StageOpen"),
-  stageUpdate: definitionRef(CONTRACT_ID.gdjsBridge, "StageUpdate"),
-  stageClose: definitionRef(CONTRACT_ID.gdjsBridge, "StageClose"),
+  stageModuleLock: definitionRef(CONTRACT_ID.common, "StageModuleLock"),
+  stageOpen: definitionRef(CONTRACT_ID.clientBridge, "StageOpen"),
+  stageUpdate: definitionRef(CONTRACT_ID.clientBridge, "StageUpdate"),
+  stageClose: definitionRef(CONTRACT_ID.clientBridge, "StageClose"),
   materializationRequest: definitionRef(
     CONTRACT_ID.materialization,
     "MaterializationRequest",

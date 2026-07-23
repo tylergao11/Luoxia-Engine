@@ -1639,7 +1639,7 @@
           "$ref": "world-runtime.v1.schema.json#/$defs/ControlBindingRef"
         },
         "proposal": {
-          "$ref": "gdjs-bridge.v1.schema.json#/$defs/StageOutcomeProposal"
+          "$ref": "client-bridge.v1.schema.json#/$defs/StageOutcomeProposal"
         }
       }
     },

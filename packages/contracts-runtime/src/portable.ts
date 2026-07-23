@@ -2,6 +2,7 @@ export * from "./contract-validator.js";
 export * from "./fault.js";
 export * from "./json.js";
 export * from "./references.js";
+export * from "./stage-module-manifest-index.js";
 export type {
   ValidatedJson,
   ValidatedJsonObject,

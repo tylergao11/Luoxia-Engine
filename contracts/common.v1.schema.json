@@ -134,8 +134,7 @@
         "module_id",
         "api_version",
         "implementation_version",
-        "implementation_digest",
-        "gdjs_version"
+        "implementation_digest"
       ],
       "properties": {
         "module_id": {
@@ -149,9 +148,6 @@
         },
         "implementation_digest": {
           "$ref": "#/$defs/Sha256"
-        },
-        "gdjs_version": {
-          "$ref": "#/$defs/SemVer"
         }
       }
     },
