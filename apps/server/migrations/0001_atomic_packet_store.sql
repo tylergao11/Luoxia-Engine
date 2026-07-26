@@ -7,6 +7,15 @@ CREATE TABLE luoxia_engine.worlds (
   revision bigint NOT NULL,
   state_document jsonb NOT NULL,
   world_content_lock_document jsonb NOT NULL,
+  save_schema_version text NOT NULL,
+  engine_contract_version text NOT NULL,
+  dependency_bundle_locks_document jsonb NOT NULL,
+  rule_plugin_locks_document jsonb NOT NULL,
+  stage_module_locks_document jsonb NOT NULL,
+  event_cursor bigint NOT NULL,
+  event_log_floor_revision bigint NOT NULL,
+  asset_hashes_document jsonb NOT NULL,
+  migration_history_document jsonb NOT NULL,
   updated_at timestamptz NOT NULL,
   CONSTRAINT worlds_revision_safe_integer CHECK (
     revision >= 0 AND revision <= 9007199254740991
@@ -16,6 +25,29 @@ CREATE TABLE luoxia_engine.worlds (
   ),
   CONSTRAINT worlds_world_content_lock_document_object CHECK (
     jsonb_typeof(world_content_lock_document) = 'object'
+  ),
+  CONSTRAINT worlds_save_schema_version_semver CHECK (
+    save_schema_version ~ '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+  ),
+  CONSTRAINT worlds_engine_contract_version_semver CHECK (
+    engine_contract_version ~ '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+  ),
+  CONSTRAINT worlds_save_documents_arrays CHECK (
+    jsonb_typeof(dependency_bundle_locks_document) = 'array'
+    AND jsonb_typeof(rule_plugin_locks_document) = 'array'
+    AND jsonb_typeof(stage_module_locks_document) = 'array'
+    AND jsonb_typeof(asset_hashes_document) = 'array'
+    AND jsonb_typeof(migration_history_document) = 'array'
+  ),
+  CONSTRAINT worlds_event_cursor_safe_integer CHECK (
+    event_cursor >= 0 AND event_cursor <= 9007199254740991
+  ),
+  CONSTRAINT worlds_event_cursor_matches_revision CHECK (
+    event_cursor = revision
+  ),
+  CONSTRAINT worlds_event_log_floor_safe_integer CHECK (
+    event_log_floor_revision >= 0
+    AND event_log_floor_revision <= event_cursor
   )
 );
 
@@ -26,6 +58,7 @@ CREATE TABLE luoxia_engine.engine_sessions (
   player_entity_id uuid NOT NULL,
   view_revision bigint NOT NULL,
   world_revision bigint NOT NULL,
+  next_server_sequence bigint NOT NULL,
   nonce uuid NOT NULL,
   created_at timestamptz NOT NULL,
   updated_at timestamptz NOT NULL,
@@ -34,6 +67,10 @@ CREATE TABLE luoxia_engine.engine_sessions (
   ),
   CONSTRAINT engine_sessions_world_revision_safe CHECK (
     world_revision >= 0 AND world_revision <= 9007199254740991
+  ),
+  CONSTRAINT engine_sessions_next_server_sequence_safe CHECK (
+    next_server_sequence >= 0
+    AND next_server_sequence <= 9007199254740991
   )
 );
 
@@ -52,11 +89,25 @@ CREATE TABLE luoxia_engine.command_journal (
   accepted_view_revision bigint NOT NULL,
   accepted_world_revision bigint NOT NULL,
   accepted_nonce uuid NOT NULL,
+  dialogue_id uuid,
+  human_turn_id uuid,
+  human_rule_request_id uuid,
+  character_model_request_id uuid,
+  character_turn_id uuid,
+  character_rule_request_id uuid,
   command_status text NOT NULL,
   result_document jsonb,
   received_at timestamptz NOT NULL,
   completed_at timestamptz,
   PRIMARY KEY (session_id, command_id),
+  CONSTRAINT command_journal_human_turn_id_unique UNIQUE (human_turn_id),
+  CONSTRAINT command_journal_human_rule_request_id_unique
+    UNIQUE (human_rule_request_id),
+  CONSTRAINT command_journal_character_model_request_id_unique
+    UNIQUE (character_model_request_id),
+  CONSTRAINT command_journal_character_turn_id_unique UNIQUE (character_turn_id),
+  CONSTRAINT command_journal_character_rule_request_id_unique
+    UNIQUE (character_rule_request_id),
   CONSTRAINT command_journal_request_digest_sha256 CHECK (
     request_digest ~ '^[0-9a-f]{64}$'
   ),
@@ -101,12 +152,90 @@ CREATE TABLE luoxia_engine.command_journal (
     AND request_document #>> '{message,command_id}' = command_id::text
     AND request_document #>> '{message,type}' = command_kind
   ),
+  CONSTRAINT command_journal_dialogue_identity_shape CHECK (
+    (
+      command_kind IN ('dialogue.start', 'dialogue.continue')
+      AND dialogue_id IS NOT NULL
+      AND human_turn_id IS NOT NULL
+      AND human_rule_request_id IS NOT NULL
+       AND character_model_request_id IS NOT NULL
+       AND character_turn_id IS NOT NULL
+       AND character_rule_request_id IS NOT NULL
+       AND dialogue_id <> human_turn_id
+       AND dialogue_id <> human_rule_request_id
+       AND dialogue_id <> character_model_request_id
+       AND dialogue_id <> character_turn_id
+       AND dialogue_id <> character_rule_request_id
+       AND human_turn_id <> character_turn_id
+       AND human_turn_id <> human_rule_request_id
+       AND human_turn_id <> character_model_request_id
+       AND human_turn_id <> character_rule_request_id
+       AND human_rule_request_id <> character_model_request_id
+       AND human_rule_request_id <> character_turn_id
+       AND human_rule_request_id <> character_rule_request_id
+       AND character_model_request_id <> character_turn_id
+       AND character_model_request_id <> character_rule_request_id
+       AND character_turn_id <> character_rule_request_id
+      AND (
+        command_kind = 'dialogue.start'
+        OR request_document #>> '{message,dialogue_id}' = dialogue_id::text
+      )
+    )
+    OR (
+      command_kind NOT IN ('dialogue.start', 'dialogue.continue')
+      AND dialogue_id IS NULL
+      AND human_turn_id IS NULL
+      AND human_rule_request_id IS NULL
+      AND character_model_request_id IS NULL
+      AND character_turn_id IS NULL
+      AND character_rule_request_id IS NULL
+    )
+  ),
   CONSTRAINT command_journal_result_identity CHECK (
     result_document IS NULL
     OR (
       result_document #>> '{command_id}' IS NOT NULL
       AND result_document #>> '{command_id}' = command_id::text
     )
+  )
+);
+
+CREATE UNIQUE INDEX command_journal_active_world_unique
+  ON luoxia_engine.command_journal (accepted_world_id)
+  WHERE command_status = 'received';
+
+CREATE TABLE luoxia_engine.command_server_envelopes (
+  session_id uuid NOT NULL,
+  command_id uuid NOT NULL,
+  response_ordinal integer NOT NULL,
+  server_sequence bigint NOT NULL,
+  message_id uuid NOT NULL,
+  message_type text NOT NULL,
+  envelope_document jsonb NOT NULL,
+  created_at timestamptz NOT NULL,
+  PRIMARY KEY (session_id, command_id, response_ordinal),
+  CONSTRAINT command_server_envelopes_command_foreign_key
+    FOREIGN KEY (session_id, command_id)
+    REFERENCES luoxia_engine.command_journal (session_id, command_id),
+  CONSTRAINT command_server_envelopes_session_sequence_unique
+    UNIQUE (session_id, server_sequence),
+  CONSTRAINT command_server_envelopes_message_id_unique UNIQUE (message_id),
+  CONSTRAINT command_server_envelopes_ordinal_safe CHECK (
+    response_ordinal >= 0
+  ),
+  CONSTRAINT command_server_envelopes_sequence_safe CHECK (
+    server_sequence >= 0
+    AND server_sequence <= 9007199254740991
+  ),
+  CONSTRAINT command_server_envelopes_document_object CHECK (
+    jsonb_typeof(envelope_document) = 'object'
+  ),
+  CONSTRAINT command_server_envelopes_identity CHECK (
+    envelope_document #>> '{envelope_type}' = 'server'
+    AND envelope_document #>> '{message_id}' = message_id::text
+    AND envelope_document #>> '{session_id}' = session_id::text
+    AND envelope_document #>> '{sequence}' = server_sequence::text
+    AND envelope_document #>> '{message,type}' = message_type
   )
 );
 
@@ -493,6 +622,77 @@ CREATE TABLE luoxia_engine.daily_settlement_runs (
   ),
   CONSTRAINT daily_settlement_runs_request_kind CHECK (
     request_kind = 'director.daily_settlement'
+  )
+);
+
+CREATE TABLE luoxia_engine.day_cycle_execution_identities (
+  execution_id uuid PRIMARY KEY,
+  world_id uuid NOT NULL,
+  day bigint NOT NULL,
+  execution_kind text NOT NULL,
+  subject_id uuid,
+  created_at timestamptz NOT NULL,
+  CONSTRAINT day_cycle_execution_identities_world_foreign_key
+    FOREIGN KEY (world_id)
+    REFERENCES luoxia_engine.worlds(world_id),
+  CONSTRAINT day_cycle_execution_identities_scope_unique
+    UNIQUE NULLS NOT DISTINCT (
+      world_id,
+      day,
+      execution_kind,
+      subject_id
+    ),
+  CONSTRAINT day_cycle_execution_identities_day_safe CHECK (
+    day >= 1 AND day <= 9007199254740991
+  ),
+  CONSTRAINT day_cycle_execution_identities_kind_closed CHECK (
+    execution_kind IN (
+      'transition.autonomous_to_director',
+      'transition.director_to_player',
+      'transition.player_to_autonomous',
+      'state_machine.advance',
+      'character.react',
+      'automatic_event.resolve'
+    )
+  ),
+  CONSTRAINT day_cycle_execution_identities_subject_shape CHECK (
+    (
+      execution_kind IN (
+        'state_machine.advance',
+        'character.react',
+        'automatic_event.resolve'
+      )
+      AND subject_id IS NOT NULL
+    )
+    OR
+    (
+      execution_kind IN (
+        'transition.autonomous_to_director',
+        'transition.director_to_player',
+        'transition.player_to_autonomous'
+      )
+      AND subject_id IS NULL
+    )
+  )
+);
+
+CREATE TABLE luoxia_engine.player_day_end_runs (
+  session_id uuid NOT NULL,
+  command_id uuid NOT NULL,
+  world_id uuid NOT NULL,
+  from_day bigint NOT NULL,
+  created_at timestamptz NOT NULL,
+  PRIMARY KEY (session_id, command_id),
+  CONSTRAINT player_day_end_runs_command_foreign_key
+    FOREIGN KEY (session_id, command_id)
+    REFERENCES luoxia_engine.command_journal(session_id, command_id),
+  CONSTRAINT player_day_end_runs_world_foreign_key
+    FOREIGN KEY (world_id)
+    REFERENCES luoxia_engine.worlds(world_id),
+  CONSTRAINT player_day_end_runs_world_day_unique
+    UNIQUE (world_id, from_day),
+  CONSTRAINT player_day_end_runs_day_safe CHECK (
+    from_day >= 1 AND from_day < 9007199254740991
   )
 );
 

@@ -5,17 +5,13 @@ import {
   expectJsonObject,
   expectProperty,
   expectString,
-  jsonEquals,
   type ContractValidator,
   type JsonObject,
   type JsonValue,
   type ValidatedJsonObject,
 } from "@luoxia/contracts-runtime";
 
-import type {
-  CommittedEventReader,
-  RuntimeWorldReader,
-} from "./runtime-persistence.js";
+import type { RuntimeWorldReader } from "./runtime-persistence.js";
 import type {
   RulePluginInvocationProvenanceVerifier,
   VerifiedRulePluginInvocationReceipt,
@@ -53,7 +49,6 @@ export interface AuthoritativePacketBuilderDependencies {
   readonly contracts: ContractValidator;
   readonly rulePluginProvenance: RulePluginInvocationProvenanceVerifier;
   readonly worlds: RuntimeWorldReader;
-  readonly events: CommittedEventReader;
 }
 
 export function createAuthoritativePacketBuilder(
@@ -66,13 +61,11 @@ class DefaultAuthoritativePacketBuilder implements AuthoritativePacketBuilder {
   readonly #contracts: ContractValidator;
   readonly #rulePluginProvenance: RulePluginInvocationProvenanceVerifier;
   readonly #worlds: RuntimeWorldReader;
-  readonly #events: CommittedEventReader;
 
   public constructor(dependencies: AuthoritativePacketBuilderDependencies) {
     this.#contracts = dependencies.contracts;
     this.#rulePluginProvenance = dependencies.rulePluginProvenance;
     this.#worlds = dependencies.worlds;
-    this.#events = dependencies.events;
   }
 
   public fromRulePluginReceipt(
@@ -324,56 +317,25 @@ class DefaultAuthoritativePacketBuilder implements AuthoritativePacketBuilder {
         },
       );
     }
-
-    const events = await this.#events.readRevisionRange({
-      worldId,
-      afterRevisionExclusive: publishedRevision - 1,
-      throughRevisionInclusive: publishedRevision,
-    });
-    if (events.length !== 1) {
+    if (publishedRevision > currentRevision) {
       throw new EngineFault(
-        "runtime.packet_builder.publish_event_missing",
-        "Could not recover the unique CommittedEvent for card published_revision",
+        "runtime.packet_builder.published_revision_invalid",
+        "EventCard published_revision cannot exceed the current world revision",
         {
           world_id: worldId,
           published_revision: publishedRevision,
-          event_count: events.length,
+          current_revision: currentRevision,
         },
       );
     }
-    const committed = events[0]!;
-    const publishPacket = expectJsonObject(
-      expectProperty(committed.value, "packet", "CommittedEvent"),
-      "CommittedEvent.packet",
-    );
-    assertPublishEventMatchesCard(publishPacket, card);
-    const deterministicContext = expectJsonObject(
+    const deterministicContext = this.#contracts.assertObject(
+      CONTRACT_REF.deterministicContext,
       expectProperty(
-        publishPacket,
-        "deterministic_context",
-        "ContentPacket",
-      ),
-      "ContentPacket.deterministic_context",
-    );
-
-    assertEqual(
-      "sealed.deterministic_context_id",
-      expectString(deterministicContext, "context_id", "DeterministicContext"),
-      expectString(sealed, "deterministic_context_id", "SealedEventResult"),
-    );
-    assertEqual(
-      "sealed.deterministic_context_digest",
-      expectString(
-        deterministicContext,
-        "context_digest",
-        "DeterministicContext",
-      ),
-      expectString(
         sealed,
-        "deterministic_context_digest",
+        "deterministic_context",
         "SealedEventResult",
       ),
-    );
+    ).value;
 
     return Object.freeze({
       worldId,
@@ -392,59 +354,6 @@ class DefaultAuthoritativePacketBuilder implements AuthoritativePacketBuilder {
       CONTRACT_REF.contentPacket,
       candidate,
     );
-  }
-}
-
-function assertPublishEventMatchesCard(
-  publishPacket: JsonObject,
-  card: JsonObject,
-): void {
-  const eventCardId = expectString(
-    card,
-    "event_card_id",
-    "EventCardState",
-  );
-  const publishOps = asObjectArray(
-    expectProperty(publishPacket, "ops", "ContentPacket"),
-    "ContentPacket.ops",
-  ).filter(
-    (op) =>
-      expectString(op, "op", "EffectOp") === "event_card.publish" &&
-      expectString(op, "event_card_id", "EventCardPublishOp") === eventCardId,
-  );
-  if (publishOps.length !== 1) {
-    throw new EngineFault(
-      "runtime.packet_builder.publish_event_mismatch",
-      "Card published_revision must point to exactly one matching event_card.publish op",
-      { event_card_id: eventCardId, matches: publishOps.length },
-    );
-  }
-
-  const publishOp = publishOps[0]!;
-  const fields = [
-    "source_proposal_id",
-    "source_dialogue_id",
-    "day",
-    "title",
-    "summary",
-    "sealed_result",
-    "control",
-    "charge_id",
-    "cost",
-  ] as const;
-  for (const field of fields) {
-    if (
-      !jsonEquals(
-        expectProperty(publishOp, field, "EventCardPublishOp"),
-        expectProperty(card, field, "EventCardState"),
-      )
-    ) {
-      throw new EngineFault(
-        "runtime.packet_builder.publish_event_mismatch",
-        `Published EventCard field ${field} does not match current card state`,
-        { event_card_id: eventCardId, field },
-      );
-    }
   }
 }
 

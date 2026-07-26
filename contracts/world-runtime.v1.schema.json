@@ -4079,8 +4079,7 @@
         "selected_option_id",
         "adjudicated_at_revision",
         "preconditions",
-        "deterministic_context_id",
-        "deterministic_context_digest",
+        "deterministic_context",
         "ops",
         "presentation",
         "result_digest"
@@ -4105,11 +4104,8 @@
             "$ref": "#/$defs/PacketPrecondition"
           }
         },
-        "deterministic_context_id": {
-          "$ref": "common.v1.schema.json#/$defs/Uuid"
-        },
-        "deterministic_context_digest": {
-          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        "deterministic_context": {
+          "$ref": "common.v1.schema.json#/$defs/DeterministicContext"
         },
         "ops": {
           "type": "array",

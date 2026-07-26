@@ -777,6 +777,13 @@ function handleDayCycleAdvance(context: OperationContext): void {
       const fromPhase = expectString(context.input, "from_phase", "DayCycleAdvanceInput");
       const toDay = expectInteger(context.input, "to_day", "DayCycleAdvanceInput");
       const toPhase = expectString(context.input, "to_phase", "DayCycleAdvanceInput");
+      assertAllowedDayCycleTransition(
+        context.operationKind,
+        fromDay,
+        fromPhase,
+        toDay,
+        toPhase,
+      );
 
       assertEqual(
         "day_cycle.from_day",
@@ -824,6 +831,7 @@ function handleDayCycleAdvance(context: OperationContext): void {
         expectProperty(context.input, "control", "DayCycleAdvanceInput"),
         "DayCycleAdvanceInput.control",
       );
+      assertActiveHumanControl(context, control);
       const expireOps = ops.filter(
         (op) => expectString(op, "op", "EffectOp") === "event_card.expire",
       );
@@ -898,6 +906,60 @@ function handleDayCycleAdvance(context: OperationContext): void {
     }
     default:
       throw unexpectedOutput(context);
+  }
+}
+
+function assertAllowedDayCycleTransition(
+  operationKind: OperationKind,
+  fromDay: number,
+  fromPhase: string,
+  toDay: number,
+  toPhase: string,
+): void {
+  const sameDay =
+    toDay === fromDay &&
+    ((fromPhase === "autonomous" && toPhase === "director_settlement") ||
+      (fromPhase === "director_settlement" && toPhase === "player"));
+  const nextDay =
+    fromPhase === "player" &&
+    toPhase === "autonomous" &&
+    fromDay < Number.MAX_SAFE_INTEGER &&
+    toDay === fromDay + 1;
+  if (sameDay || nextDay) {
+    return;
+  }
+  throw fault(
+    "rule_plugin.semantic.day_cycle_transition_invalid",
+    "day_cycle.advance must follow autonomous → director_settlement → player → next-day autonomous",
+    {
+      operation_kind: operationKind,
+      from_day: fromDay,
+      from_phase: fromPhase,
+      to_day: toDay,
+      to_phase: toPhase,
+    },
+  );
+}
+
+function assertActiveHumanControl(
+  context: OperationContext,
+  control: JsonObject,
+): void {
+  const bindingId = expectString(control, "binding_id", "ControlBindingRef");
+  const binding = findControlBinding(context.world, bindingId);
+  if (
+    binding === undefined ||
+    expectString(binding, "binding_kind", "ControlBinding") !== "human" ||
+    expectString(binding, "status", "ControlBinding") !== "active"
+  ) {
+    throw fault(
+      "rule_plugin.semantic.day_cycle_control_invalid",
+      "day_cycle.advance requires an active human ControlBinding",
+      {
+        operation_kind: context.operationKind,
+        binding_id: bindingId,
+      },
+    );
   }
 }
 
@@ -1186,7 +1248,29 @@ function handleDialogueOpen(context: OperationContext): void {
         expectProperty(op, "first_turn", "DialogueOpenOp"),
         context.operationKind,
       );
-      assertControlExists(context, context.input);
+      const firstTurn = expectJsonObject(
+        expectProperty(
+          context.input,
+          "first_turn",
+          "DialogueOpenInput",
+        ),
+        "DialogueOpenInput.first_turn",
+      );
+      const participants = asObjectArray(
+        expectProperty(
+          context.input,
+          "participants",
+          "DialogueOpenInput",
+        ),
+        "DialogueOpenInput.participants",
+      );
+      assertHumanDialogueControlAndSource(
+        context,
+        context.input,
+        firstTurn,
+        participants,
+        proposal,
+      );
       return;
     }
     default:
@@ -1219,6 +1303,14 @@ function handleDialogueTurnAppend(context: OperationContext): void {
         expectProperty(op, "turn", "DialogueTurnAppendOp"),
         context.operationKind,
       );
+      const turn = expectJsonObject(
+        expectProperty(
+          context.input,
+          "turn",
+          "DialogueTurnAppendInput",
+        ),
+        "DialogueTurnAppendInput.turn",
+      );
 
       const dialogueId = expectString(
         context.input,
@@ -1240,8 +1332,38 @@ function handleDialogueTurnAppend(context: OperationContext): void {
         context.operationKind,
       );
 
-      if (context.input.control !== undefined) {
-        assertControlExists(context, context.input);
+      const participants = asObjectArray(
+        expectProperty(
+          dialogue,
+          "participants",
+          "DialogueRecord",
+        ),
+        "DialogueRecord.participants",
+      );
+      const source = expectJsonObject(
+        expectProperty(turn, "source", "DialogueTurn"),
+        "DialogueTurn.source",
+      );
+      const sourceKind = expectString(
+        source,
+        "source_kind",
+        "DialogueTurnSource",
+      );
+      assertDialogueSpeakerIsParticipant(
+        context,
+        turn,
+        participants,
+      );
+      if (sourceKind === "human") {
+        assertHumanDialogueControlAndSource(
+          context,
+          context.input,
+          turn,
+          participants,
+          proposal,
+        );
+      } else if (sourceKind === "character_mind") {
+        assertActiveCharacterMindSpeaker(context, turn);
       }
       if (context.input.model_proof !== undefined) {
         assertModelProofRevisionCompatible(context, context.input, "model_proof");
@@ -1383,20 +1505,14 @@ function handleEventCardPublish(context: OperationContext): void {
         ),
         "RulePluginRequest.deterministic_context",
       );
-      assertEqual(
-        "sealed.deterministic_context_id",
-        expectString(deterministicContext, "context_id", "DeterministicContext"),
-        expectString(sealed, "deterministic_context_id", "SealedEventResult"),
-        context.operationKind,
-      );
-      assertEqual(
-        "sealed.deterministic_context_digest",
-        expectString(
-          deterministicContext,
-          "context_digest",
-          "DeterministicContext",
+      assertJsonFieldEqual(
+        "sealed.deterministic_context",
+        deterministicContext,
+        expectProperty(
+          sealed,
+          "deterministic_context",
+          "SealedEventResult",
         ),
-        expectString(sealed, "deterministic_context_digest", "SealedEventResult"),
         context.operationKind,
       );
 
@@ -2663,6 +2779,207 @@ function assertHumanControlMatchesActor(
     expectString(actor, "entity_id", "EntityRef"),
     expectString(binding, "entity_id", "ControlBinding"),
     context.operationKind,
+  );
+}
+
+function assertHumanDialogueControlAndSource(
+  context: OperationContext,
+  owner: JsonObject,
+  turn: JsonObject,
+  participants: readonly JsonObject[],
+  proposal: JsonObject,
+): void {
+  const control = expectJsonObject(
+    expectProperty(owner, "control", context.operationKind),
+    `${context.operationKind}.control`,
+  );
+  const bindingId = expectString(
+    control,
+    "binding_id",
+    "ControlBindingRef",
+  );
+  const binding = findControlBinding(context.world, bindingId);
+  if (binding === undefined) {
+    throw fault(
+      "rule_plugin.semantic.control_missing",
+      `Control binding ${bindingId} is absent from readonly_world`,
+      { operation_kind: context.operationKind, binding_id: bindingId },
+    );
+  }
+  assertEqual(
+    "dialogue.control.binding_kind",
+    "human",
+    expectString(binding, "binding_kind", "ControlBinding"),
+    context.operationKind,
+  );
+  assertEqual(
+    "dialogue.control.status",
+    "active",
+    expectString(binding, "status", "ControlBinding"),
+    context.operationKind,
+  );
+
+  const speakerEntity = requireDialogueTurnSpeakerEntity(context, turn);
+  assertEqual(
+    "dialogue.speaker.world_id",
+    context.worldId,
+    expectString(speakerEntity, "world_id", "EntityRef"),
+    context.operationKind,
+  );
+  const speakerEntityId = expectString(
+    speakerEntity,
+    "entity_id",
+    "EntityRef",
+  );
+  assertEqual(
+    "dialogue.control.entity_id",
+    speakerEntityId,
+    expectString(binding, "entity_id", "ControlBinding"),
+    context.operationKind,
+  );
+  const entity = findEntity(context.world, speakerEntityId);
+  if (
+    entity === undefined ||
+    expectString(entity, "state", "EntityState") !== "active"
+  ) {
+    throw fault(
+      "rule_plugin.semantic.dialogue_human_speaker_unavailable",
+      "Human dialogue speaker must be an active Entity in readonly_world",
+      {
+        operation_kind: context.operationKind,
+        entity_id: speakerEntityId,
+      },
+    );
+  }
+  assertDialogueSpeakerIsParticipant(context, turn, participants);
+
+  const source = expectJsonObject(
+    expectProperty(turn, "source", "DialogueTurn"),
+    "DialogueTurn.source",
+  );
+  assertEqual(
+    "dialogue.source.source_kind",
+    "human",
+    expectString(source, "source_kind", "DialogueTurnSource"),
+    context.operationKind,
+  );
+  const commandId = expectString(
+    source,
+    "command_id",
+    "HumanDialogueTurnSource",
+  );
+  assertEqual(
+    "dialogue.proposal.cause_id",
+    commandId,
+    expectString(proposal, "cause_id", "PacketProposal"),
+    context.operationKind,
+  );
+}
+
+function assertDialogueSpeakerIsParticipant(
+  context: OperationContext,
+  turn: JsonObject,
+  participants: readonly JsonObject[],
+): void {
+  const speaker = expectJsonObject(
+    expectProperty(turn, "speaker", "DialogueTurn"),
+    "DialogueTurn.speaker",
+  );
+  const matches = participants.filter((participant) =>
+    jsonEquals(participant, speaker),
+  );
+  if (matches.length !== 1) {
+    throw fault(
+      "rule_plugin.semantic.dialogue_speaker_not_participant",
+      "Dialogue turn speaker must match exactly one dialogue participant",
+      {
+        operation_kind: context.operationKind,
+        matching_participants: matches.length,
+      },
+    );
+  }
+}
+
+function assertActiveCharacterMindSpeaker(
+  context: OperationContext,
+  turn: JsonObject,
+): void {
+  const speakerEntity = requireDialogueTurnSpeakerEntity(context, turn);
+  assertEqual(
+    "dialogue.speaker.world_id",
+    context.worldId,
+    expectString(speakerEntity, "world_id", "EntityRef"),
+    context.operationKind,
+  );
+  const entityId = expectString(
+    speakerEntity,
+    "entity_id",
+    "EntityRef",
+  );
+  const entity = findEntity(context.world, entityId);
+  if (
+    entity === undefined ||
+    expectString(entity, "state", "EntityState") !== "active"
+  ) {
+    throw fault(
+      "rule_plugin.semantic.dialogue_character_speaker_unavailable",
+      "CharacterMind dialogue speaker must be an active Entity",
+      { operation_kind: context.operationKind, entity_id: entityId },
+    );
+  }
+  const bindings = asObjectArray(
+    expectProperty(
+      context.world,
+      "control_bindings",
+      "WorldState",
+    ),
+    "WorldState.control_bindings",
+  ).filter(
+    (binding) =>
+      expectString(binding, "binding_kind", "ControlBinding") ===
+        "character_mind" &&
+      expectString(binding, "entity_id", "ControlBinding") === entityId &&
+      expectString(binding, "status", "ControlBinding") === "active",
+  );
+  if (bindings.length !== 1) {
+    throw fault(
+      "rule_plugin.semantic.dialogue_character_binding_count",
+      "CharacterMind dialogue speaker must have exactly one active CharacterMind ControlBinding",
+      {
+        operation_kind: context.operationKind,
+        entity_id: entityId,
+        matching_bindings: bindings.length,
+      },
+    );
+  }
+}
+
+function requireDialogueTurnSpeakerEntity(
+  context: OperationContext,
+  turn: JsonObject,
+): JsonObject {
+  const speaker = expectJsonObject(
+    expectProperty(turn, "speaker", "DialogueTurn"),
+    "DialogueTurn.speaker",
+  );
+  const participantKind = expectString(
+    speaker,
+    "participant_kind",
+    "DialogueParticipantRef",
+  );
+  if (participantKind !== "entity") {
+    throw fault(
+      "rule_plugin.semantic.dialogue_entity_speaker_required",
+      "Human and CharacterMind dialogue turns require an Entity speaker",
+      {
+        operation_kind: context.operationKind,
+        participant_kind: participantKind,
+      },
+    );
+  }
+  return expectJsonObject(
+    expectProperty(speaker, "entity", "DialogueParticipantRef"),
+    "DialogueParticipantRef.entity",
   );
 }
 

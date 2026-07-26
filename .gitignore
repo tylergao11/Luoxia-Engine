@@ -3,3 +3,18 @@ dist/
 *.tsbuildinfo
 .env
 
+# Accidental Unity project roots must never land in this Engine monorepo.
+# Formal Unity Host lives outside (e.g. C:\Ai\Luoxia-Unity), not here.
+/ProjectSettings/
+/Library/
+/Logs/
+/Temp/
+/Assets/
+/UserSettings/
+/Obj/
+/*.csproj
+/*.sln
+# UPM writes these next to npm packages/* and must not be committed
+/packages/manifest.json
+/packages/packages-lock.json
+

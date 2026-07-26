@@ -5,6 +5,7 @@ import {
   expectJsonObject,
   expectProperty,
   expectString,
+  jsonEquals,
   type JsonDigest,
   type JsonObject,
 } from "@luoxia/contracts-runtime";
@@ -25,10 +26,14 @@ import {
   projectDialogue,
   projectDirectorWorldView,
   projectKnowledgeView,
-  projectObjectiveTracesEmpty,
+  projectObjectiveTraces,
   readDayNumber,
 } from "./model-view-projection.js";
-import type { StoredModelInvocation } from "./runtime-persistence.js";
+import type {
+  CommittedEventReader,
+  DailySettlementRunRecord,
+  StoredModelInvocation,
+} from "./runtime-persistence.js";
 import type { RuntimeWorldBindingResolver } from "./runtime-world-binding.js";
 
 export interface RuntimeModelFacades {
@@ -55,6 +60,7 @@ export interface RuntimeModelFacades {
     readonly entityId: string;
     readonly dialogueId: string;
     readonly latestPlayerTurnId: string;
+    readonly requestId: string;
     readonly model_profile_id: string;
   }): Promise<VerifiedModelInvocationReceipt>;
 
@@ -62,6 +68,7 @@ export interface RuntimeModelFacades {
     readonly worldId: string;
     readonly entityId: string;
     readonly events: readonly JsonObject[];
+    readonly requestId: string;
     readonly model_profile_id: string;
   }): Promise<VerifiedModelInvocationReceipt>;
 }
@@ -72,6 +79,7 @@ export function createRuntimeModelFacades(input: {
   readonly materializer: PromptMaterializer;
   readonly modelGateway: ModelGateway;
   readonly journal: PostgresRuntimeInvocationJournal;
+  readonly events: CommittedEventReader;
 }): RuntimeModelFacades {
   const assembly = new ModelRequestAssembly({
     digest: input.digest,
@@ -79,6 +87,7 @@ export function createRuntimeModelFacades(input: {
     modelGateway: input.modelGateway,
     journal: input.journal,
     materializer: input.materializer,
+    events: input.events,
   });
   return Object.freeze({
     directorDailySettlement: (
@@ -105,6 +114,7 @@ class ModelRequestAssembly {
   readonly #modelGateway: ModelGateway;
   readonly #journal: PostgresRuntimeInvocationJournal;
   readonly #materializer: PromptMaterializer;
+  readonly #events: CommittedEventReader;
 
   public constructor(input: {
     readonly digest: JsonDigest;
@@ -112,24 +122,81 @@ class ModelRequestAssembly {
     readonly modelGateway: ModelGateway;
     readonly journal: PostgresRuntimeInvocationJournal;
     readonly materializer: PromptMaterializer;
+    readonly events: CommittedEventReader;
   }) {
     this.#digest = input.digest;
     this.#worldBindingResolver = input.worldBindingResolver;
     this.#modelGateway = input.modelGateway;
     this.#journal = input.journal;
     this.#materializer = input.materializer;
+    this.#events = input.events;
   }
 
-  public directorDailySettlement(input: {
+  public async directorDailySettlement(input: {
     readonly worldId: string;
     readonly model_profile_id: string;
   }): Promise<VerifiedModelInvocationReceipt> {
-    return this.#runDirector("daily_settlement", input, async (ctx) => {
-      const day = readDayNumber(ctx.worldState);
-      return Object.freeze({
-        world_view: projectDirectorWorldView(ctx.worldState, day),
-        objective_traces: projectObjectiveTracesEmpty(),
+    const worldBinding = await this.#worldBindingResolver.resolveCurrent(
+      input.worldId,
+    );
+    const snapshot = worldBinding.record.snapshot;
+    const worldState = expectJsonObject(
+      expectProperty(snapshot.value, "world_state", "WorldSnapshot"),
+      "WorldSnapshot.world_state",
+    );
+    const day = readDayNumber(worldState);
+    const materialized = this.#materializer.materializeDirector({
+      contentBinding: worldBinding.contentBinding,
+      mode: "daily_settlement",
+    });
+    const storedRun = await this.#journal.read(input.worldId, day);
+    if (storedRun !== undefined) {
+      assertStoredDirectorDailyIdentity(storedRun, input);
+      const prepared = this.#modelGateway.prepare(
+        Object.freeze({ snapshot: storedRun.invocation.snapshot }),
+        storedRun.invocation.request.value,
+        Object.freeze({
+          prompt_blocks: materialized.ordered_blocks,
+          event_context: materialized.event_context,
+        }),
+      );
+      return continueModelFromStored({
+        modelGateway: this.#modelGateway,
+        journal: this.#journal,
+        prepared,
+        stored: storedRun.invocation,
+        requestId: storedRun.invocation.requestId,
+        dailyRunId: storedRun.runId,
       });
+    }
+
+    assertDayCyclePhase(worldState, "director_settlement");
+    const currentRevision = expectIntegerSafe(
+      snapshot.value,
+      "world_revision",
+    );
+    const committedEvents = await this.#events.readRevisionRange({
+      worldId: input.worldId,
+      afterRevisionExclusive:
+        worldBinding.record.eventHistoryFloorRevision,
+      throughRevisionInclusive: currentRevision,
+    });
+    const dynamicInput = Object.freeze({
+      world_view: projectDirectorWorldView(worldState, day),
+      objective_traces: projectObjectiveTraces({
+        events: committedEvents,
+        currentDay: day,
+        createTraceId: randomUUID,
+      }),
+    });
+    return this.#invoke({
+      snapshot,
+      requestKind: "director.daily_settlement",
+      modelProfileId: input.model_profile_id,
+      residentContext: materialized.resident_context,
+      promptBlocks: materialized.ordered_blocks,
+      eventContext: materialized.event_context,
+      dynamicInput,
     });
   }
 
@@ -171,25 +238,120 @@ class ModelRequestAssembly {
     readonly entityId: string;
     readonly dialogueId: string;
     readonly latestPlayerTurnId: string;
+    readonly requestId: string;
     readonly model_profile_id: string;
   }): Promise<VerifiedModelInvocationReceipt> {
-    return this.#runCharacter("dialogue", input, async (ctx) =>
-      Object.freeze({
-        subjective_view: projectCharacterSubjectiveView(
-          input.worldId,
-          ctx.worldState,
-          input.entityId,
-        ),
-        dialogue: projectDialogue(ctx.worldState, input.dialogueId),
-        latest_player_turn_id: input.latestPlayerTurnId,
-      }),
-    );
+    return this.#characterDialogue(input);
   }
 
-  public characterReact(input: {
+  async #characterDialogue(input: {
+    readonly worldId: string;
+    readonly entityId: string;
+    readonly dialogueId: string;
+    readonly latestPlayerTurnId: string;
+    readonly requestId: string;
+    readonly model_profile_id: string;
+  }): Promise<VerifiedModelInvocationReceipt> {
+    const stored = await this.#journal.readByRequestId(input.requestId);
+    if (stored !== undefined) {
+      return this.#recoverCharacterDialogue(input, stored);
+    }
+    try {
+      return await this.#runCharacter("dialogue", input, async (ctx) =>
+        Object.freeze({
+          subjective_view: projectCharacterSubjectiveView(
+            input.worldId,
+            ctx.worldState,
+            input.entityId,
+          ),
+          dialogue: projectDialogue(ctx.worldState, input.dialogueId),
+          latest_player_turn_id: input.latestPlayerTurnId,
+        }),
+      );
+    } catch (error: unknown) {
+      if (
+        !(error instanceof EngineFault) ||
+        error.code !== "model.invocation.identity_conflict"
+      ) {
+        throw error;
+      }
+      const raced = await this.#journal.readByRequestId(input.requestId);
+      if (raced === undefined) {
+        throw error;
+      }
+      return this.#recoverCharacterDialogue(input, raced);
+    }
+  }
+
+  async #recoverCharacterDialogue(
+    input: {
+      readonly worldId: string;
+      readonly entityId: string;
+      readonly dialogueId: string;
+      readonly latestPlayerTurnId: string;
+      readonly requestId: string;
+      readonly model_profile_id: string;
+    },
+    stored: StoredModelInvocation,
+  ): Promise<VerifiedModelInvocationReceipt> {
+    assertStoredCharacterDialogueIdentity(stored, input);
+    if (stored.phase === "verified") {
+      const recovered = await this.#journal.recoverVerifiedByRequestId(
+        input.requestId,
+      );
+      if (recovered === undefined) {
+        throw new EngineFault(
+          "model.assembly.verified_receipt_missing",
+          "Verified character dialogue invocation could not be recovered",
+          { request_id: input.requestId },
+        );
+      }
+      return recovered;
+    }
+    if (stored.phase === "dispatched_ambiguous") {
+      throw new EngineFault(
+        "runtime.kernel.model_dispatch_ambiguous",
+        "Character dialogue model invocation was dispatched without a verified receipt; execution is blocked",
+        {
+          request_id: input.requestId,
+          request_kind: stored.requestKind,
+          world_id: stored.worldId,
+          world_revision: stored.worldRevision,
+        },
+      );
+    }
+
+    const worldBinding = await this.#worldBindingResolver.resolveCurrent(
+      input.worldId,
+    );
+    const materialized = this.#materializer.materializeCharacter({
+      contentBinding: worldBinding.contentBinding,
+      runtimeWorldId: input.worldId,
+      entityId: input.entityId,
+      mode: "dialogue",
+    });
+    const prepared = this.#modelGateway.prepare(
+      Object.freeze({ snapshot: stored.snapshot }),
+      stored.request.value,
+      Object.freeze({
+        prompt_blocks: materialized.ordered_blocks,
+      }),
+    );
+    return continueModelFromStored({
+      modelGateway: this.#modelGateway,
+      journal: this.#journal,
+      prepared,
+      stored,
+      requestId: input.requestId,
+      dailyRunId: undefined,
+    });
+  }
+
+  public async characterReact(input: {
     readonly worldId: string;
     readonly entityId: string;
     readonly events: readonly JsonObject[];
+    readonly requestId: string;
     readonly model_profile_id: string;
   }): Promise<VerifiedModelInvocationReceipt> {
     if (input.events.length === 0) {
@@ -199,16 +361,97 @@ class ModelRequestAssembly {
         { entity_id: input.entityId },
       );
     }
-    return this.#runCharacter("react", input, async (ctx) =>
+    const stored = await this.#journal.readByRequestId(input.requestId);
+    if (stored !== undefined) {
+      return this.#recoverCharacterReact(input, stored);
+    }
+    try {
+      return await this.#runCharacter("react", input, async (ctx) =>
+        Object.freeze({
+          subjective_view: projectCharacterSubjectiveView(
+            input.worldId,
+            ctx.worldState,
+            input.entityId,
+          ),
+          events: Object.freeze([...input.events]),
+        }),
+      );
+    } catch (error: unknown) {
+      if (
+        !(error instanceof EngineFault) ||
+        error.code !== "model.invocation.identity_conflict"
+      ) {
+        throw error;
+      }
+      const raced = await this.#journal.readByRequestId(input.requestId);
+      if (raced === undefined) {
+        throw error;
+      }
+      return this.#recoverCharacterReact(input, raced);
+    }
+  }
+
+  async #recoverCharacterReact(
+    input: {
+      readonly worldId: string;
+      readonly entityId: string;
+      readonly events: readonly JsonObject[];
+      readonly requestId: string;
+      readonly model_profile_id: string;
+    },
+    stored: StoredModelInvocation,
+  ): Promise<VerifiedModelInvocationReceipt> {
+    assertStoredCharacterReactIdentity(stored, input);
+    if (stored.phase === "verified") {
+      const recovered = await this.#journal.recoverVerifiedByRequestId(
+        input.requestId,
+      );
+      if (recovered === undefined) {
+        throw new EngineFault(
+          "model.assembly.verified_receipt_missing",
+          "Verified character reaction invocation could not be recovered",
+          { request_id: input.requestId },
+        );
+      }
+      return recovered;
+    }
+    if (stored.phase === "dispatched_ambiguous") {
+      throw new EngineFault(
+        "runtime.kernel.model_dispatch_ambiguous",
+        "Character reaction model invocation was dispatched without a verified receipt; execution is blocked",
+        {
+          request_id: input.requestId,
+          request_kind: stored.requestKind,
+          world_id: stored.worldId,
+          world_revision: stored.worldRevision,
+        },
+      );
+    }
+
+    const worldBinding = await this.#worldBindingResolver.resolveCurrent(
+      input.worldId,
+    );
+    const materialized = this.#materializer.materializeCharacter({
+      contentBinding: worldBinding.contentBinding,
+      runtimeWorldId: input.worldId,
+      entityId: input.entityId,
+      mode: "react",
+    });
+    const prepared = this.#modelGateway.prepare(
+      Object.freeze({ snapshot: stored.snapshot }),
+      stored.request.value,
       Object.freeze({
-        subjective_view: projectCharacterSubjectiveView(
-          input.worldId,
-          ctx.worldState,
-          input.entityId,
-        ),
-        events: Object.freeze([...input.events]),
+        prompt_blocks: materialized.ordered_blocks,
       }),
     );
+    return continueModelFromStored({
+      modelGateway: this.#modelGateway,
+      journal: this.#journal,
+      prepared,
+      stored,
+      requestId: input.requestId,
+      dailyRunId: undefined,
+    });
   }
 
   async #runDirector(
@@ -257,6 +500,7 @@ class ModelRequestAssembly {
     input: {
       readonly worldId: string;
       readonly entityId: string;
+      readonly requestId?: string;
       readonly model_profile_id: string;
     },
     buildInput: (ctx: {
@@ -293,6 +537,9 @@ class ModelRequestAssembly {
       promptBlocks: materialized.ordered_blocks,
       eventContext: undefined,
       dynamicInput,
+      ...(input.requestId === undefined
+        ? {}
+        : { requestId: input.requestId }),
     });
   }
 
@@ -316,6 +563,7 @@ class ModelRequestAssembly {
         }
       | undefined;
     readonly dynamicInput: JsonObject;
+    readonly requestId?: string;
   }): Promise<VerifiedModelInvocationReceipt> {
     const basisRevision = expectIntegerSafe(
       input.snapshot.value,
@@ -325,7 +573,7 @@ class ModelRequestAssembly {
     const candidate = Object.freeze({
       contract_version: "model-protocol.v1",
       record_type: "model.request",
-      request_id: randomUUID(),
+      request_id: input.requestId ?? randomUUID(),
       request_kind: input.requestKind,
       model_profile_id: input.modelProfileId,
       basis_revision: basisRevision,
@@ -426,13 +674,44 @@ async function continueModelFromStored(input: {
                 input.prepared,
               )
             ).authorization;
-      const receipt = await input.modelGateway.invokePrepared(authorization);
-      if (input.dailyRunId === undefined) {
-        await input.journal.recordVerified(receipt);
-      } else {
-        await input.journal.recordDirectorVerified(input.dailyRunId, receipt);
+      try {
+        const receipt =
+          await input.modelGateway.invokePrepared(authorization);
+        if (input.dailyRunId === undefined) {
+          await input.journal.recordVerified(receipt);
+        } else {
+          await input.journal.recordDirectorVerified(
+            input.dailyRunId,
+            receipt,
+          );
+        }
+        return receipt;
+      } catch (error: unknown) {
+        if (
+          error instanceof EngineFault &&
+          error.code === "runtime.kernel.model_dispatch_ambiguous"
+        ) {
+          throw error;
+        }
+        throw new EngineFault(
+          "runtime.kernel.model_dispatch_ambiguous",
+          "Model invocation was dispatched but no verified durable receipt was recorded; execution is blocked",
+          {
+            request_id: input.requestId,
+            request_kind: input.stored.requestKind,
+            world_id: input.stored.worldId,
+            world_revision: input.stored.worldRevision,
+            failure_code:
+              error instanceof EngineFault
+                ? error.code
+                : "model.dispatch.unknown_failure",
+            ...(error instanceof EngineFault &&
+            error.details !== undefined
+              ? { failure_details: error.details }
+              : {}),
+          },
+        );
       }
-      return receipt;
     }
     default: {
       throw new EngineFault(
@@ -454,4 +733,171 @@ function expectIntegerSafe(object: JsonObject, field: string): number {
     );
   }
   return value;
+}
+
+function assertStoredCharacterDialogueIdentity(
+  stored: StoredModelInvocation,
+  input: {
+    readonly worldId: string;
+    readonly entityId: string;
+    readonly dialogueId: string;
+    readonly latestPlayerTurnId: string;
+    readonly requestId: string;
+    readonly model_profile_id: string;
+  },
+): void {
+  const request = stored.request.value;
+  const dynamicInput = expectJsonObject(
+    expectProperty(request, "input", "ModelRequest"),
+    "ModelRequest.input",
+  );
+  const subjectiveView = expectJsonObject(
+    expectProperty(
+      dynamicInput,
+      "subjective_view",
+      "CharacterDialogueInput",
+    ),
+    "CharacterDialogueInput.subjective_view",
+  );
+  const character = expectJsonObject(
+    expectProperty(
+      subjectiveView,
+      "character",
+      "CharacterSubjectiveView",
+    ),
+    "CharacterSubjectiveView.character",
+  );
+  const dialogue = expectJsonObject(
+    expectProperty(dynamicInput, "dialogue", "CharacterDialogueInput"),
+    "CharacterDialogueInput.dialogue",
+  );
+  const mismatched =
+    stored.requestId !== input.requestId ||
+    stored.worldId !== input.worldId ||
+    stored.requestKind !== "character.dialogue" ||
+    expectString(request, "model_profile_id", "ModelRequest") !==
+      input.model_profile_id ||
+    expectString(character, "world_id", "EntityRef") !== input.worldId ||
+    expectString(character, "entity_id", "EntityRef") !== input.entityId ||
+    expectString(dialogue, "dialogue_id", "DialogueRecord") !==
+      input.dialogueId ||
+    expectString(
+      dynamicInput,
+      "latest_player_turn_id",
+      "CharacterDialogueInput",
+    ) !== input.latestPlayerTurnId;
+  if (mismatched) {
+    throw new EngineFault(
+      "model.assembly.command_identity_conflict",
+      "Persisted character dialogue invocation differs from its Command Journal identity",
+      {
+        request_id: input.requestId,
+        world_id: input.worldId,
+        entity_id: input.entityId,
+        dialogue_id: input.dialogueId,
+        latest_player_turn_id: input.latestPlayerTurnId,
+      },
+    );
+  }
+}
+
+function assertStoredDirectorDailyIdentity(
+  stored: DailySettlementRunRecord,
+  input: {
+    readonly worldId: string;
+    readonly model_profile_id: string;
+  },
+): void {
+  const request = stored.invocation.request.value;
+  if (
+    stored.worldId !== input.worldId ||
+    stored.invocation.worldId !== input.worldId ||
+    stored.invocation.requestKind !== "director.daily_settlement" ||
+    expectString(request, "model_profile_id", "ModelRequest") !==
+      input.model_profile_id
+  ) {
+    throw new EngineFault(
+      "model.assembly.daily_identity_conflict",
+      "Persisted Director daily settlement differs from its world/day deployment identity",
+      {
+        world_id: input.worldId,
+        day: stored.day,
+        request_id: stored.invocation.requestId,
+        model_profile_id: input.model_profile_id,
+      },
+    );
+  }
+}
+
+function assertStoredCharacterReactIdentity(
+  stored: StoredModelInvocation,
+  input: {
+    readonly worldId: string;
+    readonly entityId: string;
+    readonly events: readonly JsonObject[];
+    readonly requestId: string;
+    readonly model_profile_id: string;
+  },
+): void {
+  const request = stored.request.value;
+  const dynamicInput = expectJsonObject(
+    expectProperty(request, "input", "ModelRequest"),
+    "ModelRequest.input",
+  );
+  const subjectiveView = expectJsonObject(
+    expectProperty(dynamicInput, "subjective_view", "CharacterReactInput"),
+    "CharacterReactInput.subjective_view",
+  );
+  const character = expectJsonObject(
+    expectProperty(
+      subjectiveView,
+      "character",
+      "CharacterSubjectiveView",
+    ),
+    "CharacterSubjectiveView.character",
+  );
+  if (
+    stored.requestId !== input.requestId ||
+    stored.worldId !== input.worldId ||
+    stored.requestKind !== "character.react" ||
+    expectString(request, "model_profile_id", "ModelRequest") !==
+      input.model_profile_id ||
+    expectString(character, "world_id", "EntityRef") !== input.worldId ||
+    expectString(character, "entity_id", "EntityRef") !== input.entityId ||
+    !jsonEquals(
+      expectProperty(dynamicInput, "events", "CharacterReactInput"),
+      input.events as unknown as import("@luoxia/contracts-runtime").JsonValue,
+    )
+  ) {
+    throw new EngineFault(
+      "model.assembly.character_react_identity_conflict",
+      "Persisted character reaction invocation differs from its day-cycle identity",
+      {
+        request_id: input.requestId,
+        world_id: input.worldId,
+        entity_id: input.entityId,
+      },
+    );
+  }
+}
+
+function assertDayCyclePhase(
+  worldState: JsonObject,
+  expectedPhase: string,
+): void {
+  const dayCycle = expectJsonObject(
+    expectProperty(worldState, "day_cycle", "WorldState"),
+    "WorldState.day_cycle",
+  );
+  const actualPhase = expectString(dayCycle, "phase", "DayCycleState");
+  if (actualPhase !== expectedPhase) {
+    throw new EngineFault(
+      "model.assembly.day_cycle_phase_invalid",
+      "Director daily settlement can run only during director_settlement phase",
+      {
+        expected_phase: expectedPhase,
+        actual_phase: actualPhase,
+      },
+    );
+  }
 }

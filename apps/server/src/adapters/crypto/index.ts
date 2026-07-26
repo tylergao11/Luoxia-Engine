@@ -1,8 +1,11 @@
+export { createNodeCommandExecutionIdFactory } from "./command-execution-id-factory.js";
 export { createNodeContentRuntimeIdentityMapper } from "./content-runtime-identity-mapper.js";
 export { createNodeDeterministicContextIdFactory } from "./context-id-factory.js";
+export { createNodeDialogueCommitmentIdFactory } from "./dialogue-commitment-id-factory.js";
 export { createNodeEngineSessionIdFactory } from "./engine-session-id-factory.js";
 export { createNodeRuleHoldRequestIdFactory } from "./rule-hold-request-id-factory.js";
 export { createNodeRuntimeWorldCreationIdFactory } from "./runtime-world-creation-id-factory.js";
+export { createNodeServerEnvelopeIdFactory } from "./server-envelope-id-factory.js";
 export {
   createHmacSessionBasisTokenAuthority,
   type HmacSessionBasisTokenAuthorityDependencies,

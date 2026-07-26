@@ -26,7 +26,11 @@ export function definitionRef<
 }
 
 export const CONTRACT_REF = Object.freeze({
+  identifier: definitionRef(CONTRACT_ID.common, "Identifier"),
   uuid: definitionRef(CONTRACT_ID.common, "Uuid"),
+  semVer: definitionRef(CONTRACT_ID.common, "SemVer"),
+  packLock: definitionRef(CONTRACT_ID.common, "PackLock"),
+  pluginLock: definitionRef(CONTRACT_ID.common, "PluginLock"),
   localizedText: definitionRef(CONTRACT_ID.common, "LocalizedText"),
   dayNumber: definitionRef(CONTRACT_ID.common, "DayNumber"),
   deterministicContext: definitionRef(
@@ -37,6 +41,7 @@ export const CONTRACT_REF = Object.freeze({
   worldState: definitionRef(CONTRACT_ID.worldRuntime, "WorldState"),
   worldSnapshot: definitionRef(CONTRACT_ID.worldRuntime, "WorldSnapshot"),
   worldContentLock: definitionRef(CONTRACT_ID.worldRuntime, "WorldContentLock"),
+  saveEnvelope: definitionRef(CONTRACT_ID.worldRuntime, "SaveEnvelope"),
   contentPacket: definitionRef(CONTRACT_ID.worldRuntime, "ContentPacket"),
   packetProposal: definitionRef(CONTRACT_ID.worldRuntime, "PacketProposal"),
   packetCommitIdentity: definitionRef(
@@ -87,4 +92,8 @@ export const CONTRACT_REF = Object.freeze({
 
 export type WorldContentLockDocument = ValidatedJsonObject<
   typeof CONTRACT_REF.worldContentLock
+>;
+
+export type SaveEnvelopeDocument = ValidatedJsonObject<
+  typeof CONTRACT_REF.saveEnvelope
 >;

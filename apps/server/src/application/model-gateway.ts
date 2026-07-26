@@ -57,6 +57,14 @@ export interface ResolvedModelInvocation {
 }
 
 export interface ModelProvider {
+  /**
+   * Synchronous deploy-time capability gate. Configuration mismatches must
+   * fail before a durable model dispatch can make a command ambiguous.
+   */
+  assertCanInvoke(input: {
+    readonly modelProfileId: string;
+    readonly requestKind: string;
+  }): void;
   invoke(resolved: ResolvedModelInvocation): Promise<unknown>;
 }
 

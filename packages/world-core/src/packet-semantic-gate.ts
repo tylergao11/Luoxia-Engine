@@ -698,15 +698,14 @@ async function assertSealedEventResultSource(
     ),
     "ContentPacket.deterministic_context",
   );
-  assertEqual(
-    "sealed_event_result.deterministic_context_id",
-    expectString(deterministicContext, "context_id", "DeterministicContext"),
-    expectString(sealed, "deterministic_context_id", "SealedEventResult"),
-  );
-  assertEqual(
-    "sealed_event_result.deterministic_context_digest",
-    expectString(deterministicContext, "context_digest", "DeterministicContext"),
-    expectString(sealed, "deterministic_context_digest", "SealedEventResult"),
+  assertJsonEqual(
+    "sealed_event_result.deterministic_context",
+    deterministicContext,
+    expectProperty(
+      sealed,
+      "deterministic_context",
+      "SealedEventResult",
+    ),
   );
 
   const sealedPreconditions = asObjectArray(

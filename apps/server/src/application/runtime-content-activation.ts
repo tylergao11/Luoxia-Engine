@@ -1,4 +1,5 @@
 import {
+  CONTRACT_REF,
   ContentBundleLoader,
   createContentBundleSemanticGate,
   EngineFault,
@@ -65,6 +66,19 @@ export interface RuntimeContentActivationInput {
    * TTL, login claims, or reuse of DeterministicContext key material.
    */
   readonly sessionBasisHmacKeyring: SessionBasisHmacKeyring;
+  /** Explicit SaveEnvelope schema version supported by this deployment. */
+  readonly saveSchemaVersion: string;
+  /** Explicit public Engine contract version supported by this deployment. */
+  readonly engineContractVersion: string;
+  /**
+   * Explicit deployment-owned ModelProfile selection for CharacterMind
+   * dialogue. It is not content, client input, or a default.
+   */
+  readonly characterDialogueModelProfileId: string;
+  /** Explicit deployment-owned ModelProfile selection for Director daily work. */
+  readonly directorDailySettlementModelProfileId: string;
+  /** Explicit deployment-owned ModelProfile selection for Character reactions. */
+  readonly characterReactModelProfileId: string;
 }
 
 export type { DeterministicContextHmacKeyring } from "../adapters/crypto/deterministic-context-hmac-token-codec.js";
@@ -97,6 +111,7 @@ interface LoadedBundleRecord {
   readonly packId: string;
   readonly packVersion: string;
   readonly bundleDigest: string;
+  readonly engineContractVersion: string;
   readonly dependencies: readonly JsonObject[];
 }
 
@@ -114,6 +129,30 @@ export async function createRuntimeContentActivation(
     input.deterministicContextHmacKeyring,
     input.sessionBasisHmacKeyring,
   );
+  input.contracts.assert(
+    CONTRACT_REF.identifier,
+    input.characterDialogueModelProfileId,
+  );
+  input.modelProvider.assertCanInvoke({
+    modelProfileId: input.characterDialogueModelProfileId,
+    requestKind: "character.dialogue",
+  });
+  input.contracts.assert(
+    CONTRACT_REF.identifier,
+    input.directorDailySettlementModelProfileId,
+  );
+  input.modelProvider.assertCanInvoke({
+    modelProfileId: input.directorDailySettlementModelProfileId,
+    requestKind: "director.daily_settlement",
+  });
+  input.contracts.assert(
+    CONTRACT_REF.identifier,
+    input.characterReactModelProfileId,
+  );
+  input.modelProvider.assertCanInvoke({
+    modelProfileId: input.characterReactModelProfileId,
+    requestKind: "character.react",
+  });
   const loader = new ContentBundleLoader(
     input.contracts,
     input.digest,
@@ -208,9 +247,28 @@ export async function createRuntimeContentActivation(
     rulePluginOperationRequirements,
     contentRuntimeCatalog: catalog,
     contentRuntimeIdentityMapper,
+    saveSchemaVersion: input.saveSchemaVersion,
+    engineContractVersion: input.engineContractVersion,
+    activatedBundles: Object.freeze(
+      records.map((record) =>
+        Object.freeze({
+          packId: record.packId,
+          packVersion: record.packVersion,
+          bundleDigest: record.bundleDigest,
+          engineContractVersion: record.engineContractVersion,
+          dependencies: record.dependencies,
+        }),
+      ),
+    ),
+    stageModuleRegistry: stageModules,
     deterministicContextTokenCodec,
     deterministicContextIdFactory: createNodeDeterministicContextIdFactory(),
     sessionBasisHmacKeyring: input.sessionBasisHmacKeyring,
+    characterDialogueModelProfileId:
+      input.characterDialogueModelProfileId,
+    directorDailySettlementModelProfileId:
+      input.directorDailySettlementModelProfileId,
+    characterReactModelProfileId: input.characterReactModelProfileId,
   });
 
   const bundles = Object.freeze(
@@ -271,6 +329,11 @@ function readBundleIdentity(
   );
   const packId = expectString(manifest, "pack_id", "manifest");
   const packVersion = expectString(manifest, "pack_version", "manifest");
+  const engineContractVersion = expectString(
+    manifest,
+    "engine_contract_version",
+    "manifest",
+  );
   const dependencies = asObjectArray(
     expectProperty(bundle, "dependencies", "bundle"),
     "bundle.dependencies",
@@ -280,7 +343,8 @@ function readBundleIdentity(
     packId,
     packVersion,
     bundleDigest: loaded.bundleDigest,
-    dependencies,
+    engineContractVersion,
+    dependencies: Object.freeze([...dependencies]),
   });
 }
 

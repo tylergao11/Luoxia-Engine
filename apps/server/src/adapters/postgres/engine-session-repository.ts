@@ -43,6 +43,7 @@ interface EngineSessionContextRow {
   readonly player_entity_id: string;
   readonly view_revision_text: string;
   readonly session_world_revision_text: string;
+  readonly next_server_sequence_text: string;
   readonly nonce: string;
   readonly current_world_revision_text: string;
   readonly state_document: unknown;
@@ -51,6 +52,7 @@ interface EngineSessionContextRow {
 export interface LockedEngineSessionContext {
   readonly session: EngineSessionRecord;
   readonly currentWorldRevision: number;
+  readonly nextServerSequence: number;
   readonly worldState: JsonObject;
 }
 
@@ -151,6 +153,7 @@ class PostgresEngineSessionRepository implements EngineSessionRepository {
                player_entity_id,
                view_revision,
                world_revision,
+               next_server_sequence,
                nonce,
                created_at,
                updated_at
@@ -161,6 +164,7 @@ class PostgresEngineSessionRepository implements EngineSessionRepository {
                $4::uuid,
                0,
                $5::bigint,
+               0,
                $6::uuid,
                clock_timestamp(),
                clock_timestamp()
@@ -316,6 +320,7 @@ export async function readEngineSessionContext(
             s.player_entity_id::text AS player_entity_id,
             s.view_revision::text AS view_revision_text,
             s.world_revision::text AS session_world_revision_text,
+            s.next_server_sequence::text AS next_server_sequence_text,
             s.nonce::text AS nonce,
             w.revision::text AS current_world_revision_text,
             w.state_document
@@ -354,6 +359,16 @@ export async function readEngineSessionContext(
       revision: row.current_world_revision_text,
     },
   );
+  const nextServerSequence = parseSafeUnsignedInteger(
+    row.next_server_sequence_text,
+    "session.database_corrupt",
+    "Next ServerEnvelope sequence",
+    {
+      session_id: sessionId,
+      world_id: record.worldId,
+      sequence: row.next_server_sequence_text,
+    },
+  );
   const boundPlayer = requireActiveHumanBinding(
     worldState.value,
     record.controlBindingId,
@@ -374,6 +389,7 @@ export async function readEngineSessionContext(
   return Object.freeze({
     session: record,
     currentWorldRevision,
+    nextServerSequence,
     worldState: worldState.value,
   });
 }

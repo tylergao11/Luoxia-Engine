@@ -117,6 +117,22 @@ class PostgresRuntimeReadersAdapter
           "world_revision",
           "WorldSnapshot",
         );
+        if (
+          range.afterRevisionExclusive <
+          record.eventHistoryFloorRevision
+        ) {
+          throw new EngineFault(
+            "runtime.committed_event.history_unavailable",
+            "Committed events before an imported SaveEnvelope cursor are not available",
+            {
+              world_id: worldId,
+              requested_after_revision_exclusive:
+                range.afterRevisionExclusive,
+              event_history_floor_revision:
+                record.eventHistoryFloorRevision,
+            },
+          );
+        }
         if (range.throughRevisionInclusive > currentRevision) {
           throw new EngineFault(
             "runtime.committed_event.range_uncommitted",
@@ -230,6 +246,8 @@ class PostgresRuntimeReadersAdapter
 interface WorldRow {
   readonly world_id: string;
   readonly revision_text: string;
+  readonly event_cursor_text: string;
+  readonly event_log_floor_revision_text: string;
   readonly state_document: unknown;
   readonly world_content_lock_document: unknown;
 }
@@ -260,6 +278,9 @@ async function readWorldRecord(
   const query = await client.query<WorldRow>(
     `SELECT world_id::text AS world_id,
             revision::text AS revision_text,
+            event_cursor::text AS event_cursor_text,
+            event_log_floor_revision::text
+              AS event_log_floor_revision_text,
             state_document,
             world_content_lock_document
        FROM luoxia_engine.worlds
@@ -293,6 +314,36 @@ async function readWorldRecord(
     "World revision",
     { world_id: worldId, revision: row.revision_text },
   );
+  const eventCursor = parseSafeUnsignedInteger(
+    row.event_cursor_text,
+    "runtime.world.database_corrupt",
+    "World event cursor",
+    { world_id: worldId, event_cursor: row.event_cursor_text },
+  );
+  const eventHistoryFloorRevision = parseSafeUnsignedInteger(
+    row.event_log_floor_revision_text,
+    "runtime.world.database_corrupt",
+    "World event history floor",
+    {
+      world_id: worldId,
+      event_log_floor_revision: row.event_log_floor_revision_text,
+    },
+  );
+  if (
+    eventCursor !== revision ||
+    eventHistoryFloorRevision > eventCursor
+  ) {
+    throw new EngineFault(
+      "runtime.world.database_corrupt",
+      "World event cursor relationships do not match the database revision",
+      {
+        world_id: worldId,
+        world_revision: revision,
+        event_cursor: eventCursor,
+        event_log_floor_revision: eventHistoryFloorRevision,
+      },
+    );
+  }
   const worldState = contracts.assertObject(
     CONTRACT_REF.worldState,
     row.state_document,
@@ -322,6 +373,7 @@ async function readWorldRecord(
   return Object.freeze({
     snapshot,
     worldContentLock,
+    eventHistoryFloorRevision,
   });
 }
 

@@ -7,6 +7,7 @@ import {
   createDeterministicContextAuthority,
   createPacketSemanticGate,
   createPacketStateTransition,
+  createSessionViewProjector,
   createWorldCore,
   type ContentRuntimeCatalog,
   type ContentRuntimeIdentityMapper,
@@ -19,16 +20,23 @@ import {
 } from "@luoxia/world-core/composition";
 import type { Pool } from "pg";
 
+import { createNodeCommandExecutionIdFactory } from "../adapters/crypto/command-execution-id-factory.js";
+import { createNodeDayCycleExecutionIdFactory } from "../adapters/crypto/day-cycle-execution-id-factory.js";
+import { createNodeDialogueCommitmentIdFactory } from "../adapters/crypto/dialogue-commitment-id-factory.js";
 import { createNodeEngineSessionIdFactory } from "../adapters/crypto/engine-session-id-factory.js";
 import { createNodeRuleHoldRequestIdFactory } from "../adapters/crypto/rule-hold-request-id-factory.js";
 import { createNodeRuntimeWorldCreationIdFactory } from "../adapters/crypto/runtime-world-creation-id-factory.js";
+import { createNodeServerEnvelopeIdFactory } from "../adapters/crypto/server-envelope-id-factory.js";
 import {
   createHmacSessionBasisTokenAuthority,
   type SessionBasisHmacKeyring,
 } from "../adapters/crypto/session-basis-hmac-authority.js";
 import { createPostgresAtomicPacketStore } from "../adapters/postgres/atomic-packet-store.js";
 import { createPostgresCommandJournal } from "../adapters/postgres/command-journal.js";
+import { createPostgresDayCycleExecutionIdentityJournal } from "../adapters/postgres/day-cycle-execution-identity.js";
+import { createPostgresCommandFinalizer } from "../adapters/postgres/command-finalizer.js";
 import { createPostgresEngineSessionRepository } from "../adapters/postgres/engine-session-repository.js";
+import { createPostgresPlayerDayEndRunJournal } from "../adapters/postgres/player-day-end-run.js";
 import {
   createPostgresRuntimeInvocationJournal,
   type PostgresRuntimeInvocationJournal,
@@ -40,13 +48,26 @@ import {
   createPostgresRuntimeReaders,
   type PostgresRuntimeReaders,
 } from "../adapters/postgres/runtime-readers.js";
-import { createPostgresRuntimeWorldCreator } from "../adapters/postgres/runtime-world-creator.js";
+import { createPostgresRuntimeSaveRepository } from "../adapters/postgres/runtime-save-repository.js";
+import { createSystemRuntimeSaveClock } from "../adapters/system/runtime-save-clock.js";
 import { createSystemRuntimeWorldCreationClock } from "../adapters/system/runtime-world-creation-clock.js";
 import {
   createAuthoritativePacketBuilder,
   type AuthoritativePacketBuilder,
 } from "./authoritative-packet-builder.js";
+import {
+  createClientCommandRouter,
+  type ClientCommandRouter,
+} from "./client-command-router.js";
 import type { CommandJournal } from "./command-journal.js";
+import {
+  createDayCycleOrchestrator,
+  type DayCycleOrchestrator,
+} from "./day-cycle-orchestrator.js";
+import {
+  createDialogueCommandOrchestrator,
+  type DialogueCommandOrchestrator,
+} from "./dialogue-command-orchestrator.js";
 import {
   createDecimalAmountComparer,
   createLedgerPostArithmetic,
@@ -66,6 +87,10 @@ import {
   type RuntimeModelFacades,
 } from "./model-request-assembly.js";
 import { createPromptMaterializer } from "./prompt-materializer.js";
+import {
+  createPlayerDayCommandOrchestrator,
+  type PlayerDayCommandOrchestrator,
+} from "./player-day-command-orchestrator.js";
 import { createRuleHoldEvaluator } from "./rule-hold-evaluator.js";
 import { createRuntimeWorldBindingResolver } from "./runtime-world-binding.js";
 import {
@@ -80,6 +105,12 @@ import {
 import type { RulePluginOperationRequirement } from "./rule-plugin-operation-requirement.js";
 import { createRulePluginGateway } from "./rule-plugin-composition.js";
 import type { VerifiedRulePluginInvocationReceipt } from "./rule-plugin-gateway.js";
+import {
+  createRuntimeSaveCompatibility,
+  createRuntimeSaveService,
+  type RuntimeActivatedBundleDescriptor,
+  type RuntimeSaveService,
+} from "./runtime-save.js";
 import type {
   CommittedEventReader,
   CommittedPacketReader,
@@ -90,6 +121,7 @@ import {
   createRulePluginExecutor,
   type RulePluginExecutor,
 } from "./rule-plugin-executor.js";
+import type { StageModuleRegistry } from "./stage-module-registry.js";
 import {
   createWorldMutationOrchestrator,
   type WorldMutationOrchestrator,
@@ -126,6 +158,13 @@ export interface RuntimeExecutionKernelDependencies {
   readonly contentRuntimeCatalog: ContentRuntimeCatalog;
   /** Sole RFC 9562 content-local identity mapper shared with the Catalog. */
   readonly contentRuntimeIdentityMapper: ContentRuntimeIdentityMapper;
+  /** Explicit SaveEnvelope version support; no package-version inference. */
+  readonly saveSchemaVersion: string;
+  readonly engineContractVersion: string;
+  /** Validated activation records used only to derive exact save lock sets. */
+  readonly activatedBundles: readonly RuntimeActivatedBundleDescriptor[];
+  /** Sole activation-owned registry used to resolve StageModule locks. */
+  readonly stageModuleRegistry: StageModuleRegistry;
   /**
    * Server HMAC TokenCodec for DeterministicContext.issuer_token.
    * Built at composition root from an explicit keyring; no defaults.
@@ -135,6 +174,12 @@ export interface RuntimeExecutionKernelDependencies {
   readonly deterministicContextIdFactory: DeterministicContextIdFactory;
   /** Independent, explicit basis_token keyring; never reused for contexts. */
   readonly sessionBasisHmacKeyring: SessionBasisHmacKeyring;
+  /** Explicit deployment selection for CharacterMind dialogue calls. */
+  readonly characterDialogueModelProfileId: string;
+  /** Explicit deployment selection for Director daily settlement calls. */
+  readonly directorDailySettlementModelProfileId: string;
+  /** Explicit deployment selection for CharacterMind reaction calls. */
+  readonly characterReactModelProfileId: string;
 }
 
 export type { RulePluginModuleV1 } from "./rule-plugin-abi.js";
@@ -167,16 +212,27 @@ export interface RuntimeExecutionKernel {
    */
   readonly models: RuntimeModelFacades;
   /**
-   * Sole DeterministicContext issue entry for future day-cycle / dialogue orchestration.
-   * Does not implement orchestration itself.
+   * Sole DeterministicContext issue entry for additional day-cycle and
+   * non-basic orchestration. Basic NPC dialogue uses the same internal
+   * authority through kernel.dialogues.
    */
   readonly deterministicContexts: DeterministicContextIssuePort;
   /** Engine Session lifecycle; login/account authentication remains external. */
   readonly sessions: EngineSessionService;
   /** Idempotent command intake and final-result recovery. */
   readonly commands: CommandJournal;
+  /** Recoverable two-packet Human → CharacterMind dialogue command path. */
+  readonly dialogues: DialogueCommandOrchestrator;
+  /** Recoverable player_day.end command path. */
+  readonly playerDays: PlayerDayCommandOrchestrator;
+  /** Closed Client Bridge command dispatch; unsupported kinds fail explicitly. */
+  readonly clientCommands: ClientCommandRouter;
+  /** Recoverable autonomous → Director → player world-day authority. */
+  readonly dayCycle: DayCycleOrchestrator;
   /** Schema-closed revision-zero world bootstrap and atomic persistence. */
   readonly worldCreation: RuntimeWorldCreationService;
+  /** PostgreSQL-backed SaveEnvelope export and create-only import boundary. */
+  readonly saves: RuntimeSaveService;
   executeRulePlugin(
     candidate: unknown,
     modelInvocations: readonly VerifiedModelInvocationReceipt[],
@@ -237,19 +293,8 @@ export function createRuntimeExecutionKernel(
     contracts: dependencies.contracts,
     digest: dependencies.digest,
     basisTokens: sessionBasisTokens,
+    idFactory: createNodeCommandExecutionIdFactory(),
   });
-  const worldCreation = createRuntimeWorldCreationService({
-    contracts: dependencies.contracts,
-    catalog: dependencies.contentRuntimeCatalog,
-    identityMapper: dependencies.contentRuntimeIdentityMapper,
-    idFactory: createNodeRuntimeWorldCreationIdFactory(),
-    clock: createSystemRuntimeWorldCreationClock(),
-    creator: createPostgresRuntimeWorldCreator({
-      pool: dependencies.pool,
-      contracts: dependencies.contracts,
-    }),
-  });
-
   // Sole RulePlugin ABI instance for this kernel (activation does not create another).
   const rulePluginAbi = createRulePluginAbiRegistry({
     contracts: dependencies.contracts,
@@ -280,6 +325,32 @@ export function createRuntimeExecutionKernel(
       throw error;
     }
   }
+  const saveCompatibility = createRuntimeSaveCompatibility({
+    contracts: dependencies.contracts,
+    catalog: dependencies.contentRuntimeCatalog,
+    saveSchemaVersion: dependencies.saveSchemaVersion,
+    engineContractVersion: dependencies.engineContractVersion,
+    bundles: dependencies.activatedBundles,
+    rulePlugins: rulePluginAbi,
+    stageModules: dependencies.stageModuleRegistry,
+  });
+  const saves = createRuntimeSaveService({
+    contracts: dependencies.contracts,
+    compatibility: saveCompatibility,
+    repository: createPostgresRuntimeSaveRepository({
+      pool: dependencies.pool,
+      contracts: dependencies.contracts,
+    }),
+    clock: createSystemRuntimeSaveClock(),
+  });
+  const worldCreation = createRuntimeWorldCreationService({
+    contracts: dependencies.contracts,
+    catalog: dependencies.contentRuntimeCatalog,
+    identityMapper: dependencies.contentRuntimeIdentityMapper,
+    idFactory: createNodeRuntimeWorldCreationIdFactory(),
+    clock: createSystemRuntimeWorldCreationClock(),
+    saves,
+  });
   const rulePluginAdapter = rulePluginAbi.createAdapter();
 
   const rulePluginGateway = createRulePluginGateway({
@@ -323,7 +394,6 @@ export function createRuntimeExecutionKernel(
     contracts: dependencies.contracts,
     rulePluginProvenance: rulePluginGateway.provenance,
     worlds: readers.worlds,
-    events: readers.events,
   });
 
   const store = createPostgresAtomicPacketStore({
@@ -380,6 +450,62 @@ export function createRuntimeExecutionKernel(
     materializer,
     modelGateway,
     journal,
+    events: readers.events,
+  });
+  const dayCycle = createDayCycleOrchestrator({
+    worlds: worldBindingResolver,
+    identities: createPostgresDayCycleExecutionIdentityJournal({
+      pool: dependencies.pool,
+      contracts: dependencies.contracts,
+      idFactory: createNodeDayCycleExecutionIdFactory(),
+    }),
+    rulePluginAbi,
+    rulePlugins: rulePluginExecutor,
+    deterministicContexts: deterministicContextAuthority,
+    models,
+    mutations,
+    directorDailySettlementModelProfileId:
+      dependencies.directorDailySettlementModelProfileId,
+    characterReactModelProfileId:
+      dependencies.characterReactModelProfileId,
+  });
+  const commandFinalizer = createPostgresCommandFinalizer({
+    pool: dependencies.pool,
+    contracts: dependencies.contracts,
+    basisTokens: sessionBasisTokens,
+    projector: createSessionViewProjector({
+      contracts: dependencies.contracts,
+    }),
+    idFactory: createNodeServerEnvelopeIdFactory(),
+  });
+  const dialogues = createDialogueCommandOrchestrator({
+    contracts: dependencies.contracts,
+    commands,
+    worlds: worldBindingResolver,
+    rulePluginAbi,
+    rulePlugins: rulePluginExecutor,
+    deterministicContexts: deterministicContextAuthority,
+    models,
+    mutations,
+    finalizer: commandFinalizer,
+    commitmentIds: createNodeDialogueCommitmentIdFactory(),
+    characterDialogueModelProfileId:
+      dependencies.characterDialogueModelProfileId,
+  });
+  const playerDays = createPlayerDayCommandOrchestrator({
+    contracts: dependencies.contracts,
+    commands,
+    runs: createPostgresPlayerDayEndRunJournal({
+      pool: dependencies.pool,
+      contracts: dependencies.contracts,
+    }),
+    dayCycle,
+    finalizer: commandFinalizer,
+  });
+  const clientCommands = createClientCommandRouter({
+    contracts: dependencies.contracts,
+    dialogues,
+    playerDays,
   });
 
   const deterministicContexts: DeterministicContextIssuePort = Object.freeze({
@@ -398,7 +524,12 @@ export function createRuntimeExecutionKernel(
     deterministicContexts,
     sessions,
     commands,
+    dialogues,
+    playerDays,
+    clientCommands,
+    dayCycle,
     worldCreation,
+    saves,
     executeRulePlugin(
       candidate: unknown,
       modelInvocations: readonly VerifiedModelInvocationReceipt[],

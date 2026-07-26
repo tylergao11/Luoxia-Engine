@@ -7,6 +7,7 @@ import {
   type JsonObject,
   type JsonValue,
 } from "@luoxia/contracts-runtime";
+import type { CommittedEventDocument } from "@luoxia/world-core";
 
 /**
  * Project ModelRequest dynamic views from a locked WorldSnapshot only.
@@ -82,9 +83,81 @@ export function projectDirectorWorldView(
   });
 }
 
-export function projectObjectiveTracesEmpty(): readonly JsonObject[] {
-  // No WorldState collection owns objective traces in v1; empty is authoritative.
-  return Object.freeze([]);
+export function projectObjectiveTraces(input: {
+  readonly events: readonly CommittedEventDocument[];
+  readonly currentDay: number;
+  readonly createTraceId: () => string;
+}): readonly JsonObject[] {
+  const eventDays = reconstructEventDays(input.events, input.currentDay);
+  const settlementIndexes: number[] = [];
+  for (const [index, event] of input.events.entries()) {
+    const transition = findDayCycleTransition(event.value);
+    if (
+      transition !== undefined &&
+      expectString(transition, "from_phase", "DayCycleTransitionOp") ===
+        "autonomous" &&
+      expectString(transition, "to_phase", "DayCycleTransitionOp") ===
+        "director_settlement"
+    ) {
+      settlementIndexes.push(index);
+    }
+  }
+
+  const currentSettlementIndex = settlementIndexes.at(-1);
+  const previousSettlementIndex =
+    settlementIndexes.length < 2
+      ? -1
+      : (settlementIndexes.at(-2) as number);
+  const throughIndex =
+    currentSettlementIndex === undefined
+      ? input.events.length - 1
+      : currentSettlementIndex;
+  const traceIds = new Set<string>();
+  const traces: JsonObject[] = [];
+  for (
+    let eventIndex = previousSettlementIndex + 1;
+    eventIndex <= throughIndex;
+    eventIndex += 1
+  ) {
+    const event = input.events[eventIndex];
+    if (event === undefined) {
+      continue;
+    }
+    const domainEvents = asObjectArray(
+      expectProperty(event.value, "domain_events", "CommittedEvent"),
+      "CommittedEvent.domain_events",
+    );
+    for (const domainEvent of domainEvents) {
+      const traceId = input.createTraceId();
+      if (traceIds.has(traceId)) {
+        throw new EngineFault(
+          "model.view.objective_trace_id_collision",
+          "Server-generated ObjectiveTraceEntry identities must be unique",
+          { trace_id: traceId },
+        );
+      }
+      traceIds.add(traceId);
+      traces.push(
+        Object.freeze({
+          trace_id: traceId,
+          day: eventDays[eventIndex] as number,
+          event_type: expectProperty(
+            domainEvent,
+            "event_type",
+            "DomainEvent",
+          ),
+          subjects: expectProperty(domainEvent, "subjects", "DomainEvent"),
+          payload: expectProperty(domainEvent, "payload", "DomainEvent"),
+          visibility: expectProperty(
+            domainEvent,
+            "visibility",
+            "DomainEvent",
+          ),
+        }),
+      );
+    }
+  }
+  return Object.freeze(traces);
 }
 
 export function projectDialogue(
@@ -179,7 +252,6 @@ export function projectCharacterSubjectiveView(
       { entity_id: entityId },
     );
   }
-  const revision = expectInteger(entity, "revision", "EntityState");
   const machines = asObjectArray(
     expectProperty(worldState, "state_machines", "WorldState"),
     "WorldState.state_machines",
@@ -205,7 +277,6 @@ export function projectCharacterSubjectiveView(
     character: Object.freeze({
       world_id: worldId,
       entity_id: entityId,
-      revision,
     }),
     knowledge_view: projectKnowledgeView(worldState, entityId),
     action_machine: actionMachine,
@@ -240,6 +311,73 @@ function relationMentionsEntity(
       entityId,
     )
   );
+}
+
+function reconstructEventDays(
+  events: readonly CommittedEventDocument[],
+  currentDay: number,
+): readonly number[] {
+  const days = new Array<number>(events.length);
+  let dayAfter = currentDay;
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index] as CommittedEventDocument;
+    const transition = findDayCycleTransition(event.value);
+    if (transition === undefined) {
+      days[index] = dayAfter;
+      continue;
+    }
+    const transitionToDay = expectInteger(
+      transition,
+      "to_day",
+      "DayCycleTransitionOp",
+    );
+    if (transitionToDay !== dayAfter) {
+      throw new EngineFault(
+        "model.view.day_cycle_history_inconsistent",
+        "Committed day-cycle transition does not connect to the current WorldState day",
+        {
+          event_id: expectString(event.value, "event_id", "CommittedEvent"),
+          expected_to_day: dayAfter,
+          actual_to_day: transitionToDay,
+        },
+      );
+    }
+    const dayBefore = expectInteger(
+      transition,
+      "from_day",
+      "DayCycleTransitionOp",
+    );
+    days[index] = dayBefore;
+    dayAfter = dayBefore;
+  }
+  return Object.freeze(days);
+}
+
+function findDayCycleTransition(
+  event: JsonObject,
+): JsonObject | undefined {
+  const packet = expectJsonObject(
+    expectProperty(event, "packet", "CommittedEvent"),
+    "CommittedEvent.packet",
+  );
+  const ops = asObjectArray(
+    expectProperty(packet, "ops", "ContentPacket"),
+    "ContentPacket.ops",
+  );
+  const transitions = ops.filter(
+    (op) => expectString(op, "op", "EffectOp") === "day_cycle.transition",
+  );
+  if (transitions.length > 1) {
+    throw new EngineFault(
+      "model.view.day_cycle_history_inconsistent",
+      "Committed packet contains more than one day-cycle transition",
+      {
+        event_id: expectString(event, "event_id", "CommittedEvent"),
+        transition_count: transitions.length,
+      },
+    );
+  }
+  return transitions[0];
 }
 
 function subjectIsEntity(subject: JsonObject, entityId: string): boolean {

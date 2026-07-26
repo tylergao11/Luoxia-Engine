@@ -4,6 +4,12 @@
   "private": true,
   "type": "module",
   "main": "dist/main.js",
+  "exports": {
+    "./deployment-api": {
+      "types": "./dist/deployment-api.d.ts",
+      "import": "./dist/deployment-api.js"
+    }
+  },
   "dependencies": {
     "@luoxia/contracts-runtime": "0.1.0",
     "@luoxia/world-core": "0.1.0",

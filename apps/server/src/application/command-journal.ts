@@ -21,6 +21,25 @@ interface StoredCommandBase {
   readonly requestDigest: string;
   readonly envelope: ClientEnvelopeDocument;
   readonly message: JsonObject;
+  readonly dialogueExecution?: DialogueCommandExecutionIdentity;
+}
+
+/**
+ * Server-owned random identities for the two authoritative dialogue packets
+ * and the model invocation between them. Command Journal is their sole owner;
+ * downstream journals and CommittedEvent rows are the stage evidence.
+ */
+export interface DialogueCommandExecutionIdentity {
+  readonly dialogueId: string;
+  readonly humanTurnId: string;
+  readonly humanRuleRequestId: string;
+  readonly characterModelRequestId: string;
+  readonly characterTurnId: string;
+  readonly characterRuleRequestId: string;
+}
+
+export interface CommandExecutionIdFactory {
+  createId(): string;
 }
 
 export interface StoredReceivedCommand extends StoredCommandBase {

@@ -659,10 +659,6 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
       );
     }
 
-    const rulePluginOperations = collectWorldRulePluginOperationBindings(
-      indexed,
-      worldDefinition,
-    );
     const stateMachines = indexed.stateMachinesOrdered.filter(
       (machine) =>
         expectString(machine, "world_id", "StateMachineDefinition") ===
@@ -673,6 +669,15 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
         expectString(machine, "machine_id", "StateMachineDefinition"),
       ),
     );
+    const rulePluginOperations =
+      collectBundleRulePluginOperationBindings(indexed).filter(
+        (binding) =>
+          operationBindingAppliesToWorld(
+            binding,
+            worldDefinitionId,
+            stateMachineIds,
+          ),
+      );
     const machineBindings = indexed.initialMachineBindings.filter(
       (binding) => {
         const machineId = expectString(
@@ -916,6 +921,37 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
     );
     return this.#digest.sha256(fields);
   }
+}
+
+function operationBindingAppliesToWorld(
+  binding: ContentRulePluginOperationBinding,
+  worldDefinitionId: string,
+  stateMachineIds: ReadonlySet<string>,
+): boolean {
+  const ownerKind = expectString(
+    binding.source,
+    "owner_kind",
+    "RulePlugin operation source",
+  );
+  if (ownerKind === "world_definition") {
+    return (
+      expectString(
+        binding.source,
+        "owner_id",
+        "RulePlugin operation source",
+      ) === worldDefinitionId
+    );
+  }
+  if (ownerKind === "state_machine") {
+    return stateMachineIds.has(
+      expectString(
+        binding.source,
+        "owner_id",
+        "RulePlugin operation source",
+      ),
+    );
+  }
+  return true;
 }
 
 const WORLD_RULE_PLUGIN_OPERATION_OWNERS = [

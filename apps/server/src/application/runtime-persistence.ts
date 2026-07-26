@@ -4,7 +4,10 @@ import type {
   WorldSnapshotDocument,
 } from "@luoxia/world-core";
 import type { ApplyPacketResultDocument } from "@luoxia/world-core";
-import type { WorldContentLockDocument } from "@luoxia/contracts-runtime/portable";
+import type {
+  SaveEnvelopeDocument,
+  WorldContentLockDocument,
+} from "@luoxia/contracts-runtime/portable";
 
 import type {
   ModelRequestDocument,
@@ -32,6 +35,12 @@ import type {
 export interface RuntimeWorldRecord {
   readonly snapshot: WorldSnapshotDocument;
   readonly worldContentLock: WorldContentLockDocument;
+  /**
+   * Lowest revision for which this PostgreSQL world can provide subsequent
+   * CommittedEvents. It is 0 for a locally created world and the imported
+   * SaveEnvelope event_cursor for an imported world.
+   */
+  readonly eventHistoryFloorRevision: number;
 }
 
 export interface RuntimeWorldReader {
@@ -39,15 +48,16 @@ export interface RuntimeWorldReader {
 }
 
 /**
- * Fully validated revision-zero world ready for one atomic PostgreSQL insert.
- * The immutable content lock and authoritative state are persisted together.
+ * PostgreSQL owns SaveEnvelope facts as separate columns. Export reconstructs
+ * one untrusted candidate; insert atomically decomposes one already validated
+ * envelope and reassembles the stored row before commit.
  */
-export interface RuntimeWorldCreationRecord extends RuntimeWorldRecord {
-  readonly createdAt: string;
-}
-
-export interface RuntimeWorldCreator {
-  create(record: RuntimeWorldCreationRecord): Promise<RuntimeWorldRecord>;
+export interface RuntimeSaveRepository {
+  exportCandidate(worldId: string): Promise<unknown>;
+  insert(
+    envelope: SaveEnvelopeDocument,
+    persistedAt: string,
+  ): Promise<unknown>;
 }
 
 export interface CommittedEventRevisionRange {

@@ -103,6 +103,7 @@ class PostgresAtomicPacketStore implements AtomicPacketStore {
 interface LockedWorldRow {
   readonly world_id: string;
   readonly revision_text: string;
+  readonly event_cursor_text: string;
   readonly state_document: unknown;
 }
 
@@ -448,10 +449,12 @@ class PostgresLockedWorldTransaction implements LockedWorldTransaction {
     const update = await this.#client.query(
       `UPDATE luoxia_engine.worlds
           SET revision = $2::bigint,
+              event_cursor = $2::bigint,
               state_document = $3::jsonb,
               updated_at = $4::timestamptz
         WHERE world_id = $1::uuid
-          AND revision = $5::bigint`,
+          AND revision = $5::bigint
+          AND event_cursor = $5::bigint`,
       [
         worldId,
         revisionAfter.toString(),
@@ -528,6 +531,7 @@ async function lockWorld(
   const query = await client.query<LockedWorldRow>(
     `SELECT world_id::text AS world_id,
             revision::text AS revision_text,
+            event_cursor::text AS event_cursor_text,
             state_document
        FROM luoxia_engine.worlds
       WHERE world_id = $1::uuid
@@ -549,9 +553,26 @@ async function lockWorld(
       { requested_world_id: worldId, locked_world_id: row.world_id },
     );
   }
+  const revision = parseSafeRevision(row.revision_text, worldId, "revision");
+  const eventCursor = parseSafeRevision(
+    row.event_cursor_text,
+    worldId,
+    "event_cursor",
+  );
+  if (eventCursor !== revision) {
+    throw new EngineFault(
+      "world.atomic_store.database_corrupt",
+      "Locked world event_cursor does not match its revision",
+      {
+        world_id: worldId,
+        revision,
+        event_cursor: eventCursor,
+      },
+    );
+  }
   return Object.freeze({
     worldId,
-    revision: parseSafeRevision(row.revision_text, worldId),
+    revision,
     state: contracts.assertObject(CONTRACT_REF.worldState, row.state_document),
   });
 }
@@ -656,20 +677,24 @@ function assertMaterializationRequestIdentity(
   }
 }
 
-function parseSafeRevision(value: string, worldId: string): number {
+function parseSafeRevision(
+  value: string,
+  worldId: string,
+  field: "revision" | "event_cursor",
+): number {
   if (!/^(0|[1-9][0-9]*)$/u.test(value)) {
     throw new EngineFault(
       "world.atomic_store.database_corrupt",
-      "World revision is not an unsigned integer",
-      { world_id: worldId, revision: value },
+      `World ${field} is not an unsigned integer`,
+      { world_id: worldId, [field]: value },
     );
   }
   const revision = BigInt(value);
   if (revision > MAX_SAFE_REVISION) {
     throw new EngineFault(
       "world.atomic_store.database_corrupt",
-      "World revision exceeds the JavaScript safe integer range",
-      { world_id: worldId, revision: value },
+      `World ${field} exceeds the JavaScript safe integer range`,
+      { world_id: worldId, [field]: value },
     );
   }
   return Number(revision);

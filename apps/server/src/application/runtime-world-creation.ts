@@ -17,9 +17,9 @@ import {
 } from "@luoxia/world-core";
 
 import type {
-  RuntimeWorldCreator,
   RuntimeWorldRecord,
 } from "./runtime-persistence.js";
+import type { RuntimeSaveService } from "./runtime-save.js";
 
 export interface RuntimeWorldCreationIdFactory {
   createId(): string;
@@ -49,7 +49,7 @@ export interface RuntimeWorldCreationServiceDependencies {
   readonly identityMapper: ContentRuntimeIdentityMapper;
   readonly idFactory: RuntimeWorldCreationIdFactory;
   readonly clock: RuntimeWorldCreationClock;
-  readonly creator: RuntimeWorldCreator;
+  readonly saves: RuntimeSaveService;
 }
 
 interface RuntimeIdentityMaps {
@@ -76,7 +76,8 @@ interface InitialWorldContext {
  *
  * The input contains only the explicit content lock and player name. Runtime
  * identities and time are Server-owned. The complete revision-zero snapshot is
- * Schema-validated before the PostgreSQL creator can persist anything.
+ * Schema-validated, wrapped in the deployment-derived SaveEnvelope, and only
+ * then atomically decomposed into PostgreSQL.
  */
 export function createRuntimeWorldCreationService(
   dependencies: RuntimeWorldCreationServiceDependencies,
@@ -136,7 +137,7 @@ export function createRuntimeWorldCreationService(
         CONTRACT_REF.worldSnapshot,
         buildWorldSnapshotCandidate(context),
       );
-      const world = await dependencies.creator.create({
+      const world = await dependencies.saves.createInitial({
         snapshot,
         worldContentLock,
         createdAt,
