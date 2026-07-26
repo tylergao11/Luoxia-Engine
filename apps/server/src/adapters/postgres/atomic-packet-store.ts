@@ -23,7 +23,7 @@ import type {
   PacketCommitIdentityDocument,
   PacketCommitPreparation,
   WorldStateDocument,
-} from "@luoxia/world-core/composition";
+} from "@luoxia/world-core";
 import type { ApplyPacketResultDocument } from "@luoxia/world-core";
 import type { Pool, PoolClient } from "pg";
 

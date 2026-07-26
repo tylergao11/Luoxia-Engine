@@ -8,7 +8,7 @@ import {
   type ContractValidator,
   type WorldContentLockDocument,
 } from "@luoxia/contracts-runtime/portable";
-import type { CommittedEventDocument } from "@luoxia/world-core/composition";
+import type { CommittedEventDocument } from "@luoxia/world-core";
 import type { ApplyPacketResultDocument } from "@luoxia/world-core";
 import type { Pool, PoolClient } from "pg";
 

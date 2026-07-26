@@ -1,4 +1,3 @@
-import type { LoadedContentBundle } from "@luoxia/contracts-runtime";
 import {
   EngineFault,
   expectInteger,
@@ -8,9 +7,12 @@ import {
   jsonEquals,
   type JsonObject,
   type JsonValue,
+  type LoadedContentBundle,
   type WorldContentLockDocument,
 } from "@luoxia/contracts-runtime/portable";
 
+import type { ContentRuntimeIdentityMapper } from "./content-runtime-identity.js";
+import { materializeContentFieldValues } from "./content-field-values.js";
 import type {
   PacketContentDigest,
   StaticComponentDigestLookup,
@@ -41,6 +43,36 @@ export interface RuleEvaluationBinding {
   readonly dependency: JsonObject;
 }
 
+export type ContentRulePluginOperationKind =
+  | "rule.evaluate"
+  | "capability.resolve"
+  | "navigation.resolve"
+  | "definition.validate"
+  | "goal_plan.validate"
+  | "world_extension.resolve"
+  | "content_upgrade.transform"
+  | "day_cycle.advance"
+  | "state_machine.advance"
+  | "automatic_event.world.resolve"
+  | "automatic_event.character.resolve"
+  | "stage_outcome.resolve"
+  | "dialogue.open"
+  | "dialogue.turn.append"
+  | "dialogue.close"
+  | "event_card.publish";
+
+/**
+ * Exact ContentBundle owner → PluginOperationRef → required DependencyLock binding.
+ * `source` only localizes faults; `operation` and `dependency` are the original
+ * immutable objects from the validated ContentBundle.
+ */
+export interface ContentRulePluginOperationBinding {
+  readonly operationKind: ContentRulePluginOperationKind;
+  readonly operation: JsonObject;
+  readonly dependency: JsonObject;
+  readonly source: JsonObject;
+}
+
 /**
  * Process-local derived read model over locked ContentBundle documents.
  * Does not own content truth; only indexes already-loaded, digest-locked bundles.
@@ -61,15 +93,23 @@ export interface WorldContentBinding {
   readonly packVersion: string;
   readonly bundleDigest: string;
   readonly worldDefinition: JsonObject;
+  readonly directorProfile: JsonObject;
   readonly eventBudget: JsonObject;
-  readonly calendarResolver: {
-    readonly operation: JsonObject;
-    readonly dependency: JsonObject;
-  };
-  readonly navigationResolver: {
-    readonly operation: JsonObject;
-    readonly dependency: JsonObject;
-  };
+  readonly initialization: WorldInitializationContent;
+  readonly rulePluginOperations: readonly ContentRulePluginOperationBinding[];
+}
+
+/**
+ * Original frozen ContentBundle objects selected for one runtime world.
+ * Catalog entities/relations and character minds are bundle-wide by contract;
+ * machine definitions/bindings are restricted to the selected world.
+ */
+export interface WorldInitializationContent {
+  readonly entities: readonly JsonObject[];
+  readonly relations: readonly JsonObject[];
+  readonly characterMinds: readonly JsonObject[];
+  readonly stateMachines: readonly JsonObject[];
+  readonly machineBindings: readonly JsonObject[];
 }
 
 export interface ContentRuntimeCatalog extends StaticComponentDigestLookup {
@@ -84,8 +124,9 @@ export interface ContentRuntimeCatalog extends StaticComponentDigestLookup {
     rule: RuleRefLike,
   ): RuleEvaluationBinding | undefined;
   /**
-   * Exact resolve of WorldContentLock to WorldDefinition + required rule_plugin
-   * calendar/navigation resolvers. Never guesses first/single/default world.
+   * Exact resolve of WorldContentLock to WorldDefinition, initialization
+   * content, DirectorProfile, and every world-owned RulePlugin operation.
+   * Never guesses first/single/default world.
    */
   resolveWorldContentBinding(
     lock: WorldContentLockDocument,
@@ -93,14 +134,11 @@ export interface ContentRuntimeCatalog extends StaticComponentDigestLookup {
   findPromptFragment(
     ref: BundleLockRef & { readonly prompt_id: string },
   ): JsonObject | undefined;
-  findDirectorProfile(
-    ref: BundleLockRef & { readonly director_id: string },
-  ): JsonObject | undefined;
-  findCharacterMindProfile(
-    ref: BundleLockRef & { readonly mind_id: string },
-  ): JsonObject | undefined;
-  findCharacterMindByEntityId(
-    ref: BundleLockRef & { readonly entity_id: string },
+  findCharacterMindForRuntimeEntity(
+    ref: BundleLockRef & {
+      readonly world_id: string;
+      readonly entity_id: string;
+    },
   ): JsonObject | undefined;
   /** Ordered capability objects for event-context digests (same bundle lock). */
   listCapabilities(ref: BundleLockRef): readonly JsonObject[] | undefined;
@@ -110,10 +148,19 @@ export interface ContentRuntimeCatalog extends StaticComponentDigestLookup {
    * Missing bundle returns undefined; does not pick a default world.
    */
   listWorldDefinitions(ref: BundleLockRef): readonly JsonObject[] | undefined;
+  /**
+   * Enumerates every v1 content-owned RulePlugin operation binding for one
+   * digest-locked bundle. Missing bundle returns undefined; illegal ownership,
+   * dependency kind, or required flag fails hard.
+   */
+  listRulePluginOperationBindings(
+    ref: BundleLockRef,
+  ): readonly ContentRulePluginOperationBinding[] | undefined;
 }
 
 export interface ContentRuntimeCatalogDependencies {
   readonly digest: PacketContentDigest;
+  readonly identityMapper: ContentRuntimeIdentityMapper;
 }
 
 interface IndexedBundle {
@@ -131,23 +178,36 @@ interface IndexedBundle {
   readonly dependencies: ReadonlyMap<string, JsonObject>;
   readonly promptFragments: ReadonlyMap<string, JsonObject>;
   readonly directorProfiles: ReadonlyMap<string, JsonObject>;
-  readonly characterMinds: ReadonlyMap<string, JsonObject>;
-  readonly characterMindsByEntityId: ReadonlyMap<string, JsonObject>;
+  readonly characterMindsByLocalEntityId: ReadonlyMap<string, JsonObject>;
+  readonly characterMindsOrdered: readonly JsonObject[];
+  readonly initialEntities: readonly JsonObject[];
+  readonly initialRelations: readonly JsonObject[];
+  readonly stateMachines: ReadonlyMap<string, JsonObject>;
+  readonly stateMachinesOrdered: readonly JsonObject[];
+  readonly initialMachineBindings: readonly JsonObject[];
   readonly capabilitiesOrdered: readonly JsonObject[];
 }
 
 export function createContentRuntimeCatalog(
   dependencies: ContentRuntimeCatalogDependencies,
 ): ContentRuntimeCatalog {
-  return new DefaultContentRuntimeCatalog(dependencies.digest);
+  return new DefaultContentRuntimeCatalog(
+    dependencies.digest,
+    dependencies.identityMapper,
+  );
 }
 
 class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
   readonly #digest: PacketContentDigest;
+  readonly #identityMapper: ContentRuntimeIdentityMapper;
   readonly #bundles = new Map<string, IndexedBundle>();
 
-  public constructor(digest: PacketContentDigest) {
+  public constructor(
+    digest: PacketContentDigest,
+    identityMapper: ContentRuntimeIdentityMapper,
+  ) {
     this.#digest = digest;
+    this.#identityMapper = identityMapper;
   }
 
   public register(loaded: LoadedContentBundle): void {
@@ -229,6 +289,14 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
       }
       definitions.set(definitionId, definition);
     }
+    const initialEntities = asObjectArray(
+      expectProperty(catalog, "entities", "catalog"),
+      "catalog.entities",
+    );
+    const initialRelations = asObjectArray(
+      expectProperty(catalog, "relations", "catalog"),
+      "catalog.relations",
+    );
 
     const dependenciesList = asObjectArray(
       expectProperty(bundle, "dependencies", "bundle"),
@@ -317,7 +385,7 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
       "simulation.character_minds",
     );
     const characterMinds = new Map<string, JsonObject>();
-    const characterMindsByEntityId = new Map<string, JsonObject>();
+    const characterMindsByLocalEntityId = new Map<string, JsonObject>();
     for (const mind of characterMindsList) {
       const mindId = expectString(mind, "mind_id", "CharacterMindProfile");
       if (characterMinds.has(mindId)) {
@@ -333,7 +401,7 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
       }
       characterMinds.set(mindId, mind);
       const entityId = expectString(mind, "entity_id", "CharacterMindProfile");
-      if (characterMindsByEntityId.has(entityId)) {
+      if (characterMindsByLocalEntityId.has(entityId)) {
         throw new EngineFault(
           "content.catalog.duplicate_character_mind_entity",
           `Duplicate CharacterMindProfile entity_id ${entityId}`,
@@ -344,8 +412,28 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
           },
         );
       }
-      characterMindsByEntityId.set(entityId, mind);
+      characterMindsByLocalEntityId.set(entityId, mind);
     }
+    const stateMachinesList = asObjectArray(
+      expectProperty(simulation, "state_machines", "simulation"),
+      "simulation.state_machines",
+    );
+    const stateMachines = uniqueIdMap(
+      stateMachinesList,
+      "machine_id",
+      "StateMachineDefinition",
+      packId,
+      bundleDigest,
+      "content.catalog.duplicate_state_machine",
+    );
+    const initialMachineBindings = asObjectArray(
+      expectProperty(
+        simulation,
+        "initial_machine_bindings",
+        "simulation",
+      ),
+      "simulation.initial_machine_bindings",
+    );
 
     const worldsList = asObjectArray(
       expectProperty(bundle, "worlds", "bundle"),
@@ -387,8 +475,15 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
         dependencies,
         promptFragments,
         directorProfiles,
-        characterMinds,
-        characterMindsByEntityId,
+        characterMindsByLocalEntityId,
+        characterMindsOrdered: Object.freeze([...characterMindsList]),
+        initialEntities: Object.freeze([...initialEntities]),
+        initialRelations: Object.freeze([...initialRelations]),
+        stateMachines,
+        stateMachinesOrdered: Object.freeze([...stateMachinesList]),
+        initialMachineBindings: Object.freeze([
+          ...initialMachineBindings,
+        ]),
         capabilitiesOrdered: Object.freeze([...capabilitiesOrdered]),
       }),
     );
@@ -443,12 +538,13 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
     const dependency = resolveRequiredRulePluginDependency(
       indexed,
       evaluator,
-      {
-        binding: "rule_evaluation",
+      Object.freeze({
         pack_id: rule.bundle_id,
         bundle_digest: rule.bundle_digest,
+        owner_kind: "world_law",
         rule_id: rule.rule_id,
-      },
+        owner_field: "evaluator",
+      }),
     );
 
     return Object.freeze({
@@ -522,64 +618,101 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
       );
     }
 
-    const calendarOperation = expectJsonObject(
-      expectProperty(
-        worldDefinition,
-        "calendar_resolver",
-        "WorldDefinition",
-      ),
-      "WorldDefinition.calendar_resolver",
-    );
-    const navigationOperation = expectJsonObject(
-      expectProperty(
-        worldDefinition,
-        "navigation_resolver",
-        "WorldDefinition",
-      ),
-      "WorldDefinition.navigation_resolver",
-    );
     const eventBudget = expectJsonObject(
       expectProperty(worldDefinition, "event_budget", "WorldDefinition"),
       "WorldDefinition.event_budget",
     );
+    const directorProfileId = expectString(
+      worldDefinition,
+      "director_profile_id",
+      "WorldDefinition",
+    );
+    const directorProfile = indexed.directorProfiles.get(directorProfileId);
+    if (directorProfile === undefined) {
+      throw new EngineFault(
+        "content.catalog.director_profile_missing",
+        "WorldDefinition.director_profile_id is not present in the registered ContentBundle",
+        {
+          pack_id: packId,
+          bundle_digest: bundleDigest,
+          world_definition_id: worldDefinitionId,
+          director_profile_id: directorProfileId,
+        },
+      );
+    }
+    const directorWorldId = expectString(
+      directorProfile,
+      "world_id",
+      "DirectorProfile",
+    );
+    if (directorWorldId !== worldDefinitionId) {
+      throw new EngineFault(
+        "content.catalog.director_world_mismatch",
+        "WorldDefinition.director_profile_id must select a DirectorProfile in the same world",
+        {
+          pack_id: packId,
+          bundle_digest: bundleDigest,
+          world_definition_id: worldDefinitionId,
+          director_profile_id: directorProfileId,
+          director_world_id: directorWorldId,
+        },
+      );
+    }
 
-    const calendarDependency = resolveRequiredRulePluginDependency(
+    const rulePluginOperations = collectWorldRulePluginOperationBindings(
       indexed,
-      calendarOperation,
-      {
-        binding: "world_resolver",
-        pack_id: packId,
-        bundle_digest: bundleDigest,
-        world_definition_id: worldDefinitionId,
-        resolver: "calendar_resolver",
+      worldDefinition,
+    );
+    const stateMachines = indexed.stateMachinesOrdered.filter(
+      (machine) =>
+        expectString(machine, "world_id", "StateMachineDefinition") ===
+        worldDefinitionId,
+    );
+    const stateMachineIds = new Set(
+      stateMachines.map((machine) =>
+        expectString(machine, "machine_id", "StateMachineDefinition"),
+      ),
+    );
+    const machineBindings = indexed.initialMachineBindings.filter(
+      (binding) => {
+        const machineId = expectString(
+          binding,
+          "machine_id",
+          "InitialMachineBinding",
+        );
+        const machine = indexed.stateMachines.get(machineId);
+        if (machine === undefined) {
+          throw new EngineFault(
+            "content.catalog.machine_binding_machine_missing",
+            "InitialMachineBinding.machine_id is not present in the registered ContentBundle",
+            {
+              pack_id: packId,
+              bundle_digest: bundleDigest,
+              world_definition_id: worldDefinitionId,
+              machine_id: machineId,
+            },
+          );
+        }
+        return stateMachineIds.has(machineId);
       },
     );
-    const navigationDependency = resolveRequiredRulePluginDependency(
-      indexed,
-      navigationOperation,
-      {
-        binding: "world_resolver",
-        pack_id: packId,
-        bundle_digest: bundleDigest,
-        world_definition_id: worldDefinitionId,
-        resolver: "navigation_resolver",
-      },
-    );
+    const initialization: WorldInitializationContent = Object.freeze({
+      entities: indexed.initialEntities,
+      relations: indexed.initialRelations,
+      characterMinds: indexed.characterMindsOrdered,
+      stateMachines: Object.freeze(stateMachines),
+      machineBindings: Object.freeze(machineBindings),
+    });
 
     return Object.freeze({
       packId: indexed.packId,
       packVersion: indexed.packVersion,
       bundleDigest: indexed.bundleDigest,
       worldDefinition,
+      directorProfile,
       eventBudget,
-      calendarResolver: Object.freeze({
-        operation: calendarOperation,
-        dependency: calendarDependency,
-      }),
-      navigationResolver: Object.freeze({
-        operation: navigationOperation,
-        dependency: navigationDependency,
-      }),
+      initialization,
+      rulePluginOperations,
     });
   }
 
@@ -591,28 +724,53 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
       ?.promptFragments.get(ref.prompt_id);
   }
 
-  public findDirectorProfile(
-    ref: BundleLockRef & { readonly director_id: string },
+  public findCharacterMindForRuntimeEntity(
+    ref: BundleLockRef & {
+      readonly world_id: string;
+      readonly entity_id: string;
+    },
   ): JsonObject | undefined {
-    return this.#bundles
-      .get(bundleKey(ref.bundle_id, ref.bundle_digest))
-      ?.directorProfiles.get(ref.director_id);
-  }
+    const indexed = this.#bundles.get(
+      bundleKey(ref.bundle_id, ref.bundle_digest),
+    );
+    if (indexed === undefined) {
+      return undefined;
+    }
 
-  public findCharacterMindProfile(
-    ref: BundleLockRef & { readonly mind_id: string },
-  ): JsonObject | undefined {
-    return this.#bundles
-      .get(bundleKey(ref.bundle_id, ref.bundle_digest))
-      ?.characterMinds.get(ref.mind_id);
-  }
-
-  public findCharacterMindByEntityId(
-    ref: BundleLockRef & { readonly entity_id: string },
-  ): JsonObject | undefined {
-    return this.#bundles
-      .get(bundleKey(ref.bundle_id, ref.bundle_digest))
-      ?.characterMindsByEntityId.get(ref.entity_id);
+    const targetEntityId = ref.entity_id.toLowerCase();
+    let match: JsonObject | undefined;
+    let matchedLocalEntityId: string | undefined;
+    for (const [
+      localEntityId,
+      profile,
+    ] of indexed.characterMindsByLocalEntityId.entries()) {
+      const runtimeEntityId = this.#identityMapper.toRuntimeUuid({
+        worldId: ref.world_id,
+        packId: indexed.packId,
+        kind: "entity",
+        localId: localEntityId,
+      });
+      if (runtimeEntityId !== targetEntityId) {
+        continue;
+      }
+      if (match !== undefined && matchedLocalEntityId !== undefined) {
+        throw new EngineFault(
+          "content.catalog.runtime_identity_collision",
+          "Multiple CharacterMindProfile local entity IDs map to the same runtime UUID",
+          {
+            pack_id: indexed.packId,
+            bundle_digest: indexed.bundleDigest,
+            world_id: ref.world_id,
+            runtime_entity_id: targetEntityId,
+            first_local_entity_id: matchedLocalEntityId,
+            second_local_entity_id: localEntityId,
+          },
+        );
+      }
+      match = profile;
+      matchedLocalEntityId = localEntityId;
+    }
+    return match;
   }
 
   public listCapabilities(
@@ -632,6 +790,18 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
   ): readonly JsonObject[] | undefined {
     return this.#bundles.get(bundleKey(ref.bundle_id, ref.bundle_digest))
       ?.worldsOrdered;
+  }
+
+  public listRulePluginOperationBindings(
+    ref: BundleLockRef,
+  ): readonly ContentRulePluginOperationBinding[] | undefined {
+    const indexed = this.#bundles.get(
+      bundleKey(ref.bundle_id, ref.bundle_digest),
+    );
+    if (indexed === undefined) {
+      return undefined;
+    }
+    return collectBundleRulePluginOperationBindings(indexed);
   }
 
   public async findValueDigest(input: {
@@ -740,9 +910,261 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
     }
 
     const component = matches[0] as JsonObject;
-    const fields = expectProperty(component, "fields", "ComponentInstance");
+    const fields = materializeContentFieldValues(
+      expectProperty(component, "fields", "ComponentInstance"),
+      "ComponentInstance.fields",
+    );
     return this.#digest.sha256(fields);
   }
+}
+
+const WORLD_RULE_PLUGIN_OPERATION_OWNERS = [
+  ["calendar_resolver", "day_cycle.advance"],
+  ["navigation_resolver", "navigation.resolve"],
+  ["goal_plan_validator", "goal_plan.validate"],
+  ["world_automatic_event_resolver", "automatic_event.world.resolve"],
+  [
+    "character_automatic_event_resolver",
+    "automatic_event.character.resolve",
+  ],
+  ["stage_outcome_resolver", "stage_outcome.resolve"],
+  ["dialogue_open_resolver", "dialogue.open"],
+  ["dialogue_turn_append_resolver", "dialogue.turn.append"],
+  ["dialogue_close_resolver", "dialogue.close"],
+] as const satisfies readonly (
+  readonly [string, ContentRulePluginOperationKind]
+)[];
+
+function collectBundleRulePluginOperationBindings(
+  indexed: IndexedBundle,
+): readonly ContentRulePluginOperationBinding[] {
+  const bundle = expectJsonObject(
+    expectProperty(indexed.document, "bundle", "ContentBundle"),
+    "ContentBundle.bundle",
+  );
+  const bindings: ContentRulePluginOperationBinding[] = [];
+
+  const append = (
+    owner: JsonObject,
+    ownerField: string,
+    operationKind: ContentRulePluginOperationKind,
+    source: JsonObject,
+  ): void => {
+    const operation = expectJsonObject(
+      expectProperty(owner, ownerField, `${String(source["owner_kind"])} owner`),
+      `${String(source["owner_kind"])}.${ownerField}`,
+    );
+    bindings.push(
+      createContentRulePluginOperationBinding(
+        indexed,
+        operation,
+        operationKind,
+        source,
+      ),
+    );
+  };
+
+  const catalog = expectJsonObject(
+    expectProperty(bundle, "catalog", "bundle"),
+    "bundle.catalog",
+  );
+  for (const typeDefinition of asObjectArray(
+    expectProperty(catalog, "types", "catalog"),
+    "catalog.types",
+  )) {
+    if (typeDefinition.validator === undefined) {
+      continue;
+    }
+    append(
+      typeDefinition,
+      "validator",
+      "definition.validate",
+      contentOperationSource(indexed, {
+        owner_kind: "type_definition",
+        owner_id: expectString(typeDefinition, "type_id", "TypeDefinition"),
+        owner_field: "validator",
+      }),
+    );
+  }
+
+  const gameplay = expectJsonObject(
+    expectProperty(bundle, "gameplay", "bundle"),
+    "bundle.gameplay",
+  );
+  for (const capability of asObjectArray(
+    expectProperty(gameplay, "capabilities", "gameplay"),
+    "gameplay.capabilities",
+  )) {
+    append(
+      capability,
+      "resolver",
+      "capability.resolve",
+      contentOperationSource(indexed, {
+        owner_kind: "capability",
+        owner_id: expectString(capability, "capability_id", "Capability"),
+        owner_field: "resolver",
+      }),
+    );
+  }
+  for (const law of indexed.worldLawsOrdered) {
+    append(
+      law,
+      "evaluator",
+      "rule.evaluate",
+      contentOperationSource(indexed, {
+        owner_kind: "world_law",
+        owner_id: expectString(law, "law_id", "WorldLaw"),
+        owner_field: "evaluator",
+      }),
+    );
+  }
+  for (const archetype of asObjectArray(
+    expectProperty(gameplay, "generation_archetypes", "gameplay"),
+    "gameplay.generation_archetypes",
+  )) {
+    append(
+      archetype,
+      "generator",
+      "world_extension.resolve",
+      contentOperationSource(indexed, {
+        owner_kind: "generation_archetype",
+        owner_id: expectString(
+          archetype,
+          "archetype_id",
+          "GenerationArchetype",
+        ),
+        owner_field: "generator",
+      }),
+    );
+  }
+
+  for (const worldDefinition of indexed.worldsOrdered) {
+    bindings.push(
+      ...collectWorldRulePluginOperationBindings(indexed, worldDefinition),
+    );
+  }
+
+  for (const upgrade of asObjectArray(
+    expectProperty(bundle, "content_upgrades", "bundle"),
+    "bundle.content_upgrades",
+  )) {
+    append(
+      upgrade,
+      "transformer",
+      "content_upgrade.transform",
+      contentOperationSource(indexed, {
+        owner_kind: "content_upgrade",
+        owner_id: expectString(upgrade, "migration_id", "ContentUpgrade"),
+        owner_field: "transformer",
+      }),
+    );
+  }
+
+  const simulation = expectJsonObject(
+    expectProperty(bundle, "simulation", "bundle"),
+    "bundle.simulation",
+  );
+  for (const machine of asObjectArray(
+    expectProperty(simulation, "state_machines", "simulation"),
+    "simulation.state_machines",
+  )) {
+    append(
+      machine,
+      "advance_resolver",
+      "state_machine.advance",
+      contentOperationSource(indexed, {
+        owner_kind: "state_machine",
+        owner_id: expectString(machine, "machine_id", "StateMachineDefinition"),
+        owner_field: "advance_resolver",
+      }),
+    );
+  }
+
+  return Object.freeze(bindings);
+}
+
+function collectWorldRulePluginOperationBindings(
+  indexed: IndexedBundle,
+  worldDefinition: JsonObject,
+): readonly ContentRulePluginOperationBinding[] {
+  const worldId = expectString(
+    worldDefinition,
+    "world_id",
+    "WorldDefinition",
+  );
+  const bindings = WORLD_RULE_PLUGIN_OPERATION_OWNERS.map(
+    ([ownerField, operationKind]) => {
+      const operation = expectJsonObject(
+        expectProperty(worldDefinition, ownerField, "WorldDefinition"),
+        `WorldDefinition.${ownerField}`,
+      );
+      return createContentRulePluginOperationBinding(
+        indexed,
+        operation,
+        operationKind,
+        contentOperationSource(indexed, {
+          owner_kind: "world_definition",
+          owner_id: worldId,
+          owner_field: ownerField,
+        }),
+      );
+    },
+  );
+
+  const eventBudget = expectJsonObject(
+    expectProperty(worldDefinition, "event_budget", "WorldDefinition"),
+    "WorldDefinition.event_budget",
+  );
+  const cardCostOperation = expectJsonObject(
+    expectProperty(
+      eventBudget,
+      "card_cost_resolver",
+      "EventBudgetPolicy",
+    ),
+    "EventBudgetPolicy.card_cost_resolver",
+  );
+  bindings.push(
+    createContentRulePluginOperationBinding(
+      indexed,
+      cardCostOperation,
+      "event_card.publish",
+      contentOperationSource(indexed, {
+        owner_kind: "world_definition",
+        owner_id: worldId,
+        owner_field: "event_budget.card_cost_resolver",
+      }),
+    ),
+  );
+  return Object.freeze(bindings);
+}
+
+function createContentRulePluginOperationBinding(
+  indexed: IndexedBundle,
+  operation: JsonObject,
+  operationKind: ContentRulePluginOperationKind,
+  source: JsonObject,
+): ContentRulePluginOperationBinding {
+  return Object.freeze({
+    operationKind,
+    operation,
+    dependency: resolveRequiredRulePluginDependency(
+      indexed,
+      operation,
+      source,
+    ),
+    source,
+  });
+}
+
+function contentOperationSource(
+  indexed: IndexedBundle,
+  owner: JsonObject,
+): JsonObject {
+  return Object.freeze({
+    pack_id: indexed.packId,
+    bundle_digest: indexed.bundleDigest,
+    ...owner,
+  });
 }
 
 /**
@@ -752,20 +1174,7 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
 function resolveRequiredRulePluginDependency(
   indexed: IndexedBundle,
   operationRef: JsonObject,
-  context:
-    | {
-        readonly binding: "rule_evaluation";
-        readonly pack_id: string;
-        readonly bundle_digest: string;
-        readonly rule_id: string;
-      }
-    | {
-        readonly binding: "world_resolver";
-        readonly pack_id: string;
-        readonly bundle_digest: string;
-        readonly world_definition_id: string;
-        readonly resolver: "calendar_resolver" | "navigation_resolver";
-      },
+  source: JsonObject,
 ): JsonObject {
   const dependencyId = expectString(
     operationRef,
@@ -775,29 +1184,14 @@ function resolveRequiredRulePluginDependency(
   expectString(operationRef, "operation_id", "PluginOperationRef");
 
   const dependency = indexed.dependencies.get(dependencyId);
-  const faultDetails =
-    context.binding === "rule_evaluation"
-      ? Object.freeze({
-          pack_id: context.pack_id,
-          bundle_digest: context.bundle_digest,
-          rule_id: context.rule_id,
-          dependency_id: dependencyId,
-        })
-      : Object.freeze({
-          pack_id: context.pack_id,
-          bundle_digest: context.bundle_digest,
-          world_definition_id: context.world_definition_id,
-          resolver: context.resolver,
-          dependency_id: dependencyId,
-        });
+  const faultDetails = Object.freeze({
+    ...source,
+    dependency_id: dependencyId,
+  });
   if (dependency === undefined) {
     throw new EngineFault(
-      context.binding === "rule_evaluation"
-        ? "content.catalog.rule_dependency_missing"
-        : "content.catalog.world_resolver_dependency_missing",
-      context.binding === "rule_evaluation"
-        ? "WorldLaw evaluator dependency_id is not registered in ContentBundle.dependencies"
-        : "WorldDefinition resolver dependency_id is not registered in ContentBundle.dependencies",
+      "content.catalog.operation_dependency_missing",
+      "PluginOperationRef dependency_id is not registered in ContentBundle.dependencies",
       faultDetails,
     );
   }
@@ -809,25 +1203,19 @@ function resolveRequiredRulePluginDependency(
   );
   if (dependencyKind !== "rule_plugin") {
     throw new EngineFault(
-      context.binding === "rule_evaluation"
-        ? "content.catalog.rule_dependency_kind"
-        : "content.catalog.world_resolver_dependency_kind",
-      context.binding === "rule_evaluation"
-        ? "rule.evaluate binding requires dependency_kind=rule_plugin"
-        : "WorldDefinition resolver requires dependency_kind=rule_plugin",
+      "content.catalog.operation_dependency_kind",
+      "Content-owned RulePlugin operation requires dependency_kind=rule_plugin",
       Object.freeze({ ...faultDetails, dependency_kind: dependencyKind }),
     );
   }
 
-  if (context.binding === "world_resolver") {
-    const required = dependency["required"];
-    if (required !== true) {
-      throw new EngineFault(
-        "content.catalog.world_resolver_dependency_not_required",
-        "WorldDefinition resolver DependencyLock.required must be true",
-        faultDetails,
-      );
-    }
+  const required = dependency["required"];
+  if (required !== true) {
+    throw new EngineFault(
+      "content.catalog.operation_dependency_not_required",
+      "Content-owned RulePlugin operation DependencyLock.required must be true",
+      faultDetails,
+    );
   }
 
   return dependency;

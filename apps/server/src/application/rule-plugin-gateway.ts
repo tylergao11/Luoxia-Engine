@@ -11,7 +11,7 @@ import {
   type ValidatedJsonObject,
 } from "@luoxia/contracts-runtime";
 
-import type { DeterministicContextAuthority } from "@luoxia/world-core/composition";
+import type { DeterministicContextAuthority } from "@luoxia/world-core";
 
 import type {
   ModelInvocationProvenanceVerifier,
@@ -31,6 +31,18 @@ export type PacketProposalDocument = ValidatedJsonObject<
 >;
 
 declare const verifiedRulePluginInvocationReceiptSeal: unique symbol;
+declare const preparedRulePluginInvocationSeal: unique symbol;
+
+export interface PreparedRulePluginInvocation {
+  readonly [preparedRulePluginInvocationSeal]: true;
+  readonly worldId: string;
+  readonly basisRevision: number;
+  readonly request: RulePluginRequestDocument;
+}
+
+export interface RulePluginPreparationProvenanceVerifier {
+  isPrepared(value: unknown): value is PreparedRulePluginInvocation;
+}
 
 export interface VerifiedRulePluginInvocationReceipt {
   readonly [verifiedRulePluginInvocationReceiptSeal]: true;
@@ -69,7 +81,9 @@ export class RulePluginGateway {
   readonly #semanticGate: RulePluginSemanticGate;
   readonly #modelProvenance: ModelInvocationProvenanceVerifier;
   readonly #deterministicContextAuthority: DeterministicContextAuthority;
+  readonly #preparedInvocations = new WeakSet<object>();
   readonly #verifiedReceipts = new WeakSet<object>();
+  public readonly preparationProvenance: RulePluginPreparationProvenanceVerifier;
   public readonly provenance: RulePluginInvocationProvenanceVerifier;
 
   public constructor(
@@ -86,6 +100,12 @@ export class RulePluginGateway {
     this.#semanticGate = semanticGate;
     this.#modelProvenance = modelProvenance;
     this.#deterministicContextAuthority = deterministicContextAuthority;
+    this.preparationProvenance = Object.freeze({
+      isPrepared: (value: unknown): value is PreparedRulePluginInvocation =>
+        typeof value === "object" &&
+        value !== null &&
+        this.#preparedInvocations.has(value),
+    });
     this.provenance = Object.freeze({
       isVerified: (
         value: unknown,
@@ -96,10 +116,10 @@ export class RulePluginGateway {
     });
   }
 
-  public async resolve(
+  public async prepare(
     candidate: unknown,
     modelInvocations: readonly VerifiedModelInvocationReceipt[],
-  ): Promise<VerifiedRulePluginInvocationReceipt> {
+  ): Promise<PreparedRulePluginInvocation> {
     const scopedModelInvocations = Object.freeze(
       Array.from(modelInvocations),
     );
@@ -127,18 +147,81 @@ export class RulePluginGateway {
       worldId,
     );
 
-    const rawResponse = await this.#adapter.resolve(request);
+    const prepared = Object.freeze({
+      worldId,
+      basisRevision: expectInteger(
+        request.value,
+        "basis_revision",
+        "RulePluginRequest",
+      ),
+      request,
+    }) as PreparedRulePluginInvocation;
+    this.#preparedInvocations.add(prepared);
+    return prepared;
+  }
+
+  public async dispatch(
+    prepared: PreparedRulePluginInvocation,
+  ): Promise<VerifiedRulePluginInvocationReceipt> {
+    this.#assertPrepared(prepared);
+    const rawResponse = await this.#adapter.resolve(prepared.request);
+    return this.#verifyResponse(prepared, rawResponse);
+  }
+
+  public verifyRecorded(
+    prepared: PreparedRulePluginInvocation,
+    candidate: unknown,
+  ): Promise<VerifiedRulePluginInvocationReceipt> {
+    this.#assertPrepared(prepared);
+    return this.#verifyResponse(prepared, candidate);
+  }
+
+  async #verifyResponse(
+    prepared: PreparedRulePluginInvocation,
+    candidate: unknown,
+  ): Promise<VerifiedRulePluginInvocationReceipt> {
     const response = this.#contracts.assertObject(
       CONTRACT_REF.rulePluginResponse,
-      rawResponse,
+      candidate,
     );
 
-    assertRulePluginCorrelation(request, response, this.#digest);
-    await this.#semanticGate.assertValid(request, response);
+    assertRulePluginCorrelation(prepared.request, response, this.#digest);
+    await this.#semanticGate.assertValid(prepared.request, response);
     return this.#createVerifiedReceipt(
-      request,
+      prepared.request,
       response,
     );
+  }
+
+  #assertPrepared(prepared: PreparedRulePluginInvocation): void {
+    if (!this.preparationProvenance.isPrepared(prepared)) {
+      throw new EngineFault(
+        "rule_plugin.invocation.prepared_required",
+        "RulePlugin dispatch requires this Gateway's prepared invocation",
+      );
+    }
+    const requestWorld = expectJsonObject(
+      expectProperty(
+        prepared.request.value,
+        "readonly_world",
+        "RulePluginRequest",
+      ),
+      "RulePluginRequest.readonly_world",
+    );
+    if (
+      expectString(requestWorld, "world_id", "WorldSnapshot") !==
+        prepared.worldId ||
+      expectInteger(
+        prepared.request.value,
+        "basis_revision",
+        "RulePluginRequest",
+      ) !== prepared.basisRevision
+    ) {
+      throw new EngineFault(
+        "rule_plugin.invocation.prepared_corrupt",
+        "Prepared RulePlugin invocation identity does not match its request",
+      );
+    }
   }
 
   #createVerifiedReceipt(

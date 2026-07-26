@@ -2,7 +2,7 @@ import type {
   ContractValidator,
   JsonDigest,
 } from "@luoxia/contracts-runtime";
-import type { DeterministicContextAuthority } from "@luoxia/world-core/composition";
+import type { DeterministicContextAuthority } from "@luoxia/world-core";
 
 import {
   RulePluginGateway,

@@ -15,10 +15,12 @@ import { createContentRuntimeCatalog } from "@luoxia/world-core/composition";
 import type { Pool } from "pg";
 
 import { createNodeDeterministicContextIdFactory } from "../adapters/crypto/context-id-factory.js";
+import { createNodeContentRuntimeIdentityMapper } from "../adapters/crypto/content-runtime-identity-mapper.js";
 import {
   createHmacDeterministicContextTokenCodec,
   type DeterministicContextHmacKeyring,
 } from "../adapters/crypto/deterministic-context-hmac-token-codec.js";
+import type { SessionBasisHmacKeyring } from "../adapters/crypto/session-basis-hmac-authority.js";
 import type { ModelProvider } from "./model-gateway.js";
 import type { RulePluginDependencyIdentity } from "./rule-plugin-abi.js";
 import type { RulePluginModuleV1 } from "./rule-plugin-abi.js";
@@ -36,6 +38,11 @@ import {
 
 export interface RuntimeContentActivationInput {
   readonly pool: Pool;
+  /**
+   * Dedicated Pool for RulePlugin Journal writes made while world rows may be
+   * locked. Must target the same database and be a distinct Pool object.
+   */
+  readonly rulePluginJournalPool: Pool;
   readonly contracts: ContractValidator;
   readonly digest: JsonDigest;
   readonly modelProvider: ModelProvider;
@@ -53,9 +60,15 @@ export interface RuntimeContentActivationInput {
    * Required — no default keyring, env read, or auto-generated secrets.
    */
   readonly deterministicContextHmacKeyring: DeterministicContextHmacKeyring;
+  /**
+   * Independent HMAC keyring for Session basis_token. Required; no defaults,
+   * TTL, login claims, or reuse of DeterministicContext key material.
+   */
+  readonly sessionBasisHmacKeyring: SessionBasisHmacKeyring;
 }
 
 export type { DeterministicContextHmacKeyring } from "../adapters/crypto/deterministic-context-hmac-token-codec.js";
+export type { SessionBasisHmacKeyring } from "../adapters/crypto/session-basis-hmac-authority.js";
 
 export interface ActivatedBundleIdentity {
   readonly pack_id: string;
@@ -97,6 +110,10 @@ interface LoadedBundleRecord {
 export async function createRuntimeContentActivation(
   input: RuntimeContentActivationInput,
 ): Promise<RuntimeContentActivation> {
+  assertIndependentHmacKeyrings(
+    input.deterministicContextHmacKeyring,
+    input.sessionBasisHmacKeyring,
+  );
   const loader = new ContentBundleLoader(
     input.contracts,
     input.digest,
@@ -125,19 +142,22 @@ export async function createRuntimeContentActivation(
     records.push(identity);
   }
 
-  const catalog = createContentRuntimeCatalog({ digest: input.digest });
+  const contentRuntimeIdentityMapper =
+    createNodeContentRuntimeIdentityMapper();
+  const catalog = createContentRuntimeCatalog({
+    digest: input.digest,
+    identityMapper: contentRuntimeIdentityMapper,
+  });
   for (const record of records) {
     catalog.register(record.loaded);
   }
 
   const rulePluginOperationRequirements =
     collectRulePluginOperationRequirements({
-      contracts: input.contracts,
       catalog,
       bundles: records.map((record) =>
         Object.freeze({
           packId: record.packId,
-          packVersion: record.packVersion,
           bundleDigest: record.bundleDigest,
         }),
       ),
@@ -177,6 +197,7 @@ export async function createRuntimeContentActivation(
 
   const kernel = createRuntimeExecutionKernel({
     pool: input.pool,
+    rulePluginJournalPool: input.rulePluginJournalPool,
     contracts: input.contracts,
     digest: input.digest,
     modelProvider: input.modelProvider,
@@ -186,8 +207,10 @@ export async function createRuntimeContentActivation(
     ]),
     rulePluginOperationRequirements,
     contentRuntimeCatalog: catalog,
+    contentRuntimeIdentityMapper,
     deterministicContextTokenCodec,
     deterministicContextIdFactory: createNodeDeterministicContextIdFactory(),
+    sessionBasisHmacKeyring: input.sessionBasisHmacKeyring,
   });
 
   const bundles = Object.freeze(
@@ -205,6 +228,31 @@ export async function createRuntimeContentActivation(
     stageModules,
     requiredStageModules,
   });
+}
+
+function assertIndependentHmacKeyrings(
+  contextKeyring: DeterministicContextHmacKeyring,
+  sessionKeyring: SessionBasisHmacKeyring,
+): void {
+  for (const contextKey of contextKeyring.keys) {
+    for (const sessionKey of sessionKeyring.keys) {
+      if (
+        contextKey.secret instanceof Uint8Array &&
+        sessionKey.secret instanceof Uint8Array &&
+        contextKey.secret.byteLength === sessionKey.secret.byteLength &&
+        Buffer.from(contextKey.secret).equals(Buffer.from(sessionKey.secret))
+      ) {
+        throw new EngineFault(
+          "runtime.activation.hmac_key_reuse",
+          "Session basis_token and DeterministicContext keyrings must not reuse key material",
+          {
+            deterministic_context_key_id: contextKey.keyId,
+            session_basis_key_id: sessionKey.keyId,
+          },
+        );
+      }
+    }
+  }
 }
 
 function readBundleIdentity(

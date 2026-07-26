@@ -1,4 +1,7 @@
-import type { ContentBundleDocument, ContentBundleSemanticGate } from "./content-bundle-loader.js";
+import type {
+  ContentBundleDocument,
+  ContentBundleSemanticGate,
+} from "./content-bundle.js";
 import { EngineFault } from "./fault.js";
 import {
   expectInteger,
@@ -11,7 +14,8 @@ import {
 } from "./json.js";
 
 const IDENTIFIER_PATTERN = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/;
-const DECIMAL_STRING_PATTERN = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/;
+const DECIMAL_STRING_PATTERN =
+  /^(?:0|-?(?:[1-9][0-9]*(?:\.[0-9]*[1-9])?|0\.[0-9]*[1-9]))$/;
 const LOCALIZED_LOCALE_PATTERN =
   /^[a-z]{2,3}(?:-[A-Z][a-z]{3})?(?:-[A-Z]{2}|-[0-9]{3})?$/;
 
@@ -21,6 +25,10 @@ type DependencyKind =
   | "rule_plugin"
   | "stage_module"
   | "asset_provider";
+interface DependencyRecord {
+  readonly kind: DependencyKind;
+  readonly required: boolean;
+}
 type PromptPurpose =
   | "character_persona"
   | "character_dialogue"
@@ -96,6 +104,7 @@ interface TypeRecord {
   readonly typeKind: TypeKind;
   readonly parentTypeId: string | undefined;
   readonly inverseTypeId: string | undefined;
+  readonly componentCardinality: "one" | "many" | undefined;
 }
 
 interface PromptRecord {
@@ -115,7 +124,7 @@ interface MachineRecord {
 interface BundleIndex {
   readonly packId: string;
   readonly bundleDigest: string;
-  readonly dependencies: ReadonlyMap<string, DependencyKind>;
+  readonly dependencies: ReadonlyMap<string, DependencyRecord>;
   readonly worlds: ReadonlySet<string>;
   readonly types: ReadonlyMap<string, TypeRecord>;
   readonly extensionFields: readonly ExtensionFieldRecord[];
@@ -133,6 +142,7 @@ interface BundleIndex {
   readonly assets: ReadonlySet<string>;
   readonly bindings: ReadonlySet<string>;
   readonly machines: ReadonlyMap<string, MachineRecord>;
+  readonly directorProfileWorlds: ReadonlyMap<string, string>;
 }
 
 export function createContentBundleSemanticGate(): ContentBundleSemanticGate {
@@ -178,7 +188,15 @@ function buildIndex(bundle: JsonObject, bundleDigest: string): BundleIndex {
     asObjectArray(expectProperty(bundle, "dependencies", "bundle"), "bundle.dependencies"),
     "dependency_id",
     "bundle.dependencies",
-    (item) => expectEnum(item, "dependency_kind", "DependencyLock") as DependencyKind,
+    (item) =>
+      Object.freeze({
+        kind: expectEnum(
+          item,
+          "dependency_kind",
+          "DependencyLock",
+        ) as DependencyKind,
+        required: expectBoolean(item, "required", "DependencyLock"),
+      }),
   );
 
   const worlds = uniqueIdSet(
@@ -330,13 +348,15 @@ function buildIndex(bundle: JsonObject, bundleDigest: string): BundleIndex {
     "mind_id",
     "simulation.character_minds",
   );
-  uniqueIdSet(
+  const directorProfileWorlds = uniqueIndex(
     asObjectArray(
       expectProperty(simulation, "director_profiles", "simulation"),
       "simulation.director_profiles",
     ),
     "director_id",
     "simulation.director_profiles",
+    (director) =>
+      expectString(director, "world_id", "DirectorProfile"),
   );
 
   assertComponentIdUniqueness(definitionsArray, catalog);
@@ -362,6 +382,7 @@ function buildIndex(bundle: JsonObject, bundleDigest: string): BundleIndex {
     assets,
     bindings,
     machines,
+    directorProfileWorlds,
   });
 }
 
@@ -432,6 +453,14 @@ function buildTypeIndex(items: readonly JsonObject[]): ReadonlyMap<string, TypeR
         typeKind: expectEnum(item, "type_kind", `catalog.types[${index}]`) as TypeKind,
         parentTypeId: optionalString(item, "parent_type_id"),
         inverseTypeId: optionalString(item, "inverse_type_id"),
+        componentCardinality:
+          item.component_cardinality === undefined
+            ? undefined
+            : (expectEnum(
+                item,
+                "component_cardinality",
+                `catalog.types[${index}]`,
+              ) as "one" | "many"),
       }),
     );
   }
@@ -650,6 +679,7 @@ function assertWorlds(bundle: JsonObject, index: BundleIndex): void {
   const worlds = asObjectArray(expectProperty(bundle, "worlds", "bundle"), "bundle.worlds");
   for (const [worldIndex, world] of worlds.entries()) {
     const path = `bundle.worlds[${worldIndex}]`;
+    const worldId = expectString(world, "world_id", path);
     requireId(
       index.entities,
       expectString(world, "start_location_entity_id", path),
@@ -662,6 +692,68 @@ function assertWorlds(bundle: JsonObject, index: BundleIndex): void {
       `${path}.player_archetype_definition_id`,
       "definition",
     );
+    assertComponents(
+      asObjectArray(
+        expectProperty(world, "player_initial_components", path),
+        `${path}.player_initial_components`,
+      ),
+      `${path}.player_initial_components`,
+      index,
+    );
+    const playerLocationRelationTypeId = expectString(
+      world,
+      "player_location_relation_type_id",
+      path,
+    );
+    requireTypeKind(
+      index,
+      playerLocationRelationTypeId,
+      "relation",
+      `${path}.player_location_relation_type_id`,
+    );
+    assertFieldValues(
+      asObjectArray(
+        expectProperty(world, "player_location_fields", path),
+        `${path}.player_location_fields`,
+      ),
+      `${path}.player_location_fields`,
+      index,
+      "relation",
+      playerLocationRelationTypeId,
+    );
+    assertInitialVisibility(
+      expectJsonObject(
+        expectProperty(world, "player_location_visibility", path),
+        `${path}.player_location_visibility`,
+      ),
+      `${path}.player_location_visibility`,
+      index,
+    );
+    const directorProfileId = expectString(
+      world,
+      "director_profile_id",
+      path,
+    );
+    const directorWorldId = index.directorProfileWorlds.get(directorProfileId);
+    if (directorWorldId === undefined) {
+      throw unresolved(
+        directorProfileId,
+        `${path}.director_profile_id`,
+        "director_profile",
+      );
+    }
+    if (directorWorldId !== worldId) {
+      throw semanticFault(
+        "content_bundle.semantic.director_world_mismatch",
+        "WorldDefinition.director_profile_id must select a DirectorProfile in the same world",
+        {
+          path: `${path}.director_profile_id`,
+          world_id: worldId,
+          director_profile_id: directorProfileId,
+          director_world_id: directorWorldId,
+        },
+      );
+    }
     assertPluginOperationRef(
       expectJsonObject(
         expectProperty(world, "calendar_resolver", path),
@@ -671,6 +763,25 @@ function assertWorlds(bundle: JsonObject, index: BundleIndex): void {
       index,
       "rule_plugin",
     );
+    for (const operationField of [
+      "goal_plan_validator",
+      "world_automatic_event_resolver",
+      "character_automatic_event_resolver",
+      "stage_outcome_resolver",
+      "dialogue_open_resolver",
+      "dialogue_turn_append_resolver",
+      "dialogue_close_resolver",
+    ] as const) {
+      assertPluginOperationRef(
+        expectJsonObject(
+          expectProperty(world, operationField, path),
+          `${path}.${operationField}`,
+        ),
+        `${path}.${operationField}`,
+        index,
+        "rule_plugin",
+      );
+    }
     assertPluginOperationRef(
       expectJsonObject(
         expectProperty(world, "navigation_resolver", path),
@@ -790,6 +901,17 @@ function assertCatalog(bundle: JsonObject, index: BundleIndex): void {
       }
     }
     if (type.type.validator !== undefined) {
+      if (type.typeKind !== "definition") {
+        throw semanticFault(
+          "content_bundle.semantic.validator_owner_kind",
+          "TypeDefinition.validator is only valid when type_kind=definition",
+          {
+            type_id: type.typeId,
+            type_kind: type.typeKind,
+            path: `catalog.types[${type.typeId}].validator`,
+          },
+        );
+      }
       assertPluginOperationRef(
         expectJsonObject(
           expectProperty(type.type, "validator", `type ${type.typeId}`),
@@ -909,6 +1031,14 @@ function assertCatalog(bundle: JsonObject, index: BundleIndex): void {
       "relation",
       relationTypeId,
     );
+    assertInitialVisibility(
+      expectJsonObject(
+        expectProperty(relation, "visibility", path),
+        `${path}.visibility`,
+      ),
+      `${path}.visibility`,
+      index,
+    );
   }
 }
 
@@ -917,10 +1047,42 @@ function assertComponents(
   path: string,
   index: BundleIndex,
 ): void {
+  const componentKeys = new Set<string>();
+  const componentCounts = new Map<string, number>();
   for (const [componentIndex, component] of components.entries()) {
     const componentPath = `${path}[${componentIndex}]`;
     const componentTypeId = expectString(component, "component_type_id", componentPath);
     requireTypeKind(index, componentTypeId, "component", `${componentPath}.component_type_id`);
+    const ordinal = expectInteger(component, "ordinal", componentPath);
+    const key = `${componentTypeId}\u0000${ordinal}`;
+    if (componentKeys.has(key)) {
+      throw semanticFault(
+        "content_bundle.semantic.component_duplicate",
+        "Component type and ordinal must be unique within one owner",
+        {
+          path: componentPath,
+          component_type_id: componentTypeId,
+          ordinal,
+        },
+      );
+    }
+    componentKeys.add(key);
+
+    const count = (componentCounts.get(componentTypeId) ?? 0) + 1;
+    componentCounts.set(componentTypeId, count);
+    const type = index.types.get(componentTypeId);
+    if (type?.componentCardinality === "one" && count > 1) {
+      throw semanticFault(
+        "content_bundle.semantic.component_cardinality",
+        "component_cardinality=one permits only one component of that type per owner",
+        {
+          path: componentPath,
+          component_type_id: componentTypeId,
+          component_cardinality: type.componentCardinality,
+          component_count: count,
+        },
+      );
+    }
     assertFieldValues(
       asObjectArray(
         expectProperty(component, "fields", componentPath),
@@ -954,6 +1116,55 @@ function assertLocalSubjectRef(
     `LocalSubjectRef kind ${String(kind)} is not supported`,
     { path, kind: String(kind) },
   );
+}
+
+function assertInitialVisibility(
+  visibility: JsonObject,
+  path: string,
+  index: BundleIndex,
+): void {
+  const scope = expectString(visibility, "scope", path);
+  switch (scope) {
+    case "private":
+    case "owner":
+    case "public":
+      return;
+    case "known_to": {
+      const actors = asObjectArray(
+        expectProperty(visibility, "actors", path),
+        `${path}.actors`,
+      );
+      for (const [actorIndex, actor] of actors.entries()) {
+        const actorPath = `${path}.actors[${actorIndex}]`;
+        const actorKind = expectString(actor, "actor_kind", actorPath);
+        switch (actorKind) {
+          case "player":
+            break;
+          case "entity":
+            requireId(
+              index.entities,
+              expectString(actor, "entity_id", actorPath),
+              `${actorPath}.entity_id`,
+              "entity",
+            );
+            break;
+          default:
+            throw semanticFault(
+              "content_bundle.semantic.visibility_actor_kind_unknown",
+              `Unknown InitialVisibility actor_kind ${actorKind}`,
+              { path: actorPath, actor_kind: actorKind },
+            );
+        }
+      }
+      return;
+    }
+    default:
+      throw semanticFault(
+        "content_bundle.semantic.visibility_scope_unknown",
+        `Unknown InitialVisibility scope ${scope}`,
+        { path, scope },
+      );
+  }
 }
 
 function assertGameplay(bundle: JsonObject, index: BundleIndex): void {
@@ -1177,20 +1388,12 @@ function assertPresentation(bundle: JsonObject, index: BundleIndex): void {
       `${path}.fallback_asset_id`,
       "asset",
     );
-    if (profile.provider !== undefined) {
-      assertPluginOperationRef(
-        expectJsonObject(expectProperty(profile, "provider", path), `${path}.provider`),
-        `${path}.provider`,
+    if (profile.asset_provider_dependency_id !== undefined) {
+      assertRequiredDependency(
+        expectString(profile, "asset_provider_dependency_id", path),
+        `${path}.asset_provider_dependency_id`,
         index,
         "asset_provider",
-      );
-    }
-    if (profile.policy !== undefined) {
-      assertPluginOperationRef(
-        expectJsonObject(expectProperty(profile, "policy", path), `${path}.policy`),
-        `${path}.policy`,
-        index,
-        "rule_plugin",
       );
     }
     if (profile.art_profile_id !== undefined) {
@@ -1433,6 +1636,7 @@ function assertSimulation(bundle: JsonObject, index: BundleIndex): void {
     expectProperty(simulation, "initial_machine_bindings", "simulation"),
     "simulation.initial_machine_bindings",
   );
+  const characterMachineBindings = new Set<string>();
   for (const [bindingIndex, binding] of bindings.entries()) {
     const path = `simulation.initial_machine_bindings[${bindingIndex}]`;
     const bindingKind = expectEnum(binding, "binding_kind", path);
@@ -1442,9 +1646,10 @@ function assertSimulation(bundle: JsonObject, index: BundleIndex): void {
       throw unresolved(machineId, `${path}.machine_id`, "state_machine");
     }
     if (bindingKind === "character") {
+      const entityId = expectString(binding, "entity_id", path);
       requireId(
         index.entities,
-        expectString(binding, "entity_id", path),
+        entityId,
         `${path}.entity_id`,
         "entity",
       );
@@ -1459,10 +1664,24 @@ function assertSimulation(bundle: JsonObject, index: BundleIndex): void {
           },
         );
       }
+      const targetKey = `${machine.worldId}\u0000${entityId}`;
+      if (characterMachineBindings.has(targetKey)) {
+        throw semanticFault(
+          "content_bundle.semantic.character_machine_binding_ambiguous",
+          "An Entity can have only one initial character state machine in a world",
+          {
+            path,
+            world_id: machine.worldId,
+            entity_id: entityId,
+          },
+        );
+      }
+      characterMachineBindings.add(targetKey);
     } else if (bindingKind === "world") {
+      const bindingWorldId = expectString(binding, "world_id", path);
       requireId(
         index.worlds,
-        expectString(binding, "world_id", path),
+        bindingWorldId,
         `${path}.world_id`,
         "world",
       );
@@ -1474,6 +1693,18 @@ function assertSimulation(bundle: JsonObject, index: BundleIndex): void {
             path,
             machine_id: machineId,
             machine_scope: machine.machineScope,
+          },
+        );
+      }
+      if (machine.worldId !== bindingWorldId) {
+        throw semanticFault(
+          "content_bundle.semantic.machine_binding_world_mismatch",
+          "World machine binding world_id must match its StateMachineDefinition.world_id",
+          {
+            path,
+            machine_id: machineId,
+            machine_world_id: machine.worldId,
+            binding_world_id: bindingWorldId,
           },
         );
       }
@@ -1492,12 +1723,27 @@ function assertSimulation(bundle: JsonObject, index: BundleIndex): void {
   );
   for (const [mindIndex, mind] of minds.entries()) {
     const path = `simulation.character_minds[${mindIndex}]`;
+    const entityId = expectString(mind, "entity_id", path);
     requireId(
       index.entities,
-      expectString(mind, "entity_id", path),
+      entityId,
       `${path}.entity_id`,
       "entity",
     );
+    for (const worldId of index.worlds) {
+      if (characterMachineBindings.has(`${worldId}\u0000${entityId}`)) {
+        continue;
+      }
+      throw semanticFault(
+        "content_bundle.semantic.character_machine_binding_missing",
+        "Every CharacterMind Entity must have one initial character state machine in every WorldDefinition",
+        {
+          path,
+          world_id: worldId,
+          entity_id: entityId,
+        },
+      );
+    }
     const personaPromptIds = asStringArray(
       expectProperty(mind, "persona_prompt_ids", path),
       `${path}.persona_prompt_ids`,
@@ -1535,12 +1781,10 @@ function assertSimulation(bundle: JsonObject, index: BundleIndex): void {
     expectProperty(simulation, "director_profiles", "simulation"),
     "simulation.director_profiles",
   );
-  const directorsByWorld = new Map<string, number>();
   for (const [directorIndex, director] of directors.entries()) {
     const path = `simulation.director_profiles[${directorIndex}]`;
     const worldId = expectString(director, "world_id", path);
     requireId(index.worlds, worldId, `${path}.world_id`, "world");
-    directorsByWorld.set(worldId, (directorsByWorld.get(worldId) ?? 0) + 1);
 
     const corePromptIds = asStringArray(
       expectProperty(director, "core_prompt_ids", path),
@@ -1580,17 +1824,6 @@ function assertSimulation(bundle: JsonObject, index: BundleIndex): void {
       undefined,
     );
   }
-
-  for (const worldId of index.worlds) {
-    const count = directorsByWorld.get(worldId) ?? 0;
-    if (count !== 1) {
-      throw semanticFault(
-        "content_bundle.semantic.director_count",
-        `World ${worldId} must have exactly one director_profile`,
-        { world_id: worldId, director_count: count },
-      );
-    }
-  }
 }
 
 function assertPluginOperationRef(
@@ -1600,39 +1833,64 @@ function assertPluginOperationRef(
   expectedKind: DependencyKind,
 ): void {
   const dependencyId = expectString(ref, "dependency_id", path);
-  const kind = index.dependencies.get(dependencyId);
-  if (kind === undefined) {
-    throw unresolved(dependencyId, `${path}.dependency_id`, "dependency");
+  assertRequiredDependency(
+    dependencyId,
+    `${path}.dependency_id`,
+    index,
+    expectedKind,
+  );
+  expectString(ref, "operation_id", path);
+}
+
+function assertRequiredDependency(
+  dependencyId: string,
+  path: string,
+  index: BundleIndex,
+  expectedKind: DependencyKind,
+): void {
+  const dependency = index.dependencies.get(dependencyId);
+  if (dependency === undefined) {
+    throw unresolved(dependencyId, path, "dependency");
   }
-  if (kind !== expectedKind) {
+  if (dependency.kind !== expectedKind) {
     throw semanticFault(
       "content_bundle.semantic.kind_mismatch",
-      `Dependency ${dependencyId} kind is ${kind}, expected ${expectedKind}`,
+      `Dependency ${dependencyId} kind is ${dependency.kind}, expected ${expectedKind}`,
       {
         path,
         dependency_id: dependencyId,
         expected_kind: expectedKind,
-        actual_kind: kind,
+        actual_kind: dependency.kind,
       },
     );
   }
-  expectString(ref, "operation_id", path);
+  if (!dependency.required) {
+    throw semanticFault(
+      "content_bundle.semantic.dependency_not_required",
+      `Referenced ${expectedKind} dependency ${dependencyId} must set required=true`,
+      {
+        path,
+        dependency_id: dependencyId,
+        dependency_kind: dependency.kind,
+      },
+    );
+  }
 }
 
 function assertStageRef(ref: JsonObject, path: string, index: BundleIndex): void {
   const dependencyId = expectString(ref, "stage_module_dependency_id", path);
-  const kind = index.dependencies.get(dependencyId);
-  if (kind === undefined) {
+  const dependency = index.dependencies.get(dependencyId);
+  if (dependency === undefined) {
     throw unresolved(dependencyId, `${path}.stage_module_dependency_id`, "dependency");
   }
-  if (kind !== "stage_module") {
+  if (dependency.kind !== "stage_module") {
     throw semanticFault(
       "content_bundle.semantic.kind_mismatch",
-      `Stage module dependency ${dependencyId} kind is ${kind}, expected stage_module`,
+      `Stage module dependency ${dependencyId} kind is ${dependency.kind}, expected stage_module`,
       {
         path,
         dependency_id: dependencyId,
-        actual_kind: kind,
+        actual_kind: dependency.kind,
       },
     );
   }
@@ -1800,7 +2058,11 @@ function assertFieldValueShape(
       return;
     }
     case "decimal": {
-      if (typeof value !== "string" || !DECIMAL_STRING_PATTERN.test(value)) {
+      if (
+        typeof value !== "string" ||
+        value.length > 128 ||
+        !DECIMAL_STRING_PATTERN.test(value)
+      ) {
         throw fieldTypeFault(field, path, "decimal string");
       }
       const numeric = Number(value);

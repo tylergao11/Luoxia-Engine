@@ -1,7 +1,7 @@
 import type {
   ContentRuntimeCatalog,
   WorldContentBinding,
-} from "@luoxia/world-core/composition";
+} from "@luoxia/world-core";
 
 import type {
   RuntimeWorldReader,

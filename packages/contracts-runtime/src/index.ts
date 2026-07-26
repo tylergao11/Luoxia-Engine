@@ -1,3 +1,4 @@
+export * from "./content-bundle.js";
 export * from "./content-bundle-loader.js";
 export * from "./content-bundle-semantic-gate.js";
 export * from "./digest.js";

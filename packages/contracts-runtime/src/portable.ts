@@ -1,3 +1,7 @@
+export type {
+  ContentBundleDocument,
+  LoadedContentBundle,
+} from "./content-bundle.js";
 export * from "./contract-validator.js";
 export * from "./fault.js";
 export * from "./json.js";

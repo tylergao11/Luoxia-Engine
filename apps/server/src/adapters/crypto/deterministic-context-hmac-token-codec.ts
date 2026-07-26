@@ -1,7 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 
 import { EngineFault, type JsonDigest } from "@luoxia/contracts-runtime";
-import type { DeterministicContextTokenCodec } from "@luoxia/world-core/composition";
+import type { DeterministicContextTokenCodec } from "@luoxia/world-core";
 
 const TOKEN_VERSION = "v1";
 const MIN_SECRET_BYTES = 32;

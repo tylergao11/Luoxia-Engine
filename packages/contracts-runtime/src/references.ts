@@ -27,6 +27,7 @@ export function definitionRef<
 
 export const CONTRACT_REF = Object.freeze({
   uuid: definitionRef(CONTRACT_ID.common, "Uuid"),
+  localizedText: definitionRef(CONTRACT_ID.common, "LocalizedText"),
   dayNumber: definitionRef(CONTRACT_ID.common, "DayNumber"),
   deterministicContext: definitionRef(
     CONTRACT_ID.common,
@@ -69,6 +70,7 @@ export const CONTRACT_REF = Object.freeze({
   ),
   clientEnvelope: definitionRef(CONTRACT_ID.clientBridge, "ClientEnvelope"),
   serverEnvelope: definitionRef(CONTRACT_ID.clientBridge, "ServerEnvelope"),
+  commandResult: definitionRef(CONTRACT_ID.clientBridge, "CommandResult"),
   stageModuleManifest: definitionRef(
     CONTRACT_ID.clientBridge,
     "StageModuleManifest",

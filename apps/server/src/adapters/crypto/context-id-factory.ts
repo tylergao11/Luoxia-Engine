@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import type { DeterministicContextIdFactory } from "@luoxia/world-core/composition";
+import type { DeterministicContextIdFactory } from "@luoxia/world-core";
 
 /**
  * Server-side context_id factory. Uses Node crypto only in Server adapters.

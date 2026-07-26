@@ -34,14 +34,12 @@ import type { RuntimeWorldBindingResolver } from "./runtime-world-binding.js";
 export interface RuntimeModelFacades {
   directorDailySettlement(input: {
     readonly worldId: string;
-    readonly directorId: string;
     readonly model_profile_id: string;
   }): Promise<VerifiedModelInvocationReceipt>;
 
   directorDialogueEvents(input: {
     readonly worldId: string;
     readonly dialogueId: string;
-    readonly directorId: string;
     readonly model_profile_id: string;
   }): Promise<VerifiedModelInvocationReceipt>;
 
@@ -49,7 +47,6 @@ export interface RuntimeModelFacades {
     readonly worldId: string;
     readonly dialogueId: string;
     readonly playerEntityId: string;
-    readonly directorId: string;
     readonly model_profile_id: string;
   }): Promise<VerifiedModelInvocationReceipt>;
 
@@ -125,7 +122,6 @@ class ModelRequestAssembly {
 
   public directorDailySettlement(input: {
     readonly worldId: string;
-    readonly directorId: string;
     readonly model_profile_id: string;
   }): Promise<VerifiedModelInvocationReceipt> {
     return this.#runDirector("daily_settlement", input, async (ctx) => {
@@ -140,7 +136,6 @@ class ModelRequestAssembly {
   public directorDialogueEvents(input: {
     readonly worldId: string;
     readonly dialogueId: string;
-    readonly directorId: string;
     readonly model_profile_id: string;
   }): Promise<VerifiedModelInvocationReceipt> {
     return this.#runDirector("dialogue_events", input, async (ctx) => {
@@ -156,7 +151,6 @@ class ModelRequestAssembly {
     readonly worldId: string;
     readonly dialogueId: string;
     readonly playerEntityId: string;
-    readonly directorId: string;
     readonly model_profile_id: string;
   }): Promise<VerifiedModelInvocationReceipt> {
     return this.#runDirector("system_dialogue", input, async (ctx) => {
@@ -221,7 +215,6 @@ class ModelRequestAssembly {
     mode: DirectorMode,
     input: {
       readonly worldId: string;
-      readonly directorId: string;
       readonly model_profile_id: string;
     },
     buildInput: (ctx: {
@@ -240,7 +233,6 @@ class ModelRequestAssembly {
     const dynamicInput = await buildInput({ worldState, snapshot });
     const materialized = this.#materializer.materializeDirector({
       contentBinding: worldBinding.contentBinding,
-      directorId: input.directorId,
       mode,
     });
     const requestKind =
@@ -283,6 +275,11 @@ class ModelRequestAssembly {
     const dynamicInput = await buildInput({ worldState, snapshot });
     const materialized = this.#materializer.materializeCharacter({
       contentBinding: worldBinding.contentBinding,
+      runtimeWorldId: expectString(
+        snapshot.value,
+        "world_id",
+        "WorldSnapshot",
+      ),
       entityId: input.entityId,
       mode,
     });

@@ -9,7 +9,7 @@ import {
 import type {
   DecimalAmountComparer,
   LedgerPostArithmetic,
-} from "@luoxia/world-core/composition";
+} from "@luoxia/world-core";
 
 import { ExactDecimal } from "./exact-decimal.js";
 

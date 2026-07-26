@@ -187,8 +187,20 @@
         "initial_time",
         "start_location_entity_id",
         "player_archetype_definition_id",
+        "player_initial_components",
+        "player_location_relation_type_id",
+        "player_location_fields",
+        "player_location_visibility",
+        "director_profile_id",
         "calendar_resolver",
         "navigation_resolver",
+        "goal_plan_validator",
+        "world_automatic_event_resolver",
+        "character_automatic_event_resolver",
+        "stage_outcome_resolver",
+        "dialogue_open_resolver",
+        "dialogue_turn_append_resolver",
+        "dialogue_close_resolver",
         "default_art_profile_id",
         "default_materialization_profile_id",
         "system",
@@ -213,7 +225,46 @@
         "player_archetype_definition_id": {
           "$ref": "common.v1.schema.json#/$defs/Identifier"
         },
+        "player_initial_components": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PlayerInitialComponent"
+          }
+        },
+        "player_location_relation_type_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "player_location_fields": {
+          "$ref": "#/$defs/FieldValues"
+        },
+        "player_location_visibility": {
+          "$ref": "#/$defs/InitialVisibility"
+        },
+        "director_profile_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
         "calendar_resolver": {
+          "$ref": "#/$defs/PluginOperationRef"
+        },
+        "goal_plan_validator": {
+          "$ref": "#/$defs/PluginOperationRef"
+        },
+        "world_automatic_event_resolver": {
+          "$ref": "#/$defs/PluginOperationRef"
+        },
+        "character_automatic_event_resolver": {
+          "$ref": "#/$defs/PluginOperationRef"
+        },
+        "stage_outcome_resolver": {
+          "$ref": "#/$defs/PluginOperationRef"
+        },
+        "dialogue_open_resolver": {
+          "$ref": "#/$defs/PluginOperationRef"
+        },
+        "dialogue_turn_append_resolver": {
+          "$ref": "#/$defs/PluginOperationRef"
+        },
+        "dialogue_close_resolver": {
           "$ref": "#/$defs/PluginOperationRef"
         },
         "default_art_profile_id": {
@@ -665,6 +716,27 @@
         }
       }
     },
+    "PlayerInitialComponent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "component_type_id",
+        "ordinal",
+        "fields"
+      ],
+      "properties": {
+        "component_type_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "ordinal": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fields": {
+          "$ref": "#/$defs/FieldValues"
+        }
+      }
+    },
     "StaticDefinition": {
       "type": "object",
       "additionalProperties": false,
@@ -736,6 +808,79 @@
         }
       }
     },
+    "InitialVisibilityActor": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "actor_kind"
+          ],
+          "properties": {
+            "actor_kind": {
+              "const": "player"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "actor_kind",
+            "entity_id"
+          ],
+          "properties": {
+            "actor_kind": {
+              "const": "entity"
+            },
+            "entity_id": {
+              "$ref": "common.v1.schema.json#/$defs/Identifier"
+            }
+          }
+        }
+      ]
+    },
+    "InitialVisibility": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "scope"
+          ],
+          "properties": {
+            "scope": {
+              "enum": [
+                "private",
+                "owner",
+                "public"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "scope",
+            "actors"
+          ],
+          "properties": {
+            "scope": {
+              "const": "known_to"
+            },
+            "actors": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/InitialVisibilityActor"
+              }
+            }
+          }
+        }
+      ]
+    },
     "InitialRelation": {
       "type": "object",
       "additionalProperties": false,
@@ -744,7 +889,8 @@
         "relation_type_id",
         "from",
         "to",
-        "fields"
+        "fields",
+        "visibility"
       ],
       "properties": {
         "relation_id": {
@@ -761,6 +907,9 @@
         },
         "fields": {
           "$ref": "#/$defs/FieldValues"
+        },
+        "visibility": {
+          "$ref": "#/$defs/InitialVisibility"
         }
       }
     },
@@ -1129,14 +1278,11 @@
             "on_demand"
           ]
         },
-        "provider": {
-          "$ref": "#/$defs/PluginOperationRef"
+        "asset_provider_dependency_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
         },
         "art_profile_id": {
           "$ref": "common.v1.schema.json#/$defs/Identifier"
-        },
-        "policy": {
-          "$ref": "#/$defs/PluginOperationRef"
         },
         "fallback_asset_id": {
           "$ref": "common.v1.schema.json#/$defs/Identifier"
@@ -1168,7 +1314,7 @@
           },
           "then": {
             "required": [
-              "provider"
+              "asset_provider_dependency_id"
             ]
           }
         }

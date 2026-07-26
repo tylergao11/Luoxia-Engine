@@ -19,7 +19,7 @@ import type {
 
 /**
  * Pure ledger arithmetic over DecimalString balances.
- * Conservation, minting permission, and precision are owned by the composition root.
+ * Strict conservation and precision are owned by the composition root.
  */
 export interface LedgerPostArithmetic {
   applyPost(input: {
@@ -507,7 +507,19 @@ const EFFECT_HANDLERS: { readonly [K in EffectOpName]: EffectHandler } = {
     }
     const index = findLedgerIndex(context.world, ledgerId);
     if (index < 0) {
-      throw missing("ledger", ledgerId);
+      const nextBalances = context.dependencies.ledgerArithmetic.applyPost({
+        ledgerId,
+        unitDefinition,
+        balances: Object.freeze([]),
+        entries,
+      });
+      context.world.ledgers.push({
+        ledger_id: ledgerId,
+        unit_definition: cloneJson(unitDefinition),
+        balances: nextBalances.map((entry) => cloneJsonObject(entry)),
+        last_transaction_id: transactionId,
+      });
+      return;
     }
     const current = context.world.ledgers[index] as JsonObject;
     if (

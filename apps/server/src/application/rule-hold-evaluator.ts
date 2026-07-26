@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-
 import {
   EngineFault,
   expectJsonObject,
@@ -11,22 +9,31 @@ import {
 import type {
   ContentRuntimeCatalog,
   RuleHoldEvaluator,
-} from "@luoxia/world-core/composition";
+} from "@luoxia/world-core";
 
 import type { RulePluginAbiRegistry } from "./rule-plugin-abi.js";
-import type { RulePluginGateway } from "./rule-plugin-gateway.js";
+import type { RulePluginExecutor } from "./rule-plugin-executor.js";
 
 const RULE_EVALUATE_KIND = "rule.evaluate";
 
 export interface RuleHoldEvaluatorDependencies {
   readonly catalog: ContentRuntimeCatalog;
   readonly abi: RulePluginAbiRegistry;
-  readonly rulePluginGateway: RulePluginGateway;
+  readonly rulePluginExecutor: RulePluginExecutor;
+  readonly requestIdFactory: RuleHoldRequestIdFactory;
+}
+
+export interface RuleHoldRequestIdFactory {
+  createRequestId(input: {
+    readonly packetId: string;
+    readonly preconditionPath: string;
+  }): string;
 }
 
 /**
- * Production RuleHoldEvaluator: rule.holds → rule.evaluate via RulePluginGateway.
- * Read-only; never builds PacketProposal or calls applyPacket.
+ * Production RuleHoldEvaluator: rule.holds → rule.evaluate through the
+ * persist-before-execute RulePlugin Executor. Read-only; never builds a
+ * PacketProposal or calls applyPacket.
  */
 export function createRuleHoldEvaluator(
   dependencies: RuleHoldEvaluatorDependencies,
@@ -37,12 +44,14 @@ export function createRuleHoldEvaluator(
 class ProductionRuleHoldEvaluator implements RuleHoldEvaluator {
   readonly #catalog: ContentRuntimeCatalog;
   readonly #abi: RulePluginAbiRegistry;
-  readonly #rulePluginGateway: RulePluginGateway;
+  readonly #rulePluginExecutor: RulePluginExecutor;
+  readonly #requestIdFactory: RuleHoldRequestIdFactory;
 
   public constructor(dependencies: RuleHoldEvaluatorDependencies) {
     this.#catalog = dependencies.catalog;
     this.#abi = dependencies.abi;
-    this.#rulePluginGateway = dependencies.rulePluginGateway;
+    this.#rulePluginExecutor = dependencies.rulePluginExecutor;
+    this.#requestIdFactory = dependencies.requestIdFactory;
   }
 
   public async holds(input: {
@@ -51,6 +60,8 @@ class ProductionRuleHoldEvaluator implements RuleHoldEvaluator {
     readonly worldRevision: number;
     readonly worldState: JsonObject;
     readonly deterministicContext: JsonObject;
+    readonly packetId: string;
+    readonly preconditionPath: string;
   }): Promise<boolean> {
     const bundleId = expectString(input.rule, "bundle_id", "RuleRef");
     const bundleDigest = expectString(input.rule, "bundle_digest", "RuleRef");
@@ -102,7 +113,10 @@ class ProductionRuleHoldEvaluator implements RuleHoldEvaluator {
     const candidate: JsonObject = Object.freeze({
       contract_version: "rule-plugin.v1",
       record_type: "rule_plugin.request",
-      request_id: randomUUID(),
+      request_id: this.#requestIdFactory.createRequestId({
+        packetId: input.packetId,
+        preconditionPath: input.preconditionPath,
+      }),
       plugin_lock: registered.pluginLock,
       operation_id: binding.evaluator.operation_id,
       operation_kind: RULE_EVALUATE_KIND,
@@ -119,7 +133,7 @@ class ProductionRuleHoldEvaluator implements RuleHoldEvaluator {
       }),
     });
 
-    const receipt = await this.#rulePluginGateway.resolve(candidate, []);
+    const receipt = await this.#rulePluginExecutor.execute(candidate, []);
     if (receipt.proposal !== undefined) {
       throw new EngineFault(
         "runtime.rule_hold.unexpected_proposal",

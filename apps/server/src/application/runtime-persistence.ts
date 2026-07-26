@@ -2,7 +2,7 @@ import type {
   CommittedEventDocument,
   RulePluginProposalReceiptLookup,
   WorldSnapshotDocument,
-} from "@luoxia/world-core/composition";
+} from "@luoxia/world-core";
 import type { ApplyPacketResultDocument } from "@luoxia/world-core";
 import type { WorldContentLockDocument } from "@luoxia/contracts-runtime/portable";
 
@@ -19,6 +19,9 @@ import type {
 } from "./model-dispatch-authorization.js";
 import type {
   PacketProposalDocument,
+  PreparedRulePluginInvocation,
+  RulePluginRequestDocument,
+  RulePluginResponseDocument,
   VerifiedRulePluginInvocationReceipt,
 } from "./rule-plugin-gateway.js";
 
@@ -33,6 +36,18 @@ export interface RuntimeWorldRecord {
 
 export interface RuntimeWorldReader {
   readCurrent(worldId: string): Promise<RuntimeWorldRecord>;
+}
+
+/**
+ * Fully validated revision-zero world ready for one atomic PostgreSQL insert.
+ * The immutable content lock and authoritative state are persisted together.
+ */
+export interface RuntimeWorldCreationRecord extends RuntimeWorldRecord {
+  readonly createdAt: string;
+}
+
+export interface RuntimeWorldCreator {
+  create(record: RuntimeWorldCreationRecord): Promise<RuntimeWorldRecord>;
 }
 
 export interface CommittedEventRevisionRange {
@@ -159,9 +174,31 @@ export interface DailySettlementRunJournal
   ): Promise<DailySettlementRunRecord>;
 }
 
-export interface RulePluginProposalReceiptStore
+export interface StoredPreparedRulePluginInvocation {
+  readonly phase: "prepared";
+  readonly request: RulePluginRequestDocument;
+}
+
+export interface StoredResolvedRulePluginInvocation {
+  readonly phase: "resolved";
+  readonly request: RulePluginRequestDocument;
+  readonly response: RulePluginResponseDocument;
+  readonly proposal: PacketProposalDocument | undefined;
+}
+
+export type StoredRulePluginInvocation =
+  | StoredPreparedRulePluginInvocation
+  | StoredResolvedRulePluginInvocation;
+
+export interface RulePluginInvocationJournal
   extends RulePluginProposalReceiptLookup {
-  persistPacketProposal(
+  persistPrepared(
+    invocation: PreparedRulePluginInvocation,
+  ): Promise<StoredRulePluginInvocation>;
+  recordResolved(
     receipt: VerifiedRulePluginInvocationReceipt,
-  ): Promise<PacketProposalDocument | undefined>;
+  ): Promise<StoredResolvedRulePluginInvocation>;
+  readByRequestId(
+    requestId: string,
+  ): Promise<StoredRulePluginInvocation | undefined>;
 }

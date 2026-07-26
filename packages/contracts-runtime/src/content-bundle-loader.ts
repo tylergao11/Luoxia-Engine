@@ -1,5 +1,9 @@
 import { EngineFault } from "./fault.js";
 import type { JsonDigest } from "./digest.js";
+import type {
+  ContentBundleSemanticGate,
+  LoadedContentBundle,
+} from "./content-bundle.js";
 import {
   expectJsonObject,
   expectProperty,
@@ -7,20 +11,6 @@ import {
 } from "./json.js";
 import { CONTRACT_REF } from "./references.js";
 import type { ContractValidator } from "./contract-validator.js";
-import type { ValidatedJsonObject } from "./validated-json.js";
-
-export type ContentBundleDocument = ValidatedJsonObject<
-  typeof CONTRACT_REF.contentBundle
->;
-
-export interface LoadedContentBundle {
-  readonly document: ContentBundleDocument;
-  readonly bundleDigest: string;
-}
-
-export interface ContentBundleSemanticGate {
-  assertValid(bundle: ContentBundleDocument): Promise<void>;
-}
 
 export class ContentBundleLoader {
   readonly #contracts: ContractValidator;

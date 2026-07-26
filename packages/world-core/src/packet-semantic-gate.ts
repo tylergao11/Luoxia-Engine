@@ -47,6 +47,9 @@ export interface RuleHoldEvaluator {
     readonly worldState: JsonObject;
     /** Full ContentPacket.deterministic_context; not inventing Schema fields. */
     readonly deterministicContext: JsonObject;
+    /** Stable path of this exact rule.holds occurrence within the packet. */
+    readonly packetId: string;
+    readonly preconditionPath: string;
   }): Promise<boolean>;
 }
 
@@ -112,6 +115,7 @@ interface EvaluationContext {
 type PreconditionHandler = (
   precondition: JsonObject,
   context: EvaluationContext,
+  preconditionPath: string,
 ) => Promise<void>;
 
 type SourceHandler = (
@@ -215,7 +219,11 @@ async function assertAllPreconditions(
         },
       );
     }
-    await handler(precondition, context);
+    await handler(
+      precondition,
+      context,
+      `ContentPacket.preconditions[${index}]`,
+    );
   }
 }
 
@@ -403,7 +411,7 @@ const PRECONDITION_HANDLERS: {
       );
     }
   },
-  "rule.holds": async (precondition, context) => {
+  "rule.holds": async (precondition, context, preconditionPath) => {
     const rule = expectJsonObject(
       expectProperty(precondition, "rule", "PacketPrecondition"),
       "PacketPrecondition.rule",
@@ -422,6 +430,12 @@ const PRECONDITION_HANDLERS: {
       worldRevision: context.worldRevision,
       worldState: context.worldState,
       deterministicContext,
+      packetId: expectString(
+        context.packet,
+        "packet_id",
+        "ContentPacket",
+      ),
+      preconditionPath,
     });
     if (!holds) {
       throw preconditionFailure(
@@ -822,7 +836,7 @@ async function assertSealedPreconditionFailure(
   context: EvaluationContext,
 ): Promise<void> {
   let semanticFailureCount = 0;
-  for (const precondition of sealedPreconditions) {
+  for (const [index, precondition] of sealedPreconditions.entries()) {
     const kind = expectString(
       precondition,
       "kind",
@@ -840,7 +854,11 @@ async function assertSealedPreconditionFailure(
       );
     }
     try {
-      await handler(precondition, context);
+      await handler(
+        precondition,
+        context,
+        `SealedEventResult.preconditions[${index}]`,
+      );
     } catch (error) {
       if (error instanceof PreconditionUnsatisfiedFault) {
         semanticFailureCount += 1;

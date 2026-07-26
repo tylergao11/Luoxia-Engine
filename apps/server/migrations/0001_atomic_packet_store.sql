@@ -19,6 +19,103 @@ CREATE TABLE luoxia_engine.worlds (
   )
 );
 
+CREATE TABLE luoxia_engine.engine_sessions (
+  session_id uuid PRIMARY KEY,
+  world_id uuid NOT NULL REFERENCES luoxia_engine.worlds(world_id),
+  control_binding_id uuid NOT NULL,
+  player_entity_id uuid NOT NULL,
+  view_revision bigint NOT NULL,
+  world_revision bigint NOT NULL,
+  nonce uuid NOT NULL,
+  created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL,
+  CONSTRAINT engine_sessions_view_revision_safe CHECK (
+    view_revision >= 0 AND view_revision <= 9007199254740991
+  ),
+  CONSTRAINT engine_sessions_world_revision_safe CHECK (
+    world_revision >= 0 AND world_revision <= 9007199254740991
+  )
+);
+
+CREATE INDEX engine_sessions_world_index
+  ON luoxia_engine.engine_sessions (world_id);
+
+CREATE TABLE luoxia_engine.command_journal (
+  session_id uuid NOT NULL REFERENCES luoxia_engine.engine_sessions(session_id),
+  command_id uuid NOT NULL,
+  command_kind text NOT NULL,
+  request_digest text NOT NULL,
+  request_document jsonb NOT NULL,
+  accepted_world_id uuid NOT NULL,
+  accepted_control_binding_id uuid NOT NULL,
+  accepted_player_entity_id uuid NOT NULL,
+  accepted_view_revision bigint NOT NULL,
+  accepted_world_revision bigint NOT NULL,
+  accepted_nonce uuid NOT NULL,
+  command_status text NOT NULL,
+  result_document jsonb,
+  received_at timestamptz NOT NULL,
+  completed_at timestamptz,
+  PRIMARY KEY (session_id, command_id),
+  CONSTRAINT command_journal_request_digest_sha256 CHECK (
+    request_digest ~ '^[0-9a-f]{64}$'
+  ),
+  CONSTRAINT command_journal_accepted_view_revision_safe CHECK (
+    accepted_view_revision >= 0
+    AND accepted_view_revision <= 9007199254740991
+  ),
+  CONSTRAINT command_journal_accepted_world_revision_safe CHECK (
+    accepted_world_revision >= 0
+    AND accepted_world_revision <= 9007199254740991
+  ),
+  CONSTRAINT command_journal_status_closed CHECK (
+    command_status IN ('received', 'completed')
+  ),
+  CONSTRAINT command_journal_documents_object CHECK (
+    jsonb_typeof(request_document) = 'object'
+    AND (
+      result_document IS NULL
+      OR jsonb_typeof(result_document) = 'object'
+    )
+  ),
+  CONSTRAINT command_journal_status_shape CHECK (
+    (
+      command_status = 'received'
+      AND result_document IS NULL
+      AND completed_at IS NULL
+    )
+    OR (
+      command_status = 'completed'
+      AND result_document IS NOT NULL
+      AND completed_at IS NOT NULL
+      AND result_document #>> '{status}' IS NOT NULL
+      AND result_document #>> '{status}' IN ('accepted', 'rejected')
+    )
+  ),
+  CONSTRAINT command_journal_request_identity CHECK (
+    request_document #>> '{session_id}' IS NOT NULL
+    AND request_document #>> '{message,command_id}' IS NOT NULL
+    AND request_document #>> '{message,type}' IS NOT NULL
+    AND request_document #>> '{message,basis_token}' IS NOT NULL
+    AND request_document #>> '{session_id}' = session_id::text
+    AND request_document #>> '{message,command_id}' = command_id::text
+    AND request_document #>> '{message,type}' = command_kind
+  ),
+  CONSTRAINT command_journal_result_identity CHECK (
+    result_document IS NULL
+    OR (
+      result_document #>> '{command_id}' IS NOT NULL
+      AND result_document #>> '{command_id}' = command_id::text
+    )
+  )
+);
+
+CREATE INDEX command_journal_world_index
+  ON luoxia_engine.command_journal (
+    accepted_world_id,
+    accepted_world_revision
+  );
+
 CREATE TABLE luoxia_engine.committed_events (
   event_id uuid PRIMARY KEY,
   packet_id uuid NOT NULL,
@@ -227,95 +324,150 @@ CREATE TABLE luoxia_engine.model_invocations (
 CREATE INDEX model_invocations_world_revision_index
   ON luoxia_engine.model_invocations (world_id, world_revision);
 
-CREATE TABLE luoxia_engine.rule_plugin_proposal_receipts (
-  proposal_id uuid PRIMARY KEY,
+-- RulePlugin requests may be prepared while apply_packet holds the matching
+-- world row FOR UPDATE. This journal deliberately has no worlds FK: acquiring
+-- a second-transaction FK key lock would invert that lock order. The validated
+-- readonly_world snapshot and the identity constraints below bind the request.
+CREATE TABLE luoxia_engine.rule_plugin_invocations (
+  request_id uuid PRIMARY KEY,
   world_id uuid NOT NULL,
   basis_revision bigint NOT NULL,
   plugin_id text NOT NULL,
   operation_id text NOT NULL,
-  request_id uuid NOT NULL,
+  operation_kind text NOT NULL,
   deterministic_context_id uuid NOT NULL,
   deterministic_context_digest text NOT NULL,
+  request_digest text NOT NULL,
+  invocation_status text NOT NULL,
   request_document jsonb NOT NULL,
-  response_document jsonb NOT NULL,
-  proposal_document jsonb NOT NULL,
-  authorized_at timestamptz NOT NULL,
-  CONSTRAINT rule_plugin_proposal_receipts_world_foreign_key
-    FOREIGN KEY (world_id) REFERENCES luoxia_engine.worlds(world_id),
-  CONSTRAINT rule_plugin_proposal_receipts_request_id_unique
-    UNIQUE (request_id),
-  CONSTRAINT rule_plugin_proposal_receipts_basis_revision_safe CHECK (
+  response_document jsonb,
+  proposal_id uuid,
+  proposal_document jsonb,
+  prepared_at timestamptz NOT NULL,
+  resolved_at timestamptz,
+  CONSTRAINT rule_plugin_invocations_proposal_id_unique
+    UNIQUE (proposal_id),
+  CONSTRAINT rule_plugin_invocations_basis_revision_safe CHECK (
     basis_revision >= 0 AND basis_revision <= 9007199254740991
   ),
-  CONSTRAINT rule_plugin_proposal_receipts_documents_object CHECK (
-    jsonb_typeof(request_document) = 'object'
-    AND jsonb_typeof(response_document) = 'object'
-    AND jsonb_typeof(proposal_document) = 'object'
+  CONSTRAINT rule_plugin_invocations_request_digest_sha256 CHECK (
+    request_digest ~ '^[0-9a-f]{64}$'
   ),
-  CONSTRAINT rule_plugin_proposal_receipts_document_identity CHECK (
+  CONSTRAINT rule_plugin_invocations_status_closed CHECK (
+    invocation_status IN ('prepared', 'resolved')
+  ),
+  CONSTRAINT rule_plugin_invocations_documents_object CHECK (
+    jsonb_typeof(request_document) = 'object'
+    AND (
+      response_document IS NULL
+      OR jsonb_typeof(response_document) = 'object'
+    )
+    AND (
+      proposal_document IS NULL
+      OR jsonb_typeof(proposal_document) = 'object'
+    )
+  ),
+  CONSTRAINT rule_plugin_invocations_status_shape CHECK (
+    (
+      invocation_status = 'prepared'
+      AND response_document IS NULL
+      AND proposal_id IS NULL
+      AND proposal_document IS NULL
+      AND resolved_at IS NULL
+    )
+    OR (
+      invocation_status = 'resolved'
+      AND response_document IS NOT NULL
+      AND resolved_at IS NOT NULL
+      AND response_document #>> '{output,output_kind}' IS NOT NULL
+      AND (
+        (
+          response_document #>> '{output,output_kind}' = 'packet.proposal'
+          AND proposal_id IS NOT NULL
+          AND proposal_document IS NOT NULL
+        )
+        OR (
+          response_document #>> '{output,output_kind}' <> 'packet.proposal'
+          AND proposal_id IS NULL
+          AND proposal_document IS NULL
+        )
+      )
+    )
+  ),
+  CONSTRAINT rule_plugin_invocations_request_identity CHECK (
     request_document #>> '{request_id}' IS NOT NULL
-    AND response_document #>> '{request_id}' IS NOT NULL
-    AND proposal_document #>> '{proposal_id}' IS NOT NULL
     AND request_document #>> '{readonly_world,world_id}' IS NOT NULL
     AND request_document #>> '{readonly_world,world_revision}' IS NOT NULL
     AND request_document #>> '{basis_revision}' IS NOT NULL
-    AND response_document #>> '{basis_revision}' IS NOT NULL
-    AND proposal_document #>> '{basis_revision}' IS NOT NULL
     AND request_document #>> '{plugin_lock,plugin_id}' IS NOT NULL
-    AND response_document #>> '{plugin_lock,plugin_id}' IS NOT NULL
-    AND proposal_document #>> '{proposed_by,plugin_id}' IS NOT NULL
     AND request_document #>> '{operation_id}' IS NOT NULL
-    AND response_document #>> '{operation_id}' IS NOT NULL
-    AND proposal_document #>> '{proposed_by,operation_id}' IS NOT NULL
-    AND proposal_document #>> '{proposed_by,request_id}' IS NOT NULL
     AND request_document #>> '{operation_kind}' IS NOT NULL
-    AND response_document #>> '{operation_kind}' IS NOT NULL
     AND request_document #>> '{deterministic_context,context_id}' IS NOT NULL
-    AND response_document #>> '{deterministic_context_id}' IS NOT NULL
-    AND proposal_document #>> '{deterministic_context_id}' IS NOT NULL
     AND request_document #>> '{deterministic_context,context_digest}' IS NOT NULL
-    AND response_document #>> '{deterministic_context_digest}' IS NOT NULL
-    AND proposal_document #>> '{deterministic_context_digest}' IS NOT NULL
-    AND response_document #>> '{output,output_kind}' IS NOT NULL
     AND request_document #>> '{request_id}' = request_id::text
-    AND response_document #>> '{request_id}' = request_id::text
-    AND proposal_document #>> '{proposal_id}' = proposal_id::text
     AND request_document #>> '{readonly_world,world_id}' = world_id::text
     AND request_document #>> '{readonly_world,world_revision}'
       = basis_revision::text
     AND request_document #>> '{basis_revision}' = basis_revision::text
-    AND response_document #>> '{basis_revision}' = basis_revision::text
-    AND proposal_document #>> '{basis_revision}' = basis_revision::text
     AND request_document #>> '{plugin_lock,plugin_id}' = plugin_id
-    AND proposal_document #>> '{proposed_by,plugin_id}' = plugin_id
     AND request_document #>> '{operation_id}' = operation_id
-    AND response_document #>> '{operation_id}' = operation_id
-    AND proposal_document #>> '{proposed_by,operation_id}' = operation_id
-    AND proposal_document #>> '{proposed_by,request_id}' = request_id::text
+    AND request_document #>> '{operation_kind}' = operation_kind
     AND request_document #>> '{deterministic_context,context_id}'
-      = deterministic_context_id::text
-    AND response_document #>> '{deterministic_context_id}'
-      = deterministic_context_id::text
-    AND proposal_document #>> '{deterministic_context_id}'
       = deterministic_context_id::text
     AND request_document #>> '{deterministic_context,context_digest}'
       = deterministic_context_digest
-    AND response_document #>> '{deterministic_context_digest}'
-      = deterministic_context_digest
-    AND proposal_document #>> '{deterministic_context_digest}'
-      = deterministic_context_digest
-    AND request_document -> 'plugin_lock'
-      = response_document -> 'plugin_lock'
-    AND request_document #>> '{operation_kind}'
-      = response_document #>> '{operation_kind}'
-    AND response_document #>> '{output,output_kind}' = 'packet.proposal'
-    AND response_document #> '{output,proposal}' IS NOT NULL
-    AND response_document #> '{output,proposal}' = proposal_document
+  ),
+  CONSTRAINT rule_plugin_invocations_response_identity CHECK (
+    response_document IS NULL
+    OR (
+      response_document #>> '{request_id}' IS NOT NULL
+      AND response_document #>> '{basis_revision}' IS NOT NULL
+      AND response_document #>> '{plugin_lock,plugin_id}' IS NOT NULL
+      AND response_document #>> '{operation_id}' IS NOT NULL
+      AND response_document #>> '{operation_kind}' IS NOT NULL
+      AND response_document #>> '{deterministic_context_id}' IS NOT NULL
+      AND response_document #>> '{deterministic_context_digest}' IS NOT NULL
+      AND response_document -> 'plugin_lock' IS NOT NULL
+      AND response_document #>> '{request_id}' = request_id::text
+      AND response_document #>> '{basis_revision}' = basis_revision::text
+      AND response_document #>> '{plugin_lock,plugin_id}' = plugin_id
+      AND response_document #>> '{operation_id}' = operation_id
+      AND response_document #>> '{operation_kind}' = operation_kind
+      AND response_document #>> '{deterministic_context_id}'
+        = deterministic_context_id::text
+      AND response_document #>> '{deterministic_context_digest}'
+        = deterministic_context_digest
+      AND response_document -> 'plugin_lock'
+        = request_document -> 'plugin_lock'
+    )
+  ),
+  CONSTRAINT rule_plugin_invocations_proposal_identity CHECK (
+    proposal_document IS NULL
+    OR (
+      proposal_document #>> '{proposal_id}' IS NOT NULL
+      AND proposal_document #>> '{basis_revision}' IS NOT NULL
+      AND proposal_document #>> '{proposed_by,plugin_id}' IS NOT NULL
+      AND proposal_document #>> '{proposed_by,operation_id}' IS NOT NULL
+      AND proposal_document #>> '{proposed_by,request_id}' IS NOT NULL
+      AND proposal_document #>> '{deterministic_context_id}' IS NOT NULL
+      AND proposal_document #>> '{deterministic_context_digest}' IS NOT NULL
+      AND response_document #> '{output,proposal}' IS NOT NULL
+      AND proposal_document #>> '{proposal_id}' = proposal_id::text
+      AND proposal_document #>> '{basis_revision}' = basis_revision::text
+      AND proposal_document #>> '{proposed_by,plugin_id}' = plugin_id
+      AND proposal_document #>> '{proposed_by,operation_id}' = operation_id
+      AND proposal_document #>> '{proposed_by,request_id}' = request_id::text
+      AND proposal_document #>> '{deterministic_context_id}'
+        = deterministic_context_id::text
+      AND proposal_document #>> '{deterministic_context_digest}'
+        = deterministic_context_digest
+      AND response_document #> '{output,proposal}' = proposal_document
+    )
   )
 );
 
-CREATE INDEX rule_plugin_proposal_receipts_world_revision_index
-  ON luoxia_engine.rule_plugin_proposal_receipts (world_id, basis_revision);
+CREATE INDEX rule_plugin_invocations_world_revision_index
+  ON luoxia_engine.rule_plugin_invocations (world_id, basis_revision);
 
 CREATE TABLE luoxia_engine.daily_settlement_runs (
   run_id uuid PRIMARY KEY,

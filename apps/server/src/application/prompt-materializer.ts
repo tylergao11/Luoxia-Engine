@@ -9,7 +9,7 @@ import {
 import type {
   ContentRuntimeCatalog,
   WorldContentBinding,
-} from "@luoxia/world-core/composition";
+} from "@luoxia/world-core";
 
 export type DirectorMode =
   | "daily_settlement"
@@ -40,12 +40,12 @@ export interface MaterializedResidentContext {
 export interface PromptMaterializer {
   materializeDirector(input: {
     readonly contentBinding: WorldContentBinding;
-    readonly directorId: string;
     readonly mode: DirectorMode;
   }): MaterializedResidentContext;
 
   materializeCharacter(input: {
     readonly contentBinding: WorldContentBinding;
+    readonly runtimeWorldId: string;
     readonly entityId: string;
     readonly mode: CharacterMode;
   }): MaterializedResidentContext;
@@ -69,40 +69,16 @@ class DefaultPromptMaterializer implements PromptMaterializer {
 
   public materializeDirector(input: {
     readonly contentBinding: WorldContentBinding;
-    readonly directorId: string;
     readonly mode: DirectorMode;
   }): MaterializedResidentContext {
     const packId = input.contentBinding.packId;
     const bundleDigest = input.contentBinding.bundleDigest;
-    const worldDefinitionId = expectString(
-      input.contentBinding.worldDefinition,
-      "world_id",
-      "WorldDefinition",
+    const profile = input.contentBinding.directorProfile;
+    const directorProfileId = expectString(
+      profile,
+      "director_id",
+      "DirectorProfile",
     );
-
-    const profile = this.#catalog.findDirectorProfile({
-      bundle_id: packId,
-      bundle_digest: bundleDigest,
-      director_id: input.directorId,
-    });
-    if (profile === undefined) {
-      throw unresolved("director_profile", packId, bundleDigest, input.directorId);
-    }
-
-    const profileWorldId = expectString(profile, "world_id", "DirectorProfile");
-    if (profileWorldId !== worldDefinitionId) {
-      throw new EngineFault(
-        "prompt.materializer.director_world_mismatch",
-        "DirectorProfile.world_id must equal the WorldContentLock WorldDefinition.world_id",
-        {
-          director_id: input.directorId,
-          director_world_id: profileWorldId,
-          world_definition_id: worldDefinitionId,
-          pack_id: packId,
-          bundle_digest: bundleDigest,
-        },
-      );
-    }
 
     const coreIds = asStringArray(
       expectProperty(profile, "core_prompt_ids", "DirectorProfile"),
@@ -154,7 +130,7 @@ class DefaultPromptMaterializer implements PromptMaterializer {
     const resident_key = namespacedKey([
       packId,
       "director",
-      input.directorId,
+      directorProfileId,
       input.mode,
     ]);
 
@@ -162,7 +138,7 @@ class DefaultPromptMaterializer implements PromptMaterializer {
       context_kind: "director",
       resident_key,
       resident_digest,
-      director_id: input.directorId,
+      director_id: directorProfileId,
       common_blocks: commonRefs,
       event_context: eventContext.ref,
       mode: input.mode,
@@ -178,15 +154,17 @@ class DefaultPromptMaterializer implements PromptMaterializer {
 
   public materializeCharacter(input: {
     readonly contentBinding: WorldContentBinding;
+    readonly runtimeWorldId: string;
     readonly entityId: string;
     readonly mode: CharacterMode;
   }): MaterializedResidentContext {
     const packId = input.contentBinding.packId;
     const bundleDigest = input.contentBinding.bundleDigest;
 
-    const profile = this.#catalog.findCharacterMindByEntityId({
+    const profile = this.#catalog.findCharacterMindForRuntimeEntity({
       bundle_id: packId,
       bundle_digest: bundleDigest,
+      world_id: input.runtimeWorldId,
       entity_id: input.entityId,
     });
     if (profile === undefined) {

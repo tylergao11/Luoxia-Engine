@@ -9,6 +9,7 @@ import {
   createPacketStateTransition,
   createWorldCore,
   type ContentRuntimeCatalog,
+  type ContentRuntimeIdentityMapper,
   type DeterministicContextAuthority,
   type DeterministicContextDocument,
   type DeterministicContextIdFactory,
@@ -18,26 +19,42 @@ import {
 } from "@luoxia/world-core/composition";
 import type { Pool } from "pg";
 
+import { createNodeEngineSessionIdFactory } from "../adapters/crypto/engine-session-id-factory.js";
+import { createNodeRuleHoldRequestIdFactory } from "../adapters/crypto/rule-hold-request-id-factory.js";
+import { createNodeRuntimeWorldCreationIdFactory } from "../adapters/crypto/runtime-world-creation-id-factory.js";
+import {
+  createHmacSessionBasisTokenAuthority,
+  type SessionBasisHmacKeyring,
+} from "../adapters/crypto/session-basis-hmac-authority.js";
 import { createPostgresAtomicPacketStore } from "../adapters/postgres/atomic-packet-store.js";
+import { createPostgresCommandJournal } from "../adapters/postgres/command-journal.js";
+import { createPostgresEngineSessionRepository } from "../adapters/postgres/engine-session-repository.js";
 import {
   createPostgresRuntimeInvocationJournal,
   type PostgresRuntimeInvocationJournal,
 } from "../adapters/postgres/runtime-invocation-journal.js";
 import {
-  createPostgresRulePluginProposalReceiptStore,
-} from "../adapters/postgres/rule-plugin-proposal-receipt-store.js";
+  createPostgresRulePluginInvocationJournal,
+} from "../adapters/postgres/rule-plugin-invocation-journal.js";
 import {
   createPostgresRuntimeReaders,
   type PostgresRuntimeReaders,
 } from "../adapters/postgres/runtime-readers.js";
+import { createPostgresRuntimeWorldCreator } from "../adapters/postgres/runtime-world-creator.js";
+import { createSystemRuntimeWorldCreationClock } from "../adapters/system/runtime-world-creation-clock.js";
 import {
   createAuthoritativePacketBuilder,
   type AuthoritativePacketBuilder,
 } from "./authoritative-packet-builder.js";
+import type { CommandJournal } from "./command-journal.js";
 import {
   createDecimalAmountComparer,
   createLedgerPostArithmetic,
 } from "./decimal-ledger.js";
+import {
+  createEngineSessionService,
+  type EngineSessionService,
+} from "./engine-session.js";
 import { createModelInvocationAuthorizationChannel } from "./model-dispatch-authorization.js";
 import {
   ModelGateway,
@@ -52,6 +69,10 @@ import { createPromptMaterializer } from "./prompt-materializer.js";
 import { createRuleHoldEvaluator } from "./rule-hold-evaluator.js";
 import { createRuntimeWorldBindingResolver } from "./runtime-world-binding.js";
 import {
+  createRuntimeWorldCreationService,
+  type RuntimeWorldCreationService,
+} from "./runtime-world-creation.js";
+import {
   createRulePluginAbiRegistry,
   type RulePluginDependencyIdentity,
   type RulePluginModuleV1,
@@ -62,9 +83,13 @@ import type { VerifiedRulePluginInvocationReceipt } from "./rule-plugin-gateway.
 import type {
   CommittedEventReader,
   CommittedPacketReader,
-  RulePluginProposalReceiptStore,
+  RulePluginInvocationJournal,
   RuntimeWorldReader,
 } from "./runtime-persistence.js";
+import {
+  createRulePluginExecutor,
+  type RulePluginExecutor,
+} from "./rule-plugin-executor.js";
 import {
   createWorldMutationOrchestrator,
   type WorldMutationOrchestrator,
@@ -76,6 +101,12 @@ import {
  */
 export interface RuntimeExecutionKernelDependencies {
   readonly pool: Pool;
+  /**
+   * Dedicated pool for RulePlugin request journaling. It must target the same
+   * PostgreSQL database but must not be the world-transaction Pool object:
+   * rule.holds journals while the world row is locked.
+   */
+  readonly rulePluginJournalPool: Pool;
   readonly contracts: ContractValidator;
   readonly digest: JsonDigest;
   readonly modelProvider: ModelProvider;
@@ -87,12 +118,14 @@ export interface RuntimeExecutionKernelDependencies {
    */
   readonly requiredRulePluginDependencies: readonly RulePluginDependencyIdentity[];
   /**
-   * Content-derived operation requirements (WorldLaw.evaluator, navigation_resolver).
+   * Exhaustive content-derived operation requirements.
    * Validated against the sole ABI registry before Gateway construction.
    */
   readonly rulePluginOperationRequirements: readonly RulePluginOperationRequirement[];
   /** Locked ContentBundle index; also supplies StaticComponentDigestLookup. */
   readonly contentRuntimeCatalog: ContentRuntimeCatalog;
+  /** Sole RFC 9562 content-local identity mapper shared with the Catalog. */
+  readonly contentRuntimeIdentityMapper: ContentRuntimeIdentityMapper;
   /**
    * Server HMAC TokenCodec for DeterministicContext.issuer_token.
    * Built at composition root from an explicit keyring; no defaults.
@@ -100,6 +133,8 @@ export interface RuntimeExecutionKernelDependencies {
   readonly deterministicContextTokenCodec: DeterministicContextTokenCodec;
   /** Server-owned context_id factory; Authority is the only caller. */
   readonly deterministicContextIdFactory: DeterministicContextIdFactory;
+  /** Independent, explicit basis_token keyring; never reused for contexts. */
+  readonly sessionBasisHmacKeyring: SessionBasisHmacKeyring;
 }
 
 export type { RulePluginModuleV1 } from "./rule-plugin-abi.js";
@@ -136,6 +171,12 @@ export interface RuntimeExecutionKernel {
    * Does not implement orchestration itself.
    */
   readonly deterministicContexts: DeterministicContextIssuePort;
+  /** Engine Session lifecycle; login/account authentication remains external. */
+  readonly sessions: EngineSessionService;
+  /** Idempotent command intake and final-result recovery. */
+  readonly commands: CommandJournal;
+  /** Schema-closed revision-zero world bootstrap and atomic persistence. */
+  readonly worldCreation: RuntimeWorldCreationService;
   executeRulePlugin(
     candidate: unknown,
     modelInvocations: readonly VerifiedModelInvocationReceipt[],
@@ -145,6 +186,12 @@ export interface RuntimeExecutionKernel {
 export function createRuntimeExecutionKernel(
   dependencies: RuntimeExecutionKernelDependencies,
 ): RuntimeExecutionKernel {
+  if (dependencies.rulePluginJournalPool === dependencies.pool) {
+    throw new EngineFault(
+      "runtime.composition.rule_plugin_journal_pool_shared",
+      "RulePlugin Journal requires a dedicated Pool to avoid world-lock connection starvation",
+    );
+  }
   const channel = createModelInvocationAuthorizationChannel();
 
   const modelGateway = new ModelGateway(
@@ -171,6 +218,36 @@ export function createRuntimeExecutionKernel(
     digest: dependencies.digest,
     tokenCodec: dependencies.deterministicContextTokenCodec,
     contextIdFactory: dependencies.deterministicContextIdFactory,
+  });
+  const sessionBasisTokens = createHmacSessionBasisTokenAuthority({
+    contracts: dependencies.contracts,
+    digest: dependencies.digest,
+    keyring: dependencies.sessionBasisHmacKeyring,
+  });
+  const sessions = createEngineSessionService({
+    repository: createPostgresEngineSessionRepository({
+      pool: dependencies.pool,
+      contracts: dependencies.contracts,
+      idFactory: createNodeEngineSessionIdFactory(),
+    }),
+    basisTokens: sessionBasisTokens,
+  });
+  const commands = createPostgresCommandJournal({
+    pool: dependencies.pool,
+    contracts: dependencies.contracts,
+    digest: dependencies.digest,
+    basisTokens: sessionBasisTokens,
+  });
+  const worldCreation = createRuntimeWorldCreationService({
+    contracts: dependencies.contracts,
+    catalog: dependencies.contentRuntimeCatalog,
+    identityMapper: dependencies.contentRuntimeIdentityMapper,
+    idFactory: createNodeRuntimeWorldCreationIdFactory(),
+    clock: createSystemRuntimeWorldCreationClock(),
+    creator: createPostgresRuntimeWorldCreator({
+      pool: dependencies.pool,
+      contracts: dependencies.contracts,
+    }),
   });
 
   // Sole RulePlugin ABI instance for this kernel (activation does not create another).
@@ -213,12 +290,18 @@ export function createRuntimeExecutionKernel(
     deterministicContextAuthority,
   });
 
-  const proposalReceiptStore: RulePluginProposalReceiptStore =
-    createPostgresRulePluginProposalReceiptStore({
-      pool: dependencies.pool,
+  const rulePluginJournal: RulePluginInvocationJournal =
+    createPostgresRulePluginInvocationJournal({
+      pool: dependencies.rulePluginJournalPool,
       contracts: dependencies.contracts,
-      rulePluginProvenance: rulePluginGateway.provenance,
+      digest: dependencies.digest,
+      preparationProvenance: rulePluginGateway.preparationProvenance,
+      invocationProvenance: rulePluginGateway.provenance,
     });
+  const rulePluginExecutor: RulePluginExecutor = createRulePluginExecutor({
+    gateway: rulePluginGateway,
+    journal: rulePluginJournal,
+  });
 
   const postgresReaders: PostgresRuntimeReaders = createPostgresRuntimeReaders({
     pool: dependencies.pool,
@@ -231,7 +314,7 @@ export function createRuntimeExecutionKernel(
     packets: postgresReaders.committedPackets,
     proposalReceipts: Object.freeze({
       findByProposalId(proposalId: string): Promise<unknown | undefined> {
-        return proposalReceiptStore.findByProposalId(proposalId);
+        return rulePluginJournal.findByProposalId(proposalId);
       },
     }),
   });
@@ -251,7 +334,8 @@ export function createRuntimeExecutionKernel(
   const ruleHoldEvaluator = createRuleHoldEvaluator({
     catalog: dependencies.contentRuntimeCatalog,
     abi: rulePluginAbi,
-    rulePluginGateway,
+    rulePluginExecutor,
+    requestIdFactory: createNodeRuleHoldRequestIdFactory(),
   });
 
   const decimalComparer = createDecimalAmountComparer();
@@ -312,13 +396,15 @@ export function createRuntimeExecutionKernel(
     mutations,
     models,
     deterministicContexts,
+    sessions,
+    commands,
+    worldCreation,
     executeRulePlugin(
       candidate: unknown,
       modelInvocations: readonly VerifiedModelInvocationReceipt[],
     ): Promise<VerifiedRulePluginInvocationReceipt> {
       return executeRulePluginInvocation({
-        rulePluginGateway,
-        proposalReceiptStore,
+        rulePluginExecutor,
         candidate,
         modelInvocations,
       });
@@ -328,15 +414,12 @@ export function createRuntimeExecutionKernel(
 }
 
 async function executeRulePluginInvocation(input: {
-  readonly rulePluginGateway: ReturnType<typeof createRulePluginGateway>;
-  readonly proposalReceiptStore: RulePluginProposalReceiptStore;
+  readonly rulePluginExecutor: RulePluginExecutor;
   readonly candidate: unknown;
   readonly modelInvocations: readonly VerifiedModelInvocationReceipt[];
 }): Promise<VerifiedRulePluginInvocationReceipt> {
-  const receipt = await input.rulePluginGateway.resolve(
+  return input.rulePluginExecutor.execute(
     input.candidate,
     input.modelInvocations,
   );
-  await input.proposalReceiptStore.persistPacketProposal(receipt);
-  return receipt;
 }

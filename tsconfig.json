@@ -9,9 +9,6 @@
     },
     {
       "path": "apps/server"
-    },
-    {
-      "path": "apps/gdjs-host"
     }
   ]
 }

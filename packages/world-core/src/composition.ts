@@ -107,14 +107,26 @@ export {
 export {
   createContentRuntimeCatalog,
   type BundleLockRef,
+  type ContentRulePluginOperationBinding,
+  type ContentRulePluginOperationKind,
   type ContentRuntimeCatalog,
   type ContentRuntimeCatalogDependencies,
   type RuleEvaluationBinding,
   type RuleRefLike,
   type StaticDefinitionRefLike,
   type WorldContentBinding,
+  type WorldInitializationContent,
   type WorldContentLockDocument,
 } from "./content-runtime-catalog.js";
+
+export {
+  CONTENT_RUNTIME_IDENTITY_KINDS,
+  type ContentRuntimeIdentityInput,
+  type ContentRuntimeIdentityKind,
+  type ContentRuntimeIdentityMapper,
+} from "./content-runtime-identity.js";
+
+export { materializeContentFieldValues } from "./content-field-values.js";
 
 export {
   createDeterministicContextAuthority,
