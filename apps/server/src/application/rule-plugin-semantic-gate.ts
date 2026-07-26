@@ -310,6 +310,11 @@ function handleDefinitionValidate(context: OperationContext): void {
         expectProperty(modelProposal, "draft", "DynamicDefinitionProposal"),
         "DynamicDefinitionProposal.draft",
       );
+      const modelProposalId = expectString(
+        modelProposal,
+        "proposal_id",
+        "DynamicDefinitionProposal",
+      );
       assertEqual(
         "definition_id",
         definitionId,
@@ -342,6 +347,14 @@ function handleDefinitionValidate(context: OperationContext): void {
           context.operationKind,
         );
       }
+      assertModelProposalProvenance(
+        context,
+        expectJsonObject(
+          expectProperty(op, "provenance", "DefinitionRegisterOp"),
+          "DefinitionRegisterOp.provenance",
+        ),
+        modelProposalId,
+      );
       assertModelProofRevisionCompatible(context, context.input, "model_proof");
       return;
     }
@@ -416,6 +429,31 @@ function handleGoalPlanValidate(context: OperationContext): void {
         expectString(goalPlan, "world_id", "GoalPlan"),
         context.operationKind,
       );
+      assertEqual(
+        "goal_plan.expected_revision",
+        0,
+        expectInteger(op, "expected_revision", "GoalPlanUpsertOp"),
+        context.operationKind,
+      );
+      assertEqual(
+        "goal_plan.revision",
+        1,
+        expectInteger(goalPlan, "revision", "GoalPlan"),
+        context.operationKind,
+      );
+      assertEqual(
+        "goal_plan.status",
+        "active",
+        expectString(goalPlan, "status", "GoalPlan"),
+        context.operationKind,
+      );
+      if (goalPlan.failure_code !== undefined) {
+        throw fault(
+          "rule_plugin.semantic.goal_plan_initial_failure_forbidden",
+          "A newly validated active GoalPlan must not carry failure_code",
+          { operation_kind: context.operationKind, plan_id: planId },
+        );
+      }
 
       const draftDigest = context.digest.sha256(draft);
       assertEqual(
@@ -441,12 +479,113 @@ function handleGoalPlanValidate(context: OperationContext): void {
       }
 
       assertGoalPlanNodesFromDraft(context, draft, goalPlan);
+      assertModelProposalProvenance(
+        context,
+        expectJsonObject(
+          expectProperty(goalPlan, "provenance", "GoalPlan"),
+          "GoalPlan.provenance",
+        ),
+        proposalId,
+        ownerActorId,
+      );
       assertModelProofRevisionCompatible(context, context.input, "model_proof");
       return;
     }
     default:
       throw unexpectedOutput(context);
   }
+}
+
+function assertModelProposalProvenance(
+  context: OperationContext,
+  provenance: JsonObject,
+  proposalId: string,
+  actorId?: string,
+): void {
+  const createdAt = requireSystemProvenanceCreatedAt(context);
+  if (
+    expectString(provenance, "origin_kind", "Provenance") !==
+      "model_proposal" ||
+    expectString(provenance, "origin_id", "Provenance") !== proposalId ||
+    expectString(provenance, "created_at", "Provenance") !== createdAt ||
+    (actorId === undefined
+      ? provenance.actor_id !== undefined
+      : expectString(provenance, "actor_id", "Provenance") !== actorId) ||
+    provenance.parent_event_ids !== undefined
+  ) {
+    throw fault(
+      "rule_plugin.semantic.model_provenance_mismatch",
+      "Validated model proposal provenance must use its proposal identity and Journal-owned stable timestamp",
+      {
+        operation_kind: context.operationKind,
+        proposal_id: proposalId,
+        expected_actor_id: actorId ?? "",
+        expected_created_at: createdAt,
+      },
+    );
+  }
+}
+
+function requireSystemProvenanceCreatedAt(
+  context: OperationContext,
+): string {
+  const deterministicContext = expectJsonObject(
+    expectProperty(
+      context.request.value,
+      "deterministic_context",
+      "RulePluginRequest",
+    ),
+    "RulePluginRequest.deterministic_context",
+  );
+  const matches = asObjectArray(
+    expectProperty(
+      deterministicContext,
+      "external_results",
+      "DeterministicContext",
+    ),
+    "DeterministicContext.external_results",
+  ).filter(
+    (result) =>
+      expectString(
+        result,
+        "result_id",
+        "DeterministicExternalResult",
+      ) === "system_provenance_created_at",
+  );
+  if (matches.length !== 1) {
+    throw fault(
+      "rule_plugin.semantic.system_provenance_result_count",
+      "Definition and GoalPlan validation require exactly one Journal-owned provenance timestamp result",
+      {
+        operation_kind: context.operationKind,
+        result_count: matches.length,
+      },
+    );
+  }
+  const result = matches[0] as JsonObject;
+  const payload = expectProperty(
+    result,
+    "payload",
+    "DeterministicExternalResult",
+  );
+  if (typeof payload !== "string") {
+    throw fault(
+      "rule_plugin.semantic.system_provenance_payload_invalid",
+      "Journal-owned provenance timestamp payload must be a string",
+      { operation_kind: context.operationKind },
+    );
+  }
+  assertEqual(
+    "system_provenance_created_at.content_digest",
+    context.digest.sha256(payload),
+    expectString(
+      result,
+      "content_digest",
+      "DeterministicExternalResult",
+    ),
+    context.operationKind,
+  );
+  return payload;
 }
 
 function assertGoalPlanNodesFromDraft(
@@ -475,6 +614,7 @@ function assertGoalPlanNodesFromDraft(
   }
 
   const planById = new Map<string, JsonObject>();
+  const extensionRequestIds = new Set<string>();
   for (const node of planNodes) {
     const nodeId = expectString(node, "node_id", "GoalNode");
     if (planById.has(nodeId)) {
@@ -571,6 +711,22 @@ function assertGoalPlanNodesFromDraft(
         expectString(extension, "demand_id", "WorldExtensionRequest"),
         context.operationKind,
       );
+      const extensionRequestId = expectString(
+        extension,
+        "request_id",
+        "WorldExtensionRequest",
+      );
+      if (extensionRequestIds.has(extensionRequestId)) {
+        throw fault(
+          "rule_plugin.semantic.goal_plan_extension_request_duplicate",
+          `Duplicate WorldExtensionRequest request_id ${extensionRequestId}`,
+          {
+            operation_kind: context.operationKind,
+            request_id: extensionRequestId,
+          },
+        );
+      }
+      extensionRequestIds.add(extensionRequestId);
     } else if (planNode.world_extension !== undefined) {
       throw fault(
         "rule_plugin.semantic.goal_plan_extension_forbidden",
@@ -1575,7 +1731,12 @@ function handleEventCardPublish(context: OperationContext): void {
         sealed,
         expectInteger(cardProposal, "day", "EventCardProposal"),
       );
-      assertDialogueQuotesExist(context, sealed);
+      assertDialogueQuotesVisible(
+        context,
+        cardProposal,
+        control,
+        sealed,
+      );
       assertControlExists(context, context.input);
       assertEventBudgetSufficient(
         context,
@@ -1843,10 +2004,59 @@ function assertCommitmentRefResolves(
   }
 }
 
-function assertDialogueQuotesExist(
+function assertDialogueQuotesVisible(
   context: OperationContext,
+  cardProposal: JsonObject,
+  control: JsonObject,
   sealed: JsonObject,
 ): void {
+  const controlBindingId = expectString(
+    control,
+    "binding_id",
+    "ControlBindingRef",
+  );
+  const binding = findControlBinding(context.world, controlBindingId);
+  if (
+    binding === undefined ||
+    expectString(binding, "binding_kind", "ControlBinding") !== "human" ||
+    expectString(binding, "status", "ControlBinding") !== "active"
+  ) {
+    throw fault(
+      "rule_plugin.semantic.event_card_human_control_required",
+      "EventCard presentation requires one active human ControlBinding",
+      {
+        operation_kind: context.operationKind,
+        binding_id: controlBindingId,
+      },
+    );
+  }
+  const playerEntityId = expectString(
+    binding,
+    "entity_id",
+    "ControlBinding",
+  );
+  const sourceDialogueId = expectString(
+    cardProposal,
+    "source_dialogue_id",
+    "EventCardProposal",
+  );
+  const sourceDialogue = findDialogue(context.world, sourceDialogueId);
+  if (
+    sourceDialogue === undefined ||
+    !dialogueContainsEntity(sourceDialogue, playerEntityId)
+  ) {
+    throw fault(
+      "rule_plugin.semantic.event_card_source_dialogue_not_visible",
+      "EventCard source dialogue must be visible to its human control",
+      {
+        operation_kind: context.operationKind,
+        dialogue_id: sourceDialogueId,
+        binding_id: controlBindingId,
+        player_entity_id: playerEntityId,
+      },
+    );
+  }
+
   const presentation = expectJsonObject(
     expectProperty(sealed, "presentation", "SealedEventResult"),
     "SealedEventResult.presentation",
@@ -1868,6 +2078,19 @@ function assertDialogueQuotesExist(
         "rule_plugin.semantic.dialogue_quote_missing",
         `dialogue_quote references missing dialogue ${dialogueId}`,
         { operation_kind: context.operationKind, dialogue_id: dialogueId },
+      );
+    }
+    if (!dialogueContainsEntity(dialogue, playerEntityId)) {
+      throw fault(
+        "rule_plugin.semantic.dialogue_quote_not_visible",
+        `dialogue_quote references dialogue ${dialogueId} outside the EventCard control view`,
+        {
+          operation_kind: context.operationKind,
+          dialogue_id: dialogueId,
+          turn_id: turnId,
+          binding_id: controlBindingId,
+          player_entity_id: playerEntityId,
+        },
       );
     }
     const turns = asObjectArray(
@@ -2898,6 +3121,41 @@ function assertDialogueSpeakerIsParticipant(
       },
     );
   }
+}
+
+function dialogueContainsEntity(
+  dialogue: JsonObject,
+  entityId: string,
+): boolean {
+  return asObjectArray(
+    expectProperty(
+      dialogue,
+      "participants",
+      "DialogueRecord",
+    ),
+    "DialogueRecord.participants",
+  ).some((participant) => {
+    if (
+      expectString(
+        participant,
+        "participant_kind",
+        "DialogueParticipantRef",
+      ) !== "entity"
+    ) {
+      return false;
+    }
+    const entity = expectJsonObject(
+      expectProperty(
+        participant,
+        "entity",
+        "DialogueParticipantRef",
+      ),
+      "DialogueParticipantRef.entity",
+    );
+    return (
+      expectString(entity, "entity_id", "EntityRef") === entityId
+    );
+  });
 }
 
 function assertActiveCharacterMindSpeaker(

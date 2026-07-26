@@ -22,6 +22,7 @@ interface StoredCommandBase {
   readonly envelope: ClientEnvelopeDocument;
   readonly message: JsonObject;
   readonly dialogueExecution?: DialogueCommandExecutionIdentity;
+  readonly eventCardExecution?: EventCardCommandExecutionIdentity;
 }
 
 /**
@@ -36,6 +37,15 @@ export interface DialogueCommandExecutionIdentity {
   readonly characterModelRequestId: string;
   readonly characterTurnId: string;
   readonly characterRuleRequestId: string;
+}
+
+/**
+ * Server-owned globally unique packet identity for the single authoritative
+ * EventCard click packet. Client command_id is scoped to a Session and cannot
+ * satisfy the global ContentPacket packet_id uniqueness contract.
+ */
+export interface EventCardCommandExecutionIdentity {
+  readonly packetId: string;
 }
 
 export interface CommandExecutionIdFactory {

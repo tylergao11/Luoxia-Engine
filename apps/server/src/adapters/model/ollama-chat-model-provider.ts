@@ -163,10 +163,7 @@ class OllamaChatModelProvider implements ModelProvider {
         },
         body: JSON.stringify({
           model: this.#model,
-          messages: buildOllamaMessages(
-            resolved,
-            this.#outputSchema,
-          ),
+          messages: buildOllamaMessages(resolved),
           stream: false,
           think: false,
           format: this.#outputSchema,
@@ -261,7 +258,6 @@ class OllamaChatModelProvider implements ModelProvider {
 
 function buildOllamaMessages(
   resolved: ResolvedModelInvocation,
-  outputSchema: JsonObject,
 ): readonly JsonObject[] {
   const messages: JsonObject[] = resolved.prompt_blocks.map(
     (block) =>
@@ -276,7 +272,7 @@ function buildOllamaMessages(
       content:
         "Return exactly one JSON object for the requested Luoxia ModelOutput. " +
         "Set output_kind to the ModelRequest request_kind. Do not add Markdown, prose, or wrapper fields. " +
-        `The exact required JSON Schema is ${JSON.stringify(outputSchema)}.`,
+        "The native structured-output grammar supplied with this request is authoritative.",
     }),
   );
   messages.push(

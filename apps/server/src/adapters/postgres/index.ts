@@ -15,6 +15,10 @@ export {
   type PostgresDayCycleExecutionIdentityDependencies,
 } from "./day-cycle-execution-identity.js";
 export {
+  createPostgresDialogueDirectorRunJournal,
+  type PostgresDialogueDirectorRunJournalDependencies,
+} from "./dialogue-director-run.js";
+export {
   createPostgresEngineSessionRepository,
   type PostgresEngineSessionRepositoryDependencies,
 } from "./engine-session-repository.js";

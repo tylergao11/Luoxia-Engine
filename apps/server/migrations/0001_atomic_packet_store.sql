@@ -95,6 +95,7 @@ CREATE TABLE luoxia_engine.command_journal (
   character_model_request_id uuid,
   character_turn_id uuid,
   character_rule_request_id uuid,
+  event_card_packet_id uuid,
   command_status text NOT NULL,
   result_document jsonb,
   received_at timestamptz NOT NULL,
@@ -108,6 +109,8 @@ CREATE TABLE luoxia_engine.command_journal (
   CONSTRAINT command_journal_character_turn_id_unique UNIQUE (character_turn_id),
   CONSTRAINT command_journal_character_rule_request_id_unique
     UNIQUE (character_rule_request_id),
+  CONSTRAINT command_journal_event_card_packet_id_unique
+    UNIQUE (event_card_packet_id),
   CONSTRAINT command_journal_request_digest_sha256 CHECK (
     request_digest ~ '^[0-9a-f]{64}$'
   ),
@@ -191,6 +194,16 @@ CREATE TABLE luoxia_engine.command_journal (
       AND character_rule_request_id IS NULL
     )
   ),
+  CONSTRAINT command_journal_event_card_identity_shape CHECK (
+    (
+      command_kind = 'event_card.trigger'
+      AND event_card_packet_id IS NOT NULL
+    )
+    OR (
+      command_kind <> 'event_card.trigger'
+      AND event_card_packet_id IS NULL
+    )
+  ),
   CONSTRAINT command_journal_result_identity CHECK (
     result_document IS NULL
     OR (
@@ -236,6 +249,88 @@ CREATE TABLE luoxia_engine.command_server_envelopes (
     AND envelope_document #>> '{session_id}' = session_id::text
     AND envelope_document #>> '{sequence}' = server_sequence::text
     AND envelope_document #>> '{message,type}' = message_type
+  )
+);
+
+CREATE TABLE luoxia_engine.dialogue_director_runs (
+  session_id uuid NOT NULL,
+  command_id uuid NOT NULL,
+  world_id uuid NOT NULL REFERENCES luoxia_engine.worlds(world_id),
+  dialogue_id uuid NOT NULL,
+  request_kind text NOT NULL,
+  model_request_id uuid NOT NULL,
+  response_turn_id uuid,
+  response_rule_request_id uuid,
+  prepared_at timestamptz NOT NULL,
+  PRIMARY KEY (session_id, command_id),
+  CONSTRAINT dialogue_director_runs_command_foreign_key
+    FOREIGN KEY (session_id, command_id)
+    REFERENCES luoxia_engine.command_journal (session_id, command_id),
+  CONSTRAINT dialogue_director_runs_model_request_id_unique
+    UNIQUE (model_request_id),
+  CONSTRAINT dialogue_director_runs_response_turn_id_unique
+    UNIQUE (response_turn_id),
+  CONSTRAINT dialogue_director_runs_response_rule_request_id_unique
+    UNIQUE (response_rule_request_id),
+  CONSTRAINT dialogue_director_runs_request_kind_closed CHECK (
+    request_kind IN (
+      'director.dialogue_events',
+      'director.system_dialogue'
+    )
+  ),
+  CONSTRAINT dialogue_director_runs_response_identity_shape CHECK (
+    (
+      request_kind = 'director.dialogue_events'
+      AND response_turn_id IS NULL
+      AND response_rule_request_id IS NULL
+    )
+    OR (
+      request_kind = 'director.system_dialogue'
+      AND response_turn_id IS NOT NULL
+      AND response_rule_request_id IS NOT NULL
+      AND model_request_id <> response_turn_id
+      AND model_request_id <> response_rule_request_id
+      AND response_turn_id <> response_rule_request_id
+    )
+  )
+);
+
+CREATE TABLE luoxia_engine.dialogue_director_proposal_runs (
+  session_id uuid NOT NULL,
+  command_id uuid NOT NULL,
+  proposal_kind text NOT NULL,
+  proposal_id uuid NOT NULL,
+  proposal_ordinal integer NOT NULL,
+  world_record_id uuid,
+  rule_request_id uuid NOT NULL,
+  prepared_at timestamptz NOT NULL,
+  PRIMARY KEY (session_id, command_id, proposal_kind, proposal_id),
+  CONSTRAINT dialogue_director_proposal_runs_run_foreign_key
+    FOREIGN KEY (session_id, command_id)
+    REFERENCES luoxia_engine.dialogue_director_runs (session_id, command_id),
+  CONSTRAINT dialogue_director_proposal_runs_proposal_id_unique
+    UNIQUE (session_id, command_id, proposal_id),
+  CONSTRAINT dialogue_director_proposal_runs_ordinal_unique
+    UNIQUE (session_id, command_id, proposal_kind, proposal_ordinal),
+  CONSTRAINT dialogue_director_proposal_runs_world_record_id_unique
+    UNIQUE (world_record_id),
+  CONSTRAINT dialogue_director_proposal_runs_request_id_unique
+    UNIQUE (rule_request_id),
+  CONSTRAINT dialogue_director_proposal_runs_kind_closed CHECK (
+    proposal_kind IN ('definition', 'goal_plan', 'event_card')
+  ),
+  CONSTRAINT dialogue_director_proposal_runs_world_record_shape CHECK (
+    (
+      proposal_kind IN ('definition', 'goal_plan')
+      AND world_record_id IS NOT NULL
+    )
+    OR (
+      proposal_kind = 'event_card'
+      AND world_record_id IS NULL
+    )
+  ),
+  CONSTRAINT dialogue_director_proposal_runs_ordinal_safe CHECK (
+    proposal_ordinal >= 0
   )
 );
 

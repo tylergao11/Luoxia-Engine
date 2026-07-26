@@ -18,6 +18,7 @@ import type { Pool, PoolClient } from "pg";
 
 import type {
   CommandFinalizer,
+  EventCardCompletionBranch,
   ServerEnvelopeDocument,
   ServerEnvelopeIdFactory,
 } from "../../application/command-finalizer.js";
@@ -60,8 +61,15 @@ interface FinalizationCommandRow {
   readonly accepted_world_revision_text: string;
   readonly accepted_nonce: string;
   readonly dialogue_id: string | null;
+  readonly human_turn_id: string | null;
+  readonly character_model_request_id: string | null;
   readonly character_turn_id: string | null;
+  readonly director_request_kind: string | null;
+  readonly director_model_request_id: string | null;
+  readonly director_response_turn_id: string | null;
   readonly player_day_from_day_text: string | null;
+  readonly event_card_packet_id: string | null;
+  readonly event_card_committed_event_document: unknown | null;
   readonly command_status: string;
   readonly result_document: unknown | null;
 }
@@ -72,12 +80,23 @@ interface ValidatedFinalizationCommand {
   readonly commandKind:
     | "dialogue.start"
     | "dialogue.continue"
-    | "player_day.end";
+    | "player_day.end"
+    | "event_card.trigger";
   readonly requestMessageId: string;
   readonly acceptedSession: EngineSessionRecord;
   readonly dialogueId: string | undefined;
+  readonly humanTurnId: string | undefined;
   readonly characterTurnId: string | undefined;
+  readonly dialogueResponseKind:
+    | "character_mind"
+    | "director_system"
+    | undefined;
+  readonly responseTurnId: string | undefined;
+  readonly responseModelRequestId: string | undefined;
   readonly playerDayFromDay: number | undefined;
+  readonly eventCardId: string | undefined;
+  readonly eventCardPacketId: string | undefined;
+  readonly eventCardBranch: EventCardCompletionBranch | undefined;
   readonly status: "received" | "completed";
   readonly result: JsonObject | undefined;
 }
@@ -88,6 +107,22 @@ interface ServerEnvelopeRow {
   readonly message_id: string;
   readonly message_type: string;
   readonly envelope_document: unknown;
+}
+
+interface CommittedEventHistoryRow {
+  readonly revision_after_text: string;
+  readonly event_document: unknown;
+}
+
+interface DialogueProposalHistoryRow {
+  readonly proposal_kind: string;
+  readonly model_proposal_id: string;
+  readonly proposal_ordinal: number;
+  readonly world_record_id: string | null;
+  readonly rule_request_id: string;
+  readonly operation_kind: string | null;
+  readonly invocation_status: string | null;
+  readonly packet_proposal_id: string | null;
 }
 
 export function createPostgresCommandFinalizer(
@@ -160,16 +195,17 @@ class PostgresCommandFinalizer
     readonly sessionId: string;
     readonly commandId: string;
     readonly finalWorldRevision: number;
-    readonly characterTurnId: string;
+    readonly responseTurnId: string;
   }): Promise<readonly ServerEnvelopeDocument[]> {
     return this.#completeAccepted({
       sessionId: input.sessionId,
       commandId: input.commandId,
       finalWorldRevision: input.finalWorldRevision,
-      characterTurnId: assertUuid(
+      responseTurnId: assertUuid(
         this.#contracts,
-        input.characterTurnId,
+        input.responseTurnId,
       ),
+      eventCard: undefined,
     });
   }
 
@@ -182,7 +218,27 @@ class PostgresCommandFinalizer
       sessionId: input.sessionId,
       commandId: input.commandId,
       finalWorldRevision: input.finalWorldRevision,
-      characterTurnId: undefined,
+      responseTurnId: undefined,
+      eventCard: undefined,
+    });
+  }
+
+  public async completeEventCardAccepted(input: {
+    readonly sessionId: string;
+    readonly commandId: string;
+    readonly finalWorldRevision: number;
+    readonly eventCardId: string;
+    readonly branch: EventCardCompletionBranch;
+  }): Promise<readonly ServerEnvelopeDocument[]> {
+    return this.#completeAccepted({
+      sessionId: input.sessionId,
+      commandId: input.commandId,
+      finalWorldRevision: input.finalWorldRevision,
+      responseTurnId: undefined,
+      eventCard: Object.freeze({
+        eventCardId: assertUuid(this.#contracts, input.eventCardId),
+        branch: input.branch,
+      }),
     });
   }
 
@@ -190,7 +246,13 @@ class PostgresCommandFinalizer
     readonly sessionId: string;
     readonly commandId: string;
     readonly finalWorldRevision: number;
-    readonly characterTurnId: string | undefined;
+    readonly responseTurnId: string | undefined;
+    readonly eventCard:
+      | {
+          readonly eventCardId: string;
+          readonly branch: EventCardCompletionBranch;
+        }
+      | undefined;
   }): Promise<readonly ServerEnvelopeDocument[]> {
     const sessionId = assertUuid(this.#contracts, input.sessionId);
     const commandId = assertUuid(this.#contracts, input.commandId);
@@ -220,7 +282,8 @@ class PostgresCommandFinalizer
           assertAcceptedCompletionIdentity(
             first,
             input.finalWorldRevision,
-            input.characterTurnId,
+            input.responseTurnId,
+            input.eventCard,
           );
           if (first.status === "completed") {
             return readCompletedEnvelopes(
@@ -247,7 +310,8 @@ class PostgresCommandFinalizer
           assertAcceptedCompletionIdentity(
             command,
             input.finalWorldRevision,
-            input.characterTurnId,
+            input.responseTurnId,
+            input.eventCard,
           );
           if (command.status === "completed") {
             return readCompletedEnvelopes(
@@ -262,8 +326,27 @@ class PostgresCommandFinalizer
             sessionContext,
             input.finalWorldRevision,
           );
+          if (
+            command.commandKind === "dialogue.start" ||
+            command.commandKind === "dialogue.continue"
+          ) {
+            await assertDialogueCompletionHistory({
+              client,
+              contracts: this.#contracts,
+              command,
+              finalWorldRevision: input.finalWorldRevision,
+              responseTurnId: requireDialogueResponseTurnId(command),
+            });
+          }
           if (command.commandKind === "player_day.end") {
             assertPlayerDayCompletion(command, sessionContext.worldState);
+          }
+          if (command.commandKind === "event_card.trigger") {
+            assertEventCardCompletion(
+              command,
+              sessionContext.worldState,
+              requireEventCardCompletion(input.eventCard),
+            );
           }
 
           if (
@@ -298,24 +381,15 @@ class PostgresCommandFinalizer
               view_revision: nextSession.viewRevision,
             },
           );
-          const commonMessages = [
-            Object.freeze({
-              type: "session.view",
-              view: view.value,
-            }),
-            result.value,
-          ];
-          const messages =
-            command.commandKind === "player_day.end"
-              ? commonMessages
-              : [
-                  extractDialogueReply(
-                    view,
-                    requireDialogueId(command),
-                    requireCharacterTurnId(command),
-                  ),
-                  ...commonMessages,
-                ];
+          const messages = createAcceptedMessages({
+            contracts: this.#contracts,
+            idFactory: this.#idFactory,
+            command,
+            eventCard: input.eventCard,
+            view,
+            worldState: sessionContext.worldState,
+            result: result.value,
+          });
           const envelopes = createServerEnvelopes({
             contracts: this.#contracts,
             idFactory: this.#idFactory,
@@ -472,10 +546,217 @@ function projectSessionView(input: {
   });
 }
 
+function createAcceptedMessages(input: {
+  readonly contracts: ContractValidator;
+  readonly idFactory: ServerEnvelopeIdFactory;
+  readonly command: ValidatedFinalizationCommand;
+  readonly eventCard:
+    | {
+        readonly eventCardId: string;
+        readonly branch: EventCardCompletionBranch;
+      }
+    | undefined;
+  readonly view: SessionViewDocument;
+  readonly worldState: JsonObject;
+  readonly result: JsonObject;
+}): readonly JsonObject[] {
+  const viewMessage = Object.freeze({
+    type: "session.view",
+    view: input.view.value,
+  });
+  if (
+    input.command.commandKind === "dialogue.start" ||
+    input.command.commandKind === "dialogue.continue"
+  ) {
+    return Object.freeze([
+      extractDialogueReply(
+        input.view,
+        requireDialogueId(input.command),
+        requireDialogueResponseTurnId(input.command),
+      ),
+      viewMessage,
+      input.result,
+    ]);
+  }
+  if (input.command.commandKind === "player_day.end") {
+    return Object.freeze([viewMessage, input.result]);
+  }
+
+  const completion = requireEventCardCompletion(input.eventCard);
+  if (completion.branch === "invalidate") {
+    return Object.freeze([viewMessage, input.result]);
+  }
+  const presentation = createEventCardPresentationFrame({
+    contracts: input.contracts,
+    idFactory: input.idFactory,
+    view: input.view,
+    worldState: input.worldState,
+    eventCardId: completion.eventCardId,
+  });
+  return Object.freeze([viewMessage, presentation, input.result]);
+}
+
+function createEventCardPresentationFrame(input: {
+  readonly contracts: ContractValidator;
+  readonly idFactory: ServerEnvelopeIdFactory;
+  readonly view: SessionViewDocument;
+  readonly worldState: JsonObject;
+  readonly eventCardId: string;
+}): JsonObject {
+  const card = requireEventCard(input.worldState, input.eventCardId);
+  const sealed = expectJsonObject(
+    expectProperty(card, "sealed_result", "EventCardState"),
+    "EventCardState.sealed_result",
+  );
+  const presentation = expectJsonObject(
+    expectProperty(
+      sealed,
+      "presentation",
+      "SealedEventResult",
+    ),
+    "SealedEventResult.presentation",
+  );
+  const segments = asObjectArray(
+    expectProperty(
+      presentation,
+      "segments",
+      "EventResultPresentation",
+    ),
+    "EventResultPresentation.segments",
+  ).map((segment) =>
+    projectNarrativeSegment(input.view, segment),
+  );
+
+  return Object.freeze({
+    type: "presentation.frame",
+    frame_id: createCanonicalServerOwnedId(
+      input.contracts,
+      input.idFactory,
+      "presentation_frame_id",
+    ),
+    view_revision: expectInteger(
+      input.view.value,
+      "view_revision",
+      "SessionView",
+    ),
+    operations: Object.freeze([
+      Object.freeze({
+        op: "narrative.show",
+        event_card_id: input.eventCardId,
+        presentation: Object.freeze({
+          presentation_id: expectString(
+            presentation,
+            "presentation_id",
+            "EventResultPresentation",
+          ),
+          segments: Object.freeze(segments),
+        }),
+      }),
+    ]),
+  });
+}
+
+function projectNarrativeSegment(
+  view: SessionViewDocument,
+  segment: JsonObject,
+): JsonObject {
+  const kind = expectString(
+    segment,
+    "segment_kind",
+    "NarrativeSegment",
+  );
+  if (kind !== "dialogue_quote") {
+    if (kind !== "narration" && kind !== "system" && kind !== "notice") {
+      throw new EngineFault(
+        "event_card.finalizer.presentation_segment_kind_invalid",
+        "Sealed EventCard presentation contains an unsupported segment kind",
+        { segment_kind: kind },
+      );
+    }
+    return Object.freeze({
+      segment_kind: kind,
+      text: cloneJson(
+        expectProperty(segment, "text", "GeneratedNarrativeSegment"),
+      ),
+    });
+  }
+
+  const dialogueId = expectString(
+    segment,
+    "dialogue_id",
+    "DialogueTurnQuoteSegment",
+  );
+  const turnId = expectString(
+    segment,
+    "turn_id",
+    "DialogueTurnQuoteSegment",
+  );
+  const dialogues = asObjectArray(
+    expectProperty(view.value, "dialogues", "SessionView"),
+    "SessionView.dialogues",
+  ).filter(
+    (dialogue) =>
+      expectString(dialogue, "dialogue_id", "DialogueView") ===
+      dialogueId,
+  );
+  if (dialogues.length !== 1) {
+    throw new EngineFault(
+      "event_card.finalizer.dialogue_quote_not_visible",
+      "EventCard presentation may quote only a dialogue visible in the final SessionView",
+      {
+        dialogue_id: dialogueId,
+        turn_id: turnId,
+        matches: dialogues.length,
+      },
+    );
+  }
+  const turns = asObjectArray(
+    expectProperty(
+      dialogues[0] as JsonObject,
+      "turns",
+      "DialogueView",
+    ),
+    "DialogueView.turns",
+  ).filter(
+    (turn) =>
+      expectString(turn, "turn_id", "DialogueTurnView") === turnId,
+  );
+  if (turns.length !== 1) {
+    throw new EngineFault(
+      "event_card.finalizer.dialogue_quote_turn_not_visible",
+      "EventCard presentation quote must resolve to one visible DialogueTurn",
+      {
+        dialogue_id: dialogueId,
+        turn_id: turnId,
+        matches: turns.length,
+      },
+    );
+  }
+  const turn = turns[0] as JsonObject;
+  const quote: Record<string, JsonValue> = {
+    segment_kind: "dialogue_quote",
+    dialogue_id: dialogueId,
+    turn_id: turnId,
+    speaker: cloneJson(
+      expectProperty(turn, "speaker", "DialogueTurnView"),
+    ),
+    locale: expectString(turn, "locale", "DialogueTurnView"),
+    text: expectString(turn, "text", "DialogueTurnView"),
+  };
+  if (turn.emotion_id !== undefined) {
+    quote.emotion_id = expectString(
+      turn,
+      "emotion_id",
+      "DialogueTurnView",
+    );
+  }
+  return Object.freeze(quote);
+}
+
 function extractDialogueReply(
   view: SessionViewDocument,
   dialogueId: string,
-  characterTurnId: string,
+  responseTurnId: string,
 ): JsonObject {
   const dialogues = asObjectArray(
     expectProperty(view.value, "dialogues", "SessionView"),
@@ -502,7 +783,7 @@ function extractDialogueReply(
   ).filter(
     (turn) =>
       expectString(turn, "turn_id", "DialogueTurnView") ===
-      characterTurnId,
+      responseTurnId,
   );
   if (turns.length !== 1) {
     throw new EngineFault(
@@ -510,7 +791,7 @@ function extractDialogueReply(
       "Final SessionView must contain exactly one authoritative character turn",
       {
         dialogue_id: dialogueId,
-        turn_id: characterTurnId,
+        turn_id: responseTurnId,
         matches: turns.length,
       },
     );
@@ -551,17 +832,11 @@ function createServerEnvelopes(input: {
   }
   return Object.freeze(
     input.messages.map((message, ordinal) => {
-      const messageId = assertUuid(
+      const messageId = createCanonicalServerOwnedId(
         input.contracts,
-        input.idFactory.createMessageId(),
+        input.idFactory,
+        "message_id",
       );
-      if (messageId !== messageId.toLowerCase()) {
-        throw new EngineFault(
-          "dialogue.finalizer.message_id_noncanonical",
-          "Server-generated message UUIDs must use lowercase canonical text",
-          { message_id: messageId },
-        );
-      }
       return input.contracts.assertObject(
         CONTRACT_REF.serverEnvelope,
         {
@@ -576,6 +851,22 @@ function createServerEnvelopes(input: {
       );
     }),
   );
+}
+
+function createCanonicalServerOwnedId(
+  contracts: ContractValidator,
+  idFactory: ServerEnvelopeIdFactory,
+  identity: string,
+): string {
+  const value = assertUuid(contracts, idFactory.createMessageId());
+  if (value !== value.toLowerCase()) {
+    throw new EngineFault(
+      "command.finalizer.generated_identity_noncanonical",
+      "Server-generated finalization UUIDs must use lowercase canonical text",
+      { identity, uuid: value },
+    );
+  }
+  return value;
 }
 
 async function persistFinalization(input: {
@@ -713,11 +1004,18 @@ function assertRejectedCompletionCode(
 function assertAcceptedCompletionIdentity(
   command: ValidatedFinalizationCommand,
   finalWorldRevision: number,
-  characterTurnId: string | undefined,
+  responseTurnId: string | undefined,
+  eventCard:
+    | {
+        readonly eventCardId: string;
+        readonly branch: EventCardCompletionBranch;
+      }
+    | undefined,
 ): void {
   if (command.commandKind === "player_day.end") {
     if (
-      characterTurnId !== undefined ||
+      responseTurnId !== undefined ||
+      eventCard !== undefined ||
       command.playerDayFromDay === undefined ||
       finalWorldRevision <= command.acceptedSession.worldRevision
     ) {
@@ -736,26 +1034,59 @@ function assertAcceptedCompletionIdentity(
     }
     return;
   }
-  const expectedFinalRevision =
+  if (command.commandKind === "event_card.trigger") {
+    const expectedFinalRevision =
+      command.acceptedSession.worldRevision + 1;
+    if (
+      responseTurnId !== undefined ||
+      eventCard === undefined ||
+      command.eventCardId === undefined ||
+      eventCard.eventCardId !== command.eventCardId ||
+      command.eventCardBranch === undefined ||
+      eventCard.branch !== command.eventCardBranch ||
+      !Number.isSafeInteger(expectedFinalRevision) ||
+      finalWorldRevision !== expectedFinalRevision
+    ) {
+      throw new EngineFault(
+        "command.finalizer.completion_identity_mismatch",
+        "Accepted EventCard completion must match its committed command packet",
+        {
+          session_id: command.sessionId,
+          command_id: command.commandId,
+          accepted_world_revision:
+            command.acceptedSession.worldRevision,
+          expected_final_world_revision: expectedFinalRevision,
+          actual_final_world_revision: finalWorldRevision,
+          expected_event_card_id: command.eventCardId ?? null,
+          actual_event_card_id: eventCard?.eventCardId ?? null,
+          expected_branch: command.eventCardBranch ?? null,
+          actual_branch: eventCard?.branch ?? null,
+        },
+      );
+    }
+    return;
+  }
+  const minimumFinalRevision =
     command.acceptedSession.worldRevision + DIALOGUE_PACKET_COUNT;
   if (
-    !Number.isSafeInteger(expectedFinalRevision) ||
-    finalWorldRevision !== expectedFinalRevision ||
-    characterTurnId === undefined ||
-    characterTurnId !== requireCharacterTurnId(command)
+    eventCard !== undefined ||
+    !Number.isSafeInteger(minimumFinalRevision) ||
+    finalWorldRevision < minimumFinalRevision ||
+    responseTurnId === undefined ||
+    responseTurnId !== requireDialogueResponseTurnId(command)
   ) {
     throw new EngineFault(
       "dialogue.finalizer.completion_identity_mismatch",
-      "Accepted dialogue completion must match its two committed packets and persisted character turn",
+      "Accepted dialogue completion must include its two dialogue packets and only its recoverable post-dialogue publications",
       {
         session_id: command.sessionId,
         command_id: command.commandId,
         accepted_world_revision:
           command.acceptedSession.worldRevision,
-        expected_final_world_revision: expectedFinalRevision,
+        minimum_final_world_revision: minimumFinalRevision,
         actual_final_world_revision: finalWorldRevision,
-        expected_character_turn_id: command.characterTurnId ?? null,
-        actual_character_turn_id: characterTurnId ?? null,
+        expected_response_turn_id: command.responseTurnId ?? null,
+        actual_response_turn_id: responseTurnId ?? null,
       },
     );
   }
@@ -790,6 +1121,453 @@ function assertAcceptedSessionState(
         current_world_revision: context.currentWorldRevision,
       },
     );
+  }
+}
+
+async function assertDialogueCompletionHistory(input: {
+  readonly client: PoolClient;
+  readonly contracts: ContractValidator;
+  readonly command: ValidatedFinalizationCommand;
+  readonly finalWorldRevision: number;
+  readonly responseTurnId: string;
+}): Promise<void> {
+  const acceptedRevision =
+    input.command.acceptedSession.worldRevision;
+  const proposalQuery =
+    await input.client.query<DialogueProposalHistoryRow>(
+      `SELECT proposal.proposal_kind,
+              proposal.proposal_id::text AS model_proposal_id,
+              proposal.proposal_ordinal,
+              proposal.world_record_id::text AS world_record_id,
+              proposal.rule_request_id::text AS rule_request_id,
+              invocation.operation_kind,
+              invocation.invocation_status,
+              invocation.proposal_id::text AS packet_proposal_id
+         FROM luoxia_engine.dialogue_director_proposal_runs AS proposal
+         LEFT JOIN luoxia_engine.rule_plugin_invocations AS invocation
+           ON invocation.request_id = proposal.rule_request_id
+        WHERE proposal.session_id = $1::uuid
+          AND proposal.command_id = $2::uuid
+        ORDER BY CASE proposal.proposal_kind
+                   WHEN 'definition' THEN 0
+                   WHEN 'goal_plan' THEN 1
+                   WHEN 'event_card' THEN 2
+                   ELSE 3
+                 END,
+                 proposal.proposal_ordinal`,
+      [input.command.sessionId, input.command.commandId],
+    );
+  const proposalRows = validateDialogueProposalHistoryRows(
+    input.contracts,
+    input.command,
+    proposalQuery.rows,
+  );
+  const acceptedProposals = proposalRows.filter(
+    (row) => row.packet_proposal_id !== null,
+  );
+  const query = await input.client.query<CommittedEventHistoryRow>(
+    `SELECT revision_after::text AS revision_after_text,
+            event_document
+       FROM luoxia_engine.committed_events
+      WHERE world_id = $1::uuid
+        AND revision_after > $2::bigint
+        AND revision_after <= $3::bigint
+      ORDER BY revision_after`,
+    [
+      input.command.acceptedSession.worldId,
+      acceptedRevision.toString(),
+      input.finalWorldRevision.toString(),
+    ],
+  );
+  const expectedCount = DIALOGUE_PACKET_COUNT + acceptedProposals.length;
+  if (
+    input.finalWorldRevision - acceptedRevision !== expectedCount ||
+    query.rows.length !== expectedCount
+  ) {
+    throw new EngineFault(
+      "command.finalizer.dialogue_history_incomplete",
+      "Dialogue completion event history is incomplete",
+      {
+        session_id: input.command.sessionId,
+        command_id: input.command.commandId,
+        expected_count: expectedCount,
+        actual_count: query.rows.length,
+      },
+    );
+  }
+
+  for (const [index, row] of query.rows.entries()) {
+    const expectedRevisionAfter = acceptedRevision + index + 1;
+    const revisionAfter = parseSafeUnsignedInteger(
+      row.revision_after_text,
+      "command.finalizer.database_corrupt",
+      "Dialogue committed event revision",
+      {
+        session_id: input.command.sessionId,
+        command_id: input.command.commandId,
+        revision_after: row.revision_after_text,
+      },
+    );
+    const event = input.contracts.assertObject(
+      CONTRACT_REF.committedEvent,
+      row.event_document,
+    ).value;
+    const packet = expectJsonObject(
+      expectProperty(event, "packet", "CommittedEvent"),
+      "CommittedEvent.packet",
+    );
+    if (
+      revisionAfter !== expectedRevisionAfter ||
+      expectString(event, "world_id", "CommittedEvent") !==
+        input.command.acceptedSession.worldId ||
+      expectInteger(event, "revision_before", "CommittedEvent") !==
+        expectedRevisionAfter - 1 ||
+      expectInteger(event, "revision_after", "CommittedEvent") !==
+        expectedRevisionAfter ||
+      expectString(packet, "world_id", "ContentPacket") !==
+        input.command.acceptedSession.worldId ||
+      expectInteger(packet, "basis_revision", "ContentPacket") !==
+        expectedRevisionAfter - 1
+    ) {
+      throw new EngineFault(
+        "command.finalizer.dialogue_history_identity_mismatch",
+        "Dialogue committed event identity is not contiguous with its accepted command",
+        {
+          session_id: input.command.sessionId,
+          command_id: input.command.commandId,
+          expected_revision_after: expectedRevisionAfter,
+          actual_revision_after: revisionAfter,
+        },
+      );
+    }
+    const op = requireSinglePacketOp(packet, input.command);
+    if (index === 0) {
+      assertHumanDialogueHistoryOp(input.command, op);
+      continue;
+    }
+    if (index === 1) {
+      assertDialogueResponseHistoryOp(
+        input.command,
+        op,
+        input.responseTurnId,
+      );
+      continue;
+    }
+    const proposal = acceptedProposals[index - DIALOGUE_PACKET_COUNT];
+    if (proposal === undefined) {
+      throw new EngineFault(
+        "command.finalizer.dialogue_history_incomplete",
+        "Dialogue committed proposal history has no matching Journal identity",
+        {
+          session_id: input.command.sessionId,
+          command_id: input.command.commandId,
+          event_index: index,
+        },
+      );
+    }
+    assertDialogueProposalHistoryOp(
+      input.command,
+      packet,
+      op,
+      proposal,
+    );
+  }
+}
+
+function requireSinglePacketOp(
+  packet: JsonObject,
+  command: ValidatedFinalizationCommand,
+): JsonObject {
+  const ops = asObjectArray(
+    expectProperty(packet, "ops", "ContentPacket"),
+    "ContentPacket.ops",
+  );
+  if (ops.length !== 1) {
+    throw new EngineFault(
+      "command.finalizer.dialogue_history_op_count",
+      "Each dialogue command packet must contain exactly one closed operation",
+      {
+        session_id: command.sessionId,
+        command_id: command.commandId,
+        op_count: ops.length,
+      },
+    );
+  }
+  return ops[0] as JsonObject;
+}
+
+function assertHumanDialogueHistoryOp(
+  command: ValidatedFinalizationCommand,
+  op: JsonObject,
+): void {
+  const expectedKind =
+    command.commandKind === "dialogue.start"
+      ? "dialogue.open"
+      : "dialogue.turn.append";
+  const actualKind = expectString(op, "op", "EffectOp");
+  const dialogueId = requireDialogueId(command);
+  const turn =
+    expectedKind === "dialogue.open"
+      ? expectJsonObject(
+          expectProperty(op, "first_turn", "DialogueOpenOp"),
+          "DialogueOpenOp.first_turn",
+        )
+      : expectJsonObject(
+          expectProperty(op, "turn", "DialogueTurnAppendOp"),
+          "DialogueTurnAppendOp.turn",
+        );
+  const source = expectJsonObject(
+    expectProperty(turn, "source", "DialogueTurn"),
+    "DialogueTurn.source",
+  );
+  if (
+    actualKind !== expectedKind ||
+    expectString(op, "dialogue_id", expectedKind) !== dialogueId ||
+    expectString(turn, "turn_id", "DialogueTurn") !==
+      requireHumanTurnId(command) ||
+    expectString(source, "source_kind", "DialogueTurnSource") !==
+      "human" ||
+    expectString(source, "command_id", "DialogueTurnSource") !==
+      command.commandId
+  ) {
+    throw new EngineFault(
+      "command.finalizer.dialogue_history_human_mismatch",
+      "First dialogue packet does not match the persisted human command turn",
+      {
+        session_id: command.sessionId,
+        command_id: command.commandId,
+        dialogue_id: dialogueId,
+      },
+    );
+  }
+}
+
+function assertDialogueResponseHistoryOp(
+  command: ValidatedFinalizationCommand,
+  op: JsonObject,
+  responseTurnId: string,
+): void {
+  const turn = expectJsonObject(
+    expectProperty(op, "turn", "DialogueTurnAppendOp"),
+    "DialogueTurnAppendOp.turn",
+  );
+  const source = expectJsonObject(
+    expectProperty(turn, "source", "DialogueTurn"),
+    "DialogueTurn.source",
+  );
+  const expectedSourceKind = command.dialogueResponseKind;
+  const expectedModelRequestId = command.responseModelRequestId;
+  if (
+    expectedSourceKind === undefined ||
+    expectedModelRequestId === undefined ||
+    expectString(op, "op", "EffectOp") !== "dialogue.turn.append" ||
+    expectString(op, "dialogue_id", "DialogueTurnAppendOp") !==
+      requireDialogueId(command) ||
+    expectString(turn, "turn_id", "DialogueTurn") !==
+      responseTurnId ||
+    expectString(source, "source_kind", "DialogueTurnSource") !==
+      expectedSourceKind ||
+    expectString(
+      source,
+      "model_request_id",
+      "DialogueTurnSource",
+    ) !== expectedModelRequestId
+  ) {
+    throw new EngineFault(
+      "command.finalizer.dialogue_history_response_mismatch",
+      "Second dialogue packet does not match the persisted dialogue response identity",
+      {
+        session_id: command.sessionId,
+        command_id: command.commandId,
+        dialogue_id: requireDialogueId(command),
+        response_turn_id: responseTurnId,
+        response_source_kind: expectedSourceKind ?? "",
+      },
+    );
+  }
+}
+
+function validateDialogueProposalHistoryRows(
+  contracts: ContractValidator,
+  command: ValidatedFinalizationCommand,
+  rows: readonly DialogueProposalHistoryRow[],
+): readonly DialogueProposalHistoryRow[] {
+  const nextOrdinal: Record<string, number> = {
+    definition: 0,
+    goal_plan: 0,
+    event_card: 0,
+  };
+  const expectedOperation: Readonly<Record<string, string>> =
+    Object.freeze({
+      definition: "definition.validate",
+      goal_plan: "goal_plan.validate",
+      event_card: "event_card.publish",
+    });
+  for (const row of rows) {
+    const operationKind = expectedOperation[row.proposal_kind];
+    const ordinal = nextOrdinal[row.proposal_kind];
+    const modelProposalId = assertUuid(
+      contracts,
+      row.model_proposal_id,
+    );
+    const ruleRequestId = assertUuid(contracts, row.rule_request_id);
+    if (
+      operationKind === undefined ||
+      ordinal === undefined ||
+      row.proposal_ordinal !== ordinal ||
+      row.invocation_status !== "resolved" ||
+      row.operation_kind !== operationKind
+    ) {
+      throw new EngineFault(
+        "command.finalizer.dialogue_proposal_history_corrupt",
+        "Dialogue proposal Journal is incomplete or disagrees with its resolved RulePlugin invocation",
+        {
+          session_id: command.sessionId,
+          command_id: command.commandId,
+          proposal_kind: row.proposal_kind,
+          proposal_id: modelProposalId,
+          proposal_ordinal: row.proposal_ordinal,
+          rule_request_id: ruleRequestId,
+          invocation_status: row.invocation_status ?? "",
+          operation_kind: row.operation_kind ?? "",
+        },
+      );
+    }
+    nextOrdinal[row.proposal_kind] = ordinal + 1;
+    if (
+      (row.proposal_kind === "event_card" &&
+        row.world_record_id !== null) ||
+      (row.proposal_kind !== "event_card" &&
+        row.world_record_id === null)
+    ) {
+      throw new EngineFault(
+        "command.finalizer.dialogue_proposal_history_corrupt",
+        "Dialogue proposal Journal WorldState identity shape disagrees with its proposal kind",
+        {
+          session_id: command.sessionId,
+          command_id: command.commandId,
+          proposal_kind: row.proposal_kind,
+          proposal_id: modelProposalId,
+        },
+      );
+    }
+    if (row.world_record_id !== null) {
+      assertUuid(contracts, row.world_record_id);
+    }
+    if (row.packet_proposal_id !== null) {
+      assertUuid(contracts, row.packet_proposal_id);
+    }
+  }
+  return rows;
+}
+
+function dialogueProposalHistoryFault(
+  command: ValidatedFinalizationCommand,
+  proposal: DialogueProposalHistoryRow,
+): EngineFault {
+  return new EngineFault(
+    "command.finalizer.dialogue_proposal_history_mismatch",
+    "Committed post-dialogue operation differs from its persisted Director proposal identity",
+    {
+      session_id: command.sessionId,
+      command_id: command.commandId,
+      proposal_kind: proposal.proposal_kind,
+      model_proposal_id: proposal.model_proposal_id,
+      world_record_id: proposal.world_record_id ?? "",
+    },
+  );
+}
+
+function assertDialogueProposalHistoryOp(
+  command: ValidatedFinalizationCommand,
+  packet: JsonObject,
+  op: JsonObject,
+  proposal: DialogueProposalHistoryRow,
+): void {
+  const source = expectJsonObject(
+    expectProperty(packet, "source", "ContentPacket"),
+    "ContentPacket.source",
+  );
+  if (
+    proposal.packet_proposal_id === null ||
+    expectString(source, "source_kind", "PacketSource") !==
+      "rule_plugin" ||
+    expectString(source, "proposal_id", "PacketSource") !==
+      proposal.packet_proposal_id
+  ) {
+    throw new EngineFault(
+      "command.finalizer.dialogue_history_proposal_source_mismatch",
+      "Post-dialogue packet does not match its persisted RulePlugin proposal identity",
+      {
+        session_id: command.sessionId,
+        command_id: command.commandId,
+        proposal_kind: proposal.proposal_kind,
+        model_proposal_id: proposal.model_proposal_id,
+      },
+    );
+  }
+  if (proposal.proposal_kind === "definition") {
+    const provenance = expectJsonObject(
+      expectProperty(op, "provenance", "DefinitionRegisterOp"),
+      "DefinitionRegisterOp.provenance",
+    );
+    if (
+      proposal.world_record_id === null ||
+      expectString(op, "op", "EffectOp") !== "definition.register" ||
+      expectString(
+        op,
+        "definition_id",
+        "DefinitionRegisterOp",
+      ) !== proposal.world_record_id ||
+      expectString(provenance, "origin_kind", "Provenance") !==
+        "model_proposal" ||
+      expectString(provenance, "origin_id", "Provenance") !==
+        proposal.model_proposal_id
+    ) {
+      throw dialogueProposalHistoryFault(command, proposal);
+    }
+    return;
+  }
+  if (proposal.proposal_kind === "goal_plan") {
+    const goalPlan = expectJsonObject(
+      expectProperty(op, "goal_plan", "GoalPlanUpsertOp"),
+      "GoalPlanUpsertOp.goal_plan",
+    );
+    if (
+      proposal.world_record_id === null ||
+      expectString(op, "op", "EffectOp") !== "goal_plan.upsert" ||
+      expectString(goalPlan, "plan_id", "GoalPlan") !==
+        proposal.world_record_id ||
+      expectString(
+        goalPlan,
+        "source_proposal_id",
+        "GoalPlan",
+      ) !== proposal.model_proposal_id
+    ) {
+      throw dialogueProposalHistoryFault(command, proposal);
+    }
+    return;
+  }
+  const control = expectJsonObject(
+    expectProperty(op, "control", "EventCardPublishOp"),
+    "EventCardPublishOp.control",
+  );
+  if (
+    expectString(op, "op", "EffectOp") !== "event_card.publish" ||
+    expectString(
+      op,
+      "source_proposal_id",
+      "EventCardPublishOp",
+    ) !== proposal.model_proposal_id ||
+    expectString(
+      op,
+      "source_dialogue_id",
+      "EventCardPublishOp",
+    ) !== requireDialogueId(command) ||
+    expectString(control, "binding_id", "ControlBindingRef") !==
+      command.acceptedSession.controlBindingId
+  ) {
+    throw dialogueProposalHistoryFault(command, proposal);
   }
 }
 
@@ -848,6 +1626,100 @@ function assertPlayerDayCompletion(
   }
 }
 
+function assertEventCardCompletion(
+  command: ValidatedFinalizationCommand,
+  worldState: JsonObject,
+  completion: {
+    readonly eventCardId: string;
+    readonly branch: EventCardCompletionBranch;
+  },
+): void {
+  const card = requireEventCard(worldState, completion.eventCardId);
+  const control = expectJsonObject(
+    expectProperty(card, "control", "EventCardState"),
+    "EventCardState.control",
+  );
+  const actualControlBindingId = expectString(
+    control,
+    "binding_id",
+    "ControlBindingRef",
+  );
+  const expectedStatus =
+    completion.branch === "trigger" ? "triggered" : "invalidated";
+  const actualStatus = expectString(
+    card,
+    "status",
+    "EventCardState",
+  );
+  if (
+    command.eventCardId !== completion.eventCardId ||
+    command.eventCardBranch !== completion.branch ||
+    actualControlBindingId !==
+      command.acceptedSession.controlBindingId ||
+    actualStatus !== expectedStatus
+  ) {
+    throw new EngineFault(
+      "command.finalizer.event_card_boundary_mismatch",
+      "EventCard command can complete only at its exact committed card branch",
+      {
+        session_id: command.sessionId,
+        command_id: command.commandId,
+        expected_event_card_id: command.eventCardId ?? null,
+        actual_event_card_id: completion.eventCardId,
+        expected_branch: command.eventCardBranch ?? null,
+        actual_branch: completion.branch,
+        expected_control_binding_id:
+          command.acceptedSession.controlBindingId,
+        actual_control_binding_id: actualControlBindingId,
+        expected_status: expectedStatus,
+        actual_status: actualStatus,
+      },
+    );
+  }
+}
+
+function requireEventCard(
+  worldState: JsonObject,
+  eventCardId: string,
+): JsonObject {
+  const matches = asObjectArray(
+    expectProperty(worldState, "event_cards", "WorldState"),
+    "WorldState.event_cards",
+  ).filter(
+    (card) =>
+      expectString(card, "event_card_id", "EventCardState") ===
+      eventCardId,
+  );
+  if (matches.length !== 1) {
+    throw new EngineFault(
+      "command.finalizer.event_card_match",
+      "EventCard command must resolve to exactly one final WorldState card",
+      { event_card_id: eventCardId, matches: matches.length },
+    );
+  }
+  return matches[0] as JsonObject;
+}
+
+function requireEventCardCompletion(
+  completion:
+    | {
+        readonly eventCardId: string;
+        readonly branch: EventCardCompletionBranch;
+      }
+    | undefined,
+): {
+  readonly eventCardId: string;
+  readonly branch: EventCardCompletionBranch;
+} {
+  if (completion === undefined) {
+    throw new EngineFault(
+      "command.finalizer.event_card_completion_missing",
+      "EventCard finalization requires its committed card identity and branch",
+    );
+  }
+  return completion;
+}
+
 function requireDialogueId(
   command: ValidatedFinalizationCommand,
 ): string {
@@ -864,20 +1736,36 @@ function requireDialogueId(
   return command.dialogueId;
 }
 
-function requireCharacterTurnId(
+function requireHumanTurnId(
   command: ValidatedFinalizationCommand,
 ): string {
-  if (command.characterTurnId === undefined) {
+  if (command.humanTurnId === undefined) {
     throw new EngineFault(
       "command.finalizer.database_corrupt",
-      "Dialogue command is missing its persisted character turn identity",
+      "Dialogue command is missing its persisted human turn identity",
       {
         session_id: command.sessionId,
         command_id: command.commandId,
       },
     );
   }
-  return command.characterTurnId;
+  return command.humanTurnId;
+}
+
+function requireDialogueResponseTurnId(
+  command: ValidatedFinalizationCommand,
+): string {
+  if (command.responseTurnId === undefined) {
+    throw new EngineFault(
+      "command.finalizer.database_corrupt",
+      "Dialogue command is missing its persisted response turn identity",
+      {
+        session_id: command.sessionId,
+        command_id: command.commandId,
+      },
+    );
+  }
+  return command.responseTurnId;
 }
 
 function assertUnchangedSessionState(
@@ -987,14 +1875,32 @@ async function readFinalizationCommandRow(
               AS accepted_world_revision_text,
             command.accepted_nonce::text AS accepted_nonce,
             command.dialogue_id::text AS dialogue_id,
+            command.human_turn_id::text AS human_turn_id,
+            command.character_model_request_id::text
+              AS character_model_request_id,
             command.character_turn_id::text AS character_turn_id,
+            director.request_kind AS director_request_kind,
+            director.model_request_id::text
+              AS director_model_request_id,
+            director.response_turn_id::text
+              AS director_response_turn_id,
             player_day.from_day::text AS player_day_from_day_text,
+            command.event_card_packet_id::text
+              AS event_card_packet_id,
+            event_card_commit.event_document
+              AS event_card_committed_event_document,
             command.command_status,
             command.result_document
        FROM luoxia_engine.command_journal AS command
        LEFT JOIN luoxia_engine.player_day_end_runs AS player_day
          ON player_day.session_id = command.session_id
         AND player_day.command_id = command.command_id
+       LEFT JOIN luoxia_engine.dialogue_director_runs AS director
+         ON director.session_id = command.session_id
+        AND director.command_id = command.command_id
+       LEFT JOIN luoxia_engine.committed_events AS event_card_commit
+         ON event_card_commit.packet_id = command.event_card_packet_id
+        AND command.command_kind = 'event_card.trigger'
       WHERE command.session_id = $1::uuid
         AND command.command_id = $2::uuid
       ${sqlLockClause}`,
@@ -1034,7 +1940,8 @@ function validateFinalizationCommandRow(
   if (
     row.command_kind !== "dialogue.start" &&
     row.command_kind !== "dialogue.continue" &&
-    row.command_kind !== "player_day.end"
+    row.command_kind !== "player_day.end" &&
+    row.command_kind !== "event_card.trigger"
   ) {
     throw new EngineFault(
       "command.finalizer.command_kind_invalid",
@@ -1067,14 +1974,27 @@ function validateFinalizationCommandRow(
       { session_id: sessionId, command_id: commandId },
     );
   }
-  const isDialogue = row.command_kind !== "player_day.end";
+  const isDialogue =
+    row.command_kind === "dialogue.start" ||
+    row.command_kind === "dialogue.continue";
+  const isPlayerDay = row.command_kind === "player_day.end";
+  const isEventCard = row.command_kind === "event_card.trigger";
   if (
     (isDialogue &&
       (row.dialogue_id === null ||
+        row.human_turn_id === null ||
+        row.character_model_request_id === null ||
         row.character_turn_id === null ||
         row.player_day_from_day_text !== null)) ||
     (!isDialogue &&
-      (row.dialogue_id !== null || row.character_turn_id !== null))
+      (row.dialogue_id !== null ||
+        row.human_turn_id !== null ||
+        row.character_model_request_id !== null ||
+        row.character_turn_id !== null)) ||
+    (isPlayerDay && row.player_day_from_day_text === null) ||
+    (!isPlayerDay && row.player_day_from_day_text !== null) ||
+    (isEventCard && row.event_card_packet_id === null) ||
+    (!isEventCard && row.event_card_packet_id !== null)
   ) {
     throw new EngineFault(
       "command.finalizer.database_corrupt",
@@ -1111,6 +2031,21 @@ function validateFinalizationCommandRow(
     ),
     nonce: assertUuid(contracts, row.accepted_nonce),
   });
+  const eventCard = readEventCardCommitIdentity(
+    contracts,
+    row,
+    message,
+    row.command_kind,
+    commandId,
+    acceptedSession,
+  );
+  const dialogueResponse = readDialogueResponseIdentity(
+    contracts,
+    row,
+    isDialogue,
+    sessionId,
+    commandId,
+  );
   if (
     row.command_status !== "received" &&
     row.command_status !== "completed"
@@ -1152,6 +2087,33 @@ function validateFinalizationCommandRow(
       { session_id: sessionId, command_id: commandId },
     );
   }
+  if (
+    row.command_kind === "event_card.trigger" &&
+    result !== undefined
+  ) {
+    const resultStatus = expectString(
+      result,
+      "status",
+      "CommandResult",
+    );
+    if (
+      (resultStatus === "accepted" &&
+        eventCard.branch === undefined) ||
+      (resultStatus === "rejected" &&
+        eventCard.branch !== undefined)
+    ) {
+      throw new EngineFault(
+        "command.finalizer.database_corrupt",
+        "Completed EventCard result disagrees with its committed packet",
+        {
+          session_id: sessionId,
+          command_id: commandId,
+          result_status: resultStatus,
+          committed_branch: eventCard.branch ?? null,
+        },
+      );
+    }
+  }
   return Object.freeze({
     sessionId,
     commandId,
@@ -1166,10 +2128,17 @@ function validateFinalizationCommandRow(
       row.dialogue_id === null
         ? undefined
         : assertUuid(contracts, row.dialogue_id),
+    humanTurnId:
+      row.human_turn_id === null
+        ? undefined
+        : assertUuid(contracts, row.human_turn_id),
     characterTurnId:
       row.character_turn_id === null
         ? undefined
         : assertUuid(contracts, row.character_turn_id),
+    dialogueResponseKind: dialogueResponse.kind,
+    responseTurnId: dialogueResponse.turnId,
+    responseModelRequestId: dialogueResponse.modelRequestId,
     playerDayFromDay:
       row.player_day_from_day_text === null
         ? undefined
@@ -1179,9 +2148,280 @@ function validateFinalizationCommandRow(
             "Player-day source day",
             { session_id: sessionId, command_id: commandId },
           ),
+    eventCardId: eventCard.eventCardId,
+    eventCardPacketId: eventCard.packetId,
+    eventCardBranch: eventCard.branch,
     status: row.command_status,
     result,
   });
+}
+
+function readDialogueResponseIdentity(
+  contracts: ContractValidator,
+  row: FinalizationCommandRow,
+  isDialogue: boolean,
+  sessionId: string,
+  commandId: string,
+): {
+  readonly kind: "character_mind" | "director_system" | undefined;
+  readonly turnId: string | undefined;
+  readonly modelRequestId: string | undefined;
+} {
+  const directorFields = [
+    row.director_request_kind,
+    row.director_model_request_id,
+    row.director_response_turn_id,
+  ];
+  const hasDirectorRun = directorFields.some((value) => value !== null);
+  if (!isDialogue) {
+    if (hasDirectorRun) {
+      throw new EngineFault(
+        "command.finalizer.database_corrupt",
+        "Non-dialogue command unexpectedly owns a Dialogue Director run",
+        { session_id: sessionId, command_id: commandId },
+      );
+    }
+    return Object.freeze({
+      kind: undefined,
+      turnId: undefined,
+      modelRequestId: undefined,
+    });
+  }
+  if (!hasDirectorRun) {
+    return Object.freeze({
+      kind: undefined,
+      turnId: undefined,
+      modelRequestId: undefined,
+    });
+  }
+  if (
+    row.director_request_kind === "director.dialogue_events" &&
+    row.director_model_request_id !== null &&
+    row.director_response_turn_id === null &&
+    row.character_model_request_id !== null &&
+    row.character_turn_id !== null
+  ) {
+    return Object.freeze({
+      kind: "character_mind",
+      turnId: assertUuid(contracts, row.character_turn_id),
+      modelRequestId: assertUuid(
+        contracts,
+        row.character_model_request_id,
+      ),
+    });
+  }
+  if (
+    row.director_request_kind === "director.system_dialogue" &&
+    row.director_model_request_id !== null &&
+    row.director_response_turn_id !== null
+  ) {
+    return Object.freeze({
+      kind: "director_system",
+      turnId: assertUuid(contracts, row.director_response_turn_id),
+      modelRequestId: assertUuid(
+        contracts,
+        row.director_model_request_id,
+      ),
+    });
+  }
+  throw new EngineFault(
+    "command.finalizer.database_corrupt",
+    "Dialogue Director run does not define one closed response identity",
+    {
+      session_id: sessionId,
+      command_id: commandId,
+      director_request_kind: row.director_request_kind ?? "",
+    },
+  );
+}
+
+function readEventCardCommitIdentity(
+  contracts: ContractValidator,
+  row: FinalizationCommandRow,
+  message: JsonObject,
+  commandKind: ValidatedFinalizationCommand["commandKind"],
+  commandId: string,
+  acceptedSession: EngineSessionRecord,
+): {
+  readonly eventCardId: string | undefined;
+  readonly packetId: string | undefined;
+  readonly branch: EventCardCompletionBranch | undefined;
+} {
+  if (commandKind !== "event_card.trigger") {
+    if (row.event_card_committed_event_document !== null) {
+      throw new EngineFault(
+        "command.finalizer.database_corrupt",
+        "Non-EventCard command unexpectedly joined an EventCard committed packet",
+        {
+          session_id: acceptedSession.sessionId,
+          command_id: commandId,
+          command_kind: commandKind,
+        },
+      );
+    }
+    return Object.freeze({
+      eventCardId: undefined,
+      packetId: undefined,
+      branch: undefined,
+    });
+  }
+
+  const eventCardId = assertUuid(
+    contracts,
+    expectString(message, "event_card_id", "EventCardTrigger"),
+  );
+  const packetId = assertUuid(
+    contracts,
+    requireTextColumn(
+      row.event_card_packet_id,
+      "event_card_packet_id",
+      acceptedSession.sessionId,
+      commandId,
+    ),
+  );
+  if (row.event_card_committed_event_document === null) {
+    return Object.freeze({
+      eventCardId,
+      packetId,
+      branch: undefined,
+    });
+  }
+
+  const event = contracts.assertObject(
+    CONTRACT_REF.committedEvent,
+    row.event_card_committed_event_document,
+  ).value;
+  const packet = expectJsonObject(
+    expectProperty(event, "packet", "CommittedEvent"),
+    "CommittedEvent.packet",
+  );
+  const source = expectJsonObject(
+    expectProperty(packet, "source", "ContentPacket"),
+    "ContentPacket.source",
+  );
+  const expectedRevisionAfter =
+    acceptedSession.worldRevision + 1;
+  if (
+    !Number.isSafeInteger(expectedRevisionAfter) ||
+    expectString(event, "world_id", "CommittedEvent") !==
+      acceptedSession.worldId ||
+    expectInteger(event, "revision_before", "CommittedEvent") !==
+      acceptedSession.worldRevision ||
+    expectInteger(event, "revision_after", "CommittedEvent") !==
+      expectedRevisionAfter ||
+    expectString(packet, "packet_id", "ContentPacket") !== packetId ||
+    expectString(packet, "world_id", "ContentPacket") !==
+      acceptedSession.worldId ||
+    expectInteger(packet, "basis_revision", "ContentPacket") !==
+      acceptedSession.worldRevision ||
+    expectString(packet, "cause_id", "ContentPacket") !== eventCardId ||
+    expectString(source, "source_kind", "PacketSource") !==
+      "sealed_event_result" ||
+    expectString(source, "event_card_id", "PacketSource") !== eventCardId
+  ) {
+    throw new EngineFault(
+      "command.finalizer.database_corrupt",
+      "EventCard committed packet identity differs from its accepted command",
+      {
+        session_id: acceptedSession.sessionId,
+        command_id: commandId,
+        packet_id: packetId,
+        event_card_id: eventCardId,
+      },
+    );
+  }
+
+  const ops = asObjectArray(
+    expectProperty(packet, "ops", "ContentPacket"),
+    "ContentPacket.ops",
+  );
+  const terminal = ops.at(-1);
+  if (terminal === undefined) {
+    throw new EngineFault(
+      "command.finalizer.database_corrupt",
+      "EventCard committed packet has no terminal operation",
+      {
+        session_id: acceptedSession.sessionId,
+        command_id: commandId,
+      },
+    );
+  }
+  const terminalKind = expectString(
+    terminal,
+    "op",
+    "EffectOp",
+  );
+  const branch: EventCardCompletionBranch =
+    terminalKind === "event_card.trigger"
+      ? "trigger"
+      : terminalKind === "event_card.invalidate" && ops.length === 1
+        ? "invalidate"
+        : invalidEventCardCommittedBranch(
+            acceptedSession.sessionId,
+            commandId,
+            terminalKind,
+            ops.length,
+          );
+  const operationScope =
+    branch === "trigger"
+      ? "EventCardTriggerOp"
+      : "EventCardInvalidateOp";
+  const control = expectJsonObject(
+    expectProperty(terminal, "control", operationScope),
+    `${operationScope}.control`,
+  );
+  if (
+    expectString(terminal, "event_card_id", operationScope) !==
+      eventCardId ||
+    expectString(control, "binding_id", "ControlBindingRef") !==
+      acceptedSession.controlBindingId
+  ) {
+    throw new EngineFault(
+      "command.finalizer.database_corrupt",
+      "EventCard terminal operation differs from its accepted Session identity",
+      {
+        session_id: acceptedSession.sessionId,
+        command_id: commandId,
+        event_card_id: eventCardId,
+        branch,
+      },
+    );
+  }
+  return Object.freeze({ eventCardId, packetId, branch });
+}
+
+function requireTextColumn(
+  value: string | null,
+  column: string,
+  sessionId: string,
+  commandId: string,
+): string {
+  if (value === null) {
+    throw new EngineFault(
+      "command.finalizer.database_corrupt",
+      `EventCard command is missing ${column}`,
+      { session_id: sessionId, command_id: commandId, column },
+    );
+  }
+  return value;
+}
+
+function invalidEventCardCommittedBranch(
+  sessionId: string,
+  commandId: string,
+  terminalKind: string,
+  opCount: number,
+): never {
+  throw new EngineFault(
+    "command.finalizer.database_corrupt",
+    "EventCard committed packet has an unsupported terminal branch",
+    {
+      session_id: sessionId,
+      command_id: commandId,
+      terminal_op: terminalKind,
+      op_count: opCount,
+    },
+  );
 }
 
 async function readCompletedEnvelopes(
@@ -1243,12 +2483,10 @@ async function readCompletedEnvelopes(
       ORDER BY response_ordinal`,
     [command.sessionId, command.commandId],
   );
-  const expectedTypes =
-    actualStatus === "accepted"
-      ? command.commandKind === "player_day.end"
-        ? ["session.view", "command.result"]
-        : ["dialogue.reply", "session.view", "command.result"]
-      : ["session.view", "command.result"];
+  const expectedTypes = expectedCompletedMessageTypes(
+    command,
+    actualStatus,
+  );
   if (query.rows.length !== expectedTypes.length) {
     throw new EngineFault(
       "dialogue.finalizer.database_corrupt",
@@ -1348,6 +2586,42 @@ async function readCompletedEnvelopes(
   return Object.freeze(envelopes);
 }
 
+function expectedCompletedMessageTypes(
+  command: ValidatedFinalizationCommand,
+  status: "accepted" | "rejected",
+): readonly string[] {
+  if (status === "rejected") {
+    return ["session.view", "command.result"];
+  }
+  if (
+    command.commandKind === "dialogue.start" ||
+    command.commandKind === "dialogue.continue"
+  ) {
+    return ["dialogue.reply", "session.view", "command.result"];
+  }
+  if (command.commandKind === "player_day.end") {
+    return ["session.view", "command.result"];
+  }
+  if (command.eventCardBranch === "trigger") {
+    return [
+      "session.view",
+      "presentation.frame",
+      "command.result",
+    ];
+  }
+  if (command.eventCardBranch === "invalidate") {
+    return ["session.view", "command.result"];
+  }
+  throw new EngineFault(
+    "command.finalizer.database_corrupt",
+    "Accepted EventCard command is missing its committed branch",
+    {
+      session_id: command.sessionId,
+      command_id: command.commandId,
+    },
+  );
+}
+
 function asObjectArray(
   value: JsonValue,
   path: string,
@@ -1362,6 +2636,20 @@ function asObjectArray(
   return value.map((entry, index) =>
     expectJsonObject(entry as JsonValue, `${path}[${index}]`),
   );
+}
+
+function cloneJson(value: JsonValue): JsonValue {
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => cloneJson(entry as JsonValue));
+  }
+  const clone: Record<string, JsonValue> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    clone[key] = cloneJson(entry);
+  }
+  return clone;
 }
 
 interface PostgresErrorLike {

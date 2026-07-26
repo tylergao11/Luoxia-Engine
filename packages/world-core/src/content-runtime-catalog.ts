@@ -30,6 +30,18 @@ export interface RuleRefLike {
   readonly rule_id: string;
 }
 
+export type PlanningCatalogKind =
+  | "definition_type"
+  | "capability"
+  | "generation_archetype";
+
+export interface PlanningCatalogRefLike {
+  readonly bundle_id: string;
+  readonly bundle_digest: string;
+  readonly catalog_kind: PlanningCatalogKind;
+  readonly local_id: string;
+}
+
 /**
  * Content-side binding for rule.evaluate: WorldLaw + PluginOperationRef + DependencyLock.
  * Does not invent PluginLock.api_version — that comes only from a registered RulePlugin manifest.
@@ -117,6 +129,14 @@ export interface ContentRuntimeCatalog extends StaticComponentDigestLookup {
   hasBundle(bundleId: string, bundleDigest: string): boolean;
   findStaticDefinition(ref: StaticDefinitionRefLike): JsonObject | undefined;
   /**
+   * Resolve the three catalog kinds that may be introduced by an untrusted
+   * Director System planning response. The returned value is the original
+   * frozen ContentBundle object, never a copied DTO or fallback.
+   */
+  findPlanningCatalogEntry(
+    ref: PlanningCatalogRefLike,
+  ): JsonObject | undefined;
+  /**
    * Resolve RuleRef to WorldLaw evaluator and rule_plugin DependencyLock.
    * Missing bundle or law returns undefined; illegal shapes fail hard.
    */
@@ -169,6 +189,7 @@ interface IndexedBundle {
   readonly bundleDigest: string;
   readonly document: JsonObject;
   readonly definitions: ReadonlyMap<string, JsonObject>;
+  readonly definitionTypes: ReadonlyMap<string, JsonObject>;
   /** WorldDefinition.world_id → original WorldDefinition object. */
   readonly worlds: ReadonlyMap<string, JsonObject>;
   /** Registration-order WorldDefinition objects (no sort, no default pick). */
@@ -185,7 +206,9 @@ interface IndexedBundle {
   readonly stateMachines: ReadonlyMap<string, JsonObject>;
   readonly stateMachinesOrdered: readonly JsonObject[];
   readonly initialMachineBindings: readonly JsonObject[];
+  readonly capabilities: ReadonlyMap<string, JsonObject>;
   readonly capabilitiesOrdered: readonly JsonObject[];
+  readonly generationArchetypes: ReadonlyMap<string, JsonObject>;
 }
 
 export function createContentRuntimeCatalog(
@@ -289,6 +312,17 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
       }
       definitions.set(definitionId, definition);
     }
+    const definitionTypes = uniqueIdMap(
+      asObjectArray(
+        expectProperty(catalog, "types", "catalog"),
+        "catalog.types",
+      ),
+      "type_id",
+      "TypeDefinition",
+      packId,
+      bundleDigest,
+      "content.catalog.duplicate_type",
+    );
     const initialEntities = asObjectArray(
       expectProperty(catalog, "entities", "catalog"),
       "catalog.entities",
@@ -363,6 +397,29 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
     const capabilitiesOrdered = asObjectArray(
       expectProperty(gameplay, "capabilities", "gameplay"),
       "gameplay.capabilities",
+    );
+    const capabilities = uniqueIdMap(
+      capabilitiesOrdered,
+      "capability_id",
+      "Capability",
+      packId,
+      bundleDigest,
+      "content.catalog.duplicate_capability",
+    );
+    const generationArchetypes = uniqueIdMap(
+      asObjectArray(
+        expectProperty(
+          gameplay,
+          "generation_archetypes",
+          "gameplay",
+        ),
+        "gameplay.generation_archetypes",
+      ),
+      "archetype_id",
+      "GenerationArchetype",
+      packId,
+      bundleDigest,
+      "content.catalog.duplicate_generation_archetype",
     );
 
     const simulation = expectJsonObject(
@@ -468,6 +525,7 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
         bundleDigest,
         document: root,
         definitions,
+        definitionTypes,
         worlds,
         worldsOrdered: Object.freeze([...worldsList]),
         worldLaws,
@@ -484,7 +542,9 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
         initialMachineBindings: Object.freeze([
           ...initialMachineBindings,
         ]),
+        capabilities,
         capabilitiesOrdered: Object.freeze([...capabilitiesOrdered]),
+        generationArchetypes,
       }),
     );
   }
@@ -503,6 +563,31 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
       return undefined;
     }
     return indexed.definitions.get(ref.local_id);
+  }
+
+  public findPlanningCatalogEntry(
+    ref: PlanningCatalogRefLike,
+  ): JsonObject | undefined {
+    const indexed = this.#bundles.get(
+      bundleKey(ref.bundle_id, ref.bundle_digest),
+    );
+    if (indexed === undefined) {
+      return undefined;
+    }
+    switch (ref.catalog_kind) {
+      case "definition_type": {
+        const type = indexed.definitionTypes.get(ref.local_id);
+        return type !== undefined &&
+          expectString(type, "type_kind", "TypeDefinition") ===
+            "definition"
+          ? type
+          : undefined;
+      }
+      case "capability":
+        return indexed.capabilities.get(ref.local_id);
+      case "generation_archetype":
+        return indexed.generationArchetypes.get(ref.local_id);
+    }
   }
 
   public resolveRuleEvaluationBinding(

@@ -1,0 +1,52 @@
+{
+  "todos": [
+    {
+      "id": "s0",
+      "content": "Step 0 — 真相源对齐",
+      "status": "completed",
+      "priority": "medium"
+    },
+    {
+      "id": "s1",
+      "content": "Step 1 — Phase U0 环境预检",
+      "status": "completed",
+      "priority": "medium"
+    },
+    {
+      "id": "s2",
+      "content": "Step 2 — Phase U1 接缝蓝图",
+      "status": "completed",
+      "priority": "medium"
+    },
+    {
+      "id": "s3",
+      "content": "Step 3 — U2 门禁：等待路径/版本显式确认",
+      "status": "in_progress",
+      "priority": "medium"
+    },
+    {
+      "id": "s4",
+      "content": "Step 4 — Phase U2 创建正式 Unity 项目（确认后）",
+      "status": "pending",
+      "priority": "medium"
+    },
+    {
+      "id": "s5",
+      "content": "Step 5 — Phase U3 Client Bridge + Transport",
+      "status": "pending",
+      "priority": "medium"
+    },
+    {
+      "id": "s6",
+      "content": "Step 6 — Phase U4 NPC 对话可玩闭环",
+      "status": "pending",
+      "priority": "medium"
+    },
+    {
+      "id": "v",
+      "content": "Verification 与阶段交接",
+      "status": "pending",
+      "priority": "medium"
+    }
+  ]
+}

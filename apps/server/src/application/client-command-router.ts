@@ -9,6 +9,7 @@ import {
 
 import type { ServerEnvelopeDocument } from "./command-finalizer.js";
 import type { DialogueCommandOrchestrator } from "./dialogue-command-orchestrator.js";
+import type { EventCardCommandOrchestrator } from "./event-card-command-orchestrator.js";
 import type { PlayerDayCommandOrchestrator } from "./player-day-command-orchestrator.js";
 
 export interface ClientCommandRouter {
@@ -20,6 +21,7 @@ export interface ClientCommandRouter {
 export interface ClientCommandRouterDependencies {
   readonly contracts: ContractValidator;
   readonly dialogues: DialogueCommandOrchestrator;
+  readonly eventCards: EventCardCommandOrchestrator;
   readonly playerDays: PlayerDayCommandOrchestrator;
 }
 
@@ -47,6 +49,8 @@ export function createClientCommandRouter(
         case "dialogue.start":
         case "dialogue.continue":
           return dependencies.dialogues.execute(envelope.value);
+        case "event_card.trigger":
+          return dependencies.eventCards.execute(envelope.value);
         case "player_day.end":
           return dependencies.playerDays.execute(envelope.value);
         default:

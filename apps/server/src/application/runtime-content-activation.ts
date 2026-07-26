@@ -77,6 +77,10 @@ export interface RuntimeContentActivationInput {
   readonly characterDialogueModelProfileId: string;
   /** Explicit deployment-owned ModelProfile selection for Director daily work. */
   readonly directorDailySettlementModelProfileId: string;
+  /** Explicit deployment-owned ModelProfile selection for Director NPC dialogue events. */
+  readonly directorDialogueEventsModelProfileId: string;
+  /** Explicit deployment-owned ModelProfile selection for Director System dialogue. */
+  readonly directorSystemDialogueModelProfileId: string;
   /** Explicit deployment-owned ModelProfile selection for Character reactions. */
   readonly characterReactModelProfileId: string;
 }
@@ -144,6 +148,22 @@ export async function createRuntimeContentActivation(
   input.modelProvider.assertCanInvoke({
     modelProfileId: input.directorDailySettlementModelProfileId,
     requestKind: "director.daily_settlement",
+  });
+  input.contracts.assert(
+    CONTRACT_REF.identifier,
+    input.directorDialogueEventsModelProfileId,
+  );
+  input.modelProvider.assertCanInvoke({
+    modelProfileId: input.directorDialogueEventsModelProfileId,
+    requestKind: "director.dialogue_events",
+  });
+  input.contracts.assert(
+    CONTRACT_REF.identifier,
+    input.directorSystemDialogueModelProfileId,
+  );
+  input.modelProvider.assertCanInvoke({
+    modelProfileId: input.directorSystemDialogueModelProfileId,
+    requestKind: "director.system_dialogue",
   });
   input.contracts.assert(
     CONTRACT_REF.identifier,
@@ -268,6 +288,10 @@ export async function createRuntimeContentActivation(
       input.characterDialogueModelProfileId,
     directorDailySettlementModelProfileId:
       input.directorDailySettlementModelProfileId,
+    directorDialogueEventsModelProfileId:
+      input.directorDialogueEventsModelProfileId,
+    directorSystemDialogueModelProfileId:
+      input.directorSystemDialogueModelProfileId,
     characterReactModelProfileId: input.characterReactModelProfileId,
   });
 

@@ -7,9 +7,11 @@ import {
   expectString,
   jsonEquals,
   type ContractValidator,
+  type JsonDigest,
   type JsonObject,
   type JsonValue,
 } from "@luoxia/contracts-runtime";
+import type { ContentRuntimeCatalog } from "@luoxia/world-core";
 import type {
   DeterministicContextAuthority,
   WorldContentBinding,
@@ -20,6 +22,14 @@ import type {
   CommandFinalizer,
   ServerEnvelopeDocument,
 } from "./command-finalizer.js";
+import type {
+  DialogueDefinitionRunRecord,
+  DialogueDirectorRunJournal,
+  DialogueDirectorRunRecord,
+  DialogueEventCardRunRecord,
+  DialogueGoalPlanRunRecord,
+} from "./dialogue-director-run.js";
+import type { VerifiedModelInvocationReceipt } from "./model-gateway.js";
 import type { RuntimeModelFacades } from "./model-request-assembly.js";
 import type {
   RulePluginAbiRegistry,
@@ -37,6 +47,10 @@ import type {
 import type { WorldMutationOrchestrator } from "./world-mutation-orchestrator.js";
 
 type DialogueOperationKind = "dialogue.open" | "dialogue.turn.append";
+type OrchestratedOperationKind =
+  | DialogueOperationKind
+  | "definition.validate"
+  | "goal_plan.validate";
 
 export interface DialogueCommitmentIdFactory {
   createCommitmentId(): string;
@@ -50,6 +64,8 @@ export interface DialogueCommandOrchestrator {
 
 export interface DialogueCommandOrchestratorDependencies {
   readonly contracts: ContractValidator;
+  readonly digest: JsonDigest;
+  readonly catalog: ContentRuntimeCatalog;
   readonly commands: CommandJournal;
   readonly worlds: RuntimeWorldBindingResolver;
   readonly rulePluginAbi: RulePluginAbiRegistry;
@@ -58,15 +74,29 @@ export interface DialogueCommandOrchestratorDependencies {
   readonly models: RuntimeModelFacades;
   readonly mutations: WorldMutationOrchestrator;
   readonly finalizer: CommandFinalizer;
+  readonly directorRuns: DialogueDirectorRunJournal;
   readonly commitmentIds: DialogueCommitmentIdFactory;
   /** Required deployment selection; never read from content or a client message. */
   readonly characterDialogueModelProfileId: string;
+  /** Required deployment selection for Director NPC dialogue event calls. */
+  readonly directorDialogueEventsModelProfileId: string;
+  /** Required deployment selection for Director System dialogue calls. */
+  readonly directorSystemDialogueModelProfileId: string;
 }
 
 interface HumanStageContext {
   readonly binding: RuntimeWorldBinding;
   readonly input: JsonObject;
 }
+
+type DialogueResponder =
+  | {
+      readonly responderKind: "character_mind";
+      readonly entityId: string;
+    }
+  | {
+      readonly responderKind: "director_system";
+    };
 
 export function createDialogueCommandOrchestrator(
   dependencies: DialogueCommandOrchestratorDependencies,
@@ -78,6 +108,8 @@ class DefaultDialogueCommandOrchestrator
   implements DialogueCommandOrchestrator
 {
   readonly #contracts: ContractValidator;
+  readonly #digest: JsonDigest;
+  readonly #catalog: ContentRuntimeCatalog;
   readonly #commands: CommandJournal;
   readonly #worlds: RuntimeWorldBindingResolver;
   readonly #rulePluginAbi: RulePluginAbiRegistry;
@@ -86,13 +118,18 @@ class DefaultDialogueCommandOrchestrator
   readonly #models: RuntimeModelFacades;
   readonly #mutations: WorldMutationOrchestrator;
   readonly #finalizer: CommandFinalizer;
+  readonly #directorRuns: DialogueDirectorRunJournal;
   readonly #commitmentIds: DialogueCommitmentIdFactory;
   readonly #characterDialogueModelProfileId: string;
+  readonly #directorDialogueEventsModelProfileId: string;
+  readonly #directorSystemDialogueModelProfileId: string;
 
   public constructor(
     dependencies: DialogueCommandOrchestratorDependencies,
   ) {
     this.#contracts = dependencies.contracts;
+    this.#digest = dependencies.digest;
+    this.#catalog = dependencies.catalog;
     this.#commands = dependencies.commands;
     this.#worlds = dependencies.worlds;
     this.#rulePluginAbi = dependencies.rulePluginAbi;
@@ -101,12 +138,25 @@ class DefaultDialogueCommandOrchestrator
     this.#models = dependencies.models;
     this.#mutations = dependencies.mutations;
     this.#finalizer = dependencies.finalizer;
+    this.#directorRuns = dependencies.directorRuns;
     this.#commitmentIds = dependencies.commitmentIds;
     this.#characterDialogueModelProfileId =
       dependencies.characterDialogueModelProfileId;
+    this.#directorDialogueEventsModelProfileId =
+      dependencies.directorDialogueEventsModelProfileId;
+    this.#directorSystemDialogueModelProfileId =
+      dependencies.directorSystemDialogueModelProfileId;
     this.#contracts.assert(
       CONTRACT_REF.identifier,
       this.#characterDialogueModelProfileId,
+    );
+    this.#contracts.assert(
+      CONTRACT_REF.identifier,
+      this.#directorDialogueEventsModelProfileId,
+    );
+    this.#contracts.assert(
+      CONTRACT_REF.identifier,
+      this.#directorSystemDialogueModelProfileId,
     );
   }
 
@@ -185,7 +235,7 @@ class DefaultDialogueCommandOrchestrator
         this.#createHumanRulePluginRequest(stored),
       modelInvocations: [],
     });
-    const recipientEntityId =
+    const responder =
       await this.#assertHumanReceiptIdentity(stored, humanReceipt);
     if (humanReceipt.proposal === undefined) {
       return this.#finalizer.completeRejected({
@@ -202,6 +252,14 @@ class DefaultDialogueCommandOrchestrator
       stored,
       "human",
     );
+    const humanWorldRevision = stored.session.worldRevision + 1;
+    if (responder.responderKind === "director_system") {
+      return this.#executeSystemResponse({
+        command: stored,
+        humanWorldRevision,
+      });
+    }
+    const recipientEntityId = responder.entityId;
 
     const modelReceipt = await this.#models.characterDialogue({
       worldId: stored.session.worldId,
@@ -250,26 +308,1058 @@ class DefaultDialogueCommandOrchestrator
     }
     const characterCommit =
       await this.#mutations.commitRulePluginReceipt(characterReceipt);
-    const finalWorldRevision = stored.session.worldRevision + 2;
+    const characterWorldRevision = stored.session.worldRevision + 2;
     assertCommittedRevision(
       characterCommit.value,
-      finalWorldRevision,
+      characterWorldRevision,
       stored,
       "character",
     );
+
+    const directorRun = await this.#directorRuns.prepare({
+      command: stored,
+      dialogueId: stored.dialogueExecution.dialogueId,
+      requestKind: "director.dialogue_events",
+    });
+    const directorReceipt = await this.#models.directorDialogueEvents({
+      worldId: stored.session.worldId,
+      dialogueId: stored.dialogueExecution.dialogueId,
+      requestId: directorRun.modelRequestId,
+      model_profile_id:
+        this.#directorDialogueEventsModelProfileId,
+    });
+    assertDirectorDialogueReceiptIdentity({
+      command: stored,
+      requestId: directorRun.modelRequestId,
+      modelProfileId:
+        this.#directorDialogueEventsModelProfileId,
+      receipt: directorReceipt,
+      expectedBasisRevision: characterWorldRevision,
+    });
+    const finalWorldRevision =
+      await this.#publishDirectorEventCards({
+        command: stored,
+        run: directorRun,
+        modelReceipt: directorReceipt,
+        startingWorldRevision: characterWorldRevision,
+      });
 
     return this.#finalizer.completeDialogueAccepted({
       sessionId: stored.session.sessionId,
       commandId: stored.commandId,
       finalWorldRevision,
-      characterTurnId: stored.dialogueExecution.characterTurnId,
+      responseTurnId: stored.dialogueExecution.characterTurnId,
     });
+  }
+
+  async #executeSystemResponse(input: {
+    readonly command: StoredReceivedCommand;
+    readonly humanWorldRevision: number;
+  }): Promise<readonly ServerEnvelopeDocument[]> {
+    const execution = requireDialogueExecution(input.command);
+    const run = await this.#directorRuns.prepare({
+      command: input.command,
+      dialogueId: execution.dialogueId,
+      requestKind: "director.system_dialogue",
+    });
+    const responseTurnId = requireSystemRunIdentity(
+      input.command,
+      run.responseTurnId,
+      "response_turn_id",
+    );
+    const responseRuleRequestId = requireSystemRunIdentity(
+      input.command,
+      run.responseRuleRequestId,
+      "response_rule_request_id",
+    );
+    const modelReceipt = await this.#models.directorSystemDialogue({
+      worldId: input.command.session.worldId,
+      dialogueId: execution.dialogueId,
+      playerEntityId: input.command.session.playerEntityId,
+      requestId: run.modelRequestId,
+      model_profile_id:
+        this.#directorSystemDialogueModelProfileId,
+    });
+    assertDirectorSystemReceiptIdentity({
+      command: input.command,
+      requestId: run.modelRequestId,
+      modelProfileId:
+        this.#directorSystemDialogueModelProfileId,
+      receipt: modelReceipt,
+      expectedBasisRevision: input.humanWorldRevision,
+    });
+
+    const responseReceipt =
+      await this.#rulePlugins.executeRecoverable({
+        requestId: responseRuleRequestId,
+        candidateFactory: async () =>
+          this.#createSystemTurnAppendRequest({
+            command: input.command,
+            run,
+            modelReceipt,
+            expectedWorldRevision: input.humanWorldRevision,
+          }),
+        modelInvocations: [modelReceipt],
+      });
+    await this.#assertSystemTurnReceiptIdentity({
+      command: input.command,
+      run,
+      modelReceipt,
+      receipt: responseReceipt,
+      expectedWorldRevision: input.humanWorldRevision,
+    });
+    if (responseReceipt.proposal === undefined) {
+      throw new EngineFault(
+        "dialogue.orchestration.system_append_rejected",
+        "System turn append was rejected after the human packet committed; command remains blocked for explicit repair",
+        {
+          session_id: input.command.session.sessionId,
+          command_id: input.command.commandId,
+          request_id: responseRuleRequestId,
+          reject_code: readRejectCode(responseReceipt),
+        },
+      );
+    }
+    const responseCommit =
+      await this.#mutations.commitRulePluginReceipt(responseReceipt);
+    const responseWorldRevision = input.humanWorldRevision + 1;
+    assertCommittedRevision(
+      responseCommit.value,
+      responseWorldRevision,
+      input.command,
+      "director_system",
+    );
+
+    const output = readModelOutput(modelReceipt);
+    const definitions = asObjectArray(
+      expectProperty(
+        output,
+        "definitions",
+        "DirectorSystemDialogueOutput",
+      ),
+      "DirectorSystemDialogueOutput.definitions",
+    );
+    const goalPlans = asObjectArray(
+      expectProperty(
+        output,
+        "goal_plans",
+        "DirectorSystemDialogueOutput",
+      ),
+      "DirectorSystemDialogueOutput.goal_plans",
+    );
+    const eventCards = asObjectArray(
+      expectProperty(
+        output,
+        "event_cards",
+        "DirectorSystemDialogueOutput",
+      ),
+      "DirectorSystemDialogueOutput.event_cards",
+    );
+    const proposalRuns =
+      await this.#directorRuns.prepareProposals({
+        run,
+        definitionProposalIds: proposalIds(
+          definitions,
+          "DynamicDefinitionProposal",
+        ),
+        goalPlanProposalIds: proposalIds(
+          goalPlans,
+          "GoalPlanProposal",
+        ),
+        eventCardProposalIds: proposalIds(
+          eventCards,
+          "EventCardProposal",
+        ),
+      });
+
+    let finalWorldRevision =
+      await this.#publishSystemDefinitions({
+        command: input.command,
+        modelReceipt,
+        proposals: definitions,
+        identities: proposalRuns.definitions,
+        startingWorldRevision: responseWorldRevision,
+      });
+    finalWorldRevision =
+      await this.#publishSystemGoalPlans({
+        command: input.command,
+        modelReceipt,
+        proposals: goalPlans,
+        identities: proposalRuns.goalPlans,
+        startingWorldRevision: finalWorldRevision,
+      });
+    finalWorldRevision =
+      await this.#publishDirectorEventCards({
+        command: input.command,
+        run,
+        modelReceipt,
+        startingWorldRevision: finalWorldRevision,
+        identities: proposalRuns.eventCards,
+      });
+
+    return this.#finalizer.completeDialogueAccepted({
+      sessionId: input.command.session.sessionId,
+      commandId: input.command.commandId,
+      finalWorldRevision,
+      responseTurnId,
+    });
+  }
+
+  async #createSystemTurnAppendRequest(input: {
+    readonly command: StoredReceivedCommand;
+    readonly run: DialogueDirectorRunRecord;
+    readonly modelReceipt: VerifiedModelInvocationReceipt;
+    readonly expectedWorldRevision: number;
+  }): Promise<JsonObject> {
+    const binding = await this.#worlds.resolveCurrent(
+      input.command.session.worldId,
+    );
+    assertWorldRevision(
+      binding,
+      input.expectedWorldRevision,
+      input.command,
+      "director_system",
+    );
+    const snapshot = binding.record.snapshot;
+    const worldState = worldStateFromSnapshot(snapshot.value);
+    const dialogue = requireDialogue(
+      worldState,
+      input.run.dialogueId,
+    );
+    requireSystemDialogueResponder({
+      worldState,
+      dialogue,
+      worldId: input.command.session.worldId,
+      playerEntityId: input.command.session.playerEntityId,
+    });
+    const invocation = resolveDialogueInvocation(
+      binding.contentBinding,
+      "dialogue.turn.append",
+      this.#rulePluginAbi,
+    );
+    const output = readModelOutput(input.modelReceipt);
+    const outputDigest = expectString(
+      input.modelReceipt.proof.value,
+      "output_digest",
+      "VerifiedModelOutputRef",
+    );
+    const deterministicContext = this.#deterministicContexts.issue({
+      worldId: input.command.session.worldId,
+      logicalTime: expectProperty(worldState, "clock", "WorldState"),
+      randomChoices: [],
+      externalResults: [
+        Object.freeze({
+          result_id: "director_system_dialogue_output",
+          content_digest: outputDigest,
+          payload: output,
+        }),
+      ],
+    });
+    return Object.freeze({
+      contract_version: "rule-plugin.v1",
+      record_type: "rule_plugin.request",
+      request_id: requireSystemRunIdentity(
+        input.command,
+        input.run.responseRuleRequestId,
+        "response_rule_request_id",
+      ),
+      plugin_lock: invocation.pluginLock,
+      operation_id: invocation.operationId,
+      operation_kind: "dialogue.turn.append",
+      basis_revision: input.expectedWorldRevision,
+      readonly_world: snapshot.value,
+      deterministic_context: deterministicContext.value,
+      input: Object.freeze({
+        dialogue_id: input.run.dialogueId,
+        expected_revision: expectInteger(
+          dialogue,
+          "revision",
+          "DialogueRecord",
+        ),
+        model_proof: input.modelReceipt.proof.value,
+        turn: createDirectorSystemTurn({
+          command: input.command,
+          run: input.run,
+          worldState,
+          output,
+          outputDigest,
+        }),
+      }),
+    });
+  }
+
+  async #assertSystemTurnReceiptIdentity(input: {
+    readonly command: StoredReceivedCommand;
+    readonly run: DialogueDirectorRunRecord;
+    readonly modelReceipt: VerifiedModelInvocationReceipt;
+    readonly receipt: VerifiedRulePluginInvocationReceipt;
+    readonly expectedWorldRevision: number;
+  }): Promise<void> {
+    const binding = await this.#worlds.resolveCurrent(
+      input.command.session.worldId,
+    );
+    const invocation = resolveDialogueInvocation(
+      binding.contentBinding,
+      "dialogue.turn.append",
+      this.#rulePluginAbi,
+    );
+    const responseRuleRequestId = requireSystemRunIdentity(
+      input.command,
+      input.run.responseRuleRequestId,
+      "response_rule_request_id",
+    );
+    assertRulePluginRequestHeader({
+      receipt: input.receipt,
+      command: input.command,
+      expectedRequestId: responseRuleRequestId,
+      expectedBasisRevision: input.expectedWorldRevision,
+      operationKind: "dialogue.turn.append",
+      invocation,
+    });
+    const requestInput = rulePluginRequestInput(input.receipt);
+    const turn = expectJsonObject(
+      expectProperty(
+        requestInput,
+        "turn",
+        "DirectorSystemDialogueTurnAppendInput",
+      ),
+      "DirectorSystemDialogueTurnAppendInput.turn",
+    );
+    const source = expectJsonObject(
+      expectProperty(turn, "source", "DialogueTurn"),
+      "DialogueTurn.source",
+    );
+    const speaker = expectJsonObject(
+      expectProperty(turn, "speaker", "DialogueTurn"),
+      "DialogueTurn.speaker",
+    );
+    if (
+      expectString(
+        requestInput,
+        "dialogue_id",
+        "DirectorSystemDialogueTurnAppendInput",
+      ) !== input.run.dialogueId ||
+      !jsonEquals(
+        expectProperty(
+          requestInput,
+          "model_proof",
+          "DirectorSystemDialogueTurnAppendInput",
+        ),
+        input.modelReceipt.proof.value,
+      ) ||
+      expectString(turn, "turn_id", "DialogueTurn") !==
+        requireSystemRunIdentity(
+          input.command,
+          input.run.responseTurnId,
+          "response_turn_id",
+        ) ||
+      expectString(
+        speaker,
+        "participant_kind",
+        "DialogueParticipantRef",
+      ) !== "system" ||
+      expectString(source, "source_kind", "DialogueTurnSource") !==
+        "director_system" ||
+      expectString(
+        source,
+        "model_request_id",
+        "DialogueTurnSource",
+      ) !== input.run.modelRequestId ||
+      expectString(
+        source,
+        "model_output_digest",
+        "DialogueTurnSource",
+      ) !==
+        expectString(
+          input.modelReceipt.proof.value,
+          "output_digest",
+          "VerifiedModelOutputRef",
+        )
+    ) {
+      throw commandIdentityFault(
+        input.command,
+        "Recovered System turn invocation differs from its Director run identity",
+        { request_id: responseRuleRequestId },
+      );
+    }
+  }
+
+  async #publishSystemDefinitions(input: {
+    readonly command: StoredReceivedCommand;
+    readonly modelReceipt: VerifiedModelInvocationReceipt;
+    readonly proposals: readonly JsonObject[];
+    readonly identities: readonly DialogueDefinitionRunRecord[];
+    readonly startingWorldRevision: number;
+  }): Promise<number> {
+    assertProposalIdentityOrder({
+      command: input.command,
+      proposals: input.proposals,
+      identities: input.identities,
+      proposalLabel: "DynamicDefinitionProposal",
+    });
+    let expectedWorldRevision = input.startingWorldRevision;
+    for (const [ordinal, proposal] of input.proposals.entries()) {
+      const identity = input.identities[
+        ordinal
+      ] as DialogueDefinitionRunRecord;
+      const receipt = await this.#rulePlugins.executeRecoverable({
+        requestId: identity.ruleRequestId,
+        candidateFactory: async () =>
+          this.#createDefinitionValidationRequest({
+            command: input.command,
+            proposal,
+            identity,
+            modelReceipt: input.modelReceipt,
+            expectedWorldRevision,
+          }),
+        modelInvocations: [input.modelReceipt],
+      });
+      await this.#assertDefinitionReceiptIdentity({
+        command: input.command,
+        proposal,
+        identity,
+        modelReceipt: input.modelReceipt,
+        receipt,
+        expectedWorldRevision,
+      });
+      if (receipt.proposal === undefined) {
+        continue;
+      }
+      const committed =
+        await this.#mutations.commitRulePluginReceipt(receipt);
+      expectedWorldRevision = assertNextCommittedRevision({
+        command: input.command,
+        committed: committed.value,
+        currentWorldRevision: expectedWorldRevision,
+        stage: "definition",
+        proposalId: identity.proposalId,
+      });
+    }
+    return expectedWorldRevision;
+  }
+
+  async #publishSystemGoalPlans(input: {
+    readonly command: StoredReceivedCommand;
+    readonly modelReceipt: VerifiedModelInvocationReceipt;
+    readonly proposals: readonly JsonObject[];
+    readonly identities: readonly DialogueGoalPlanRunRecord[];
+    readonly startingWorldRevision: number;
+  }): Promise<number> {
+    assertProposalIdentityOrder({
+      command: input.command,
+      proposals: input.proposals,
+      identities: input.identities,
+      proposalLabel: "GoalPlanProposal",
+    });
+    let expectedWorldRevision = input.startingWorldRevision;
+    for (const [ordinal, proposal] of input.proposals.entries()) {
+      const identity = input.identities[
+        ordinal
+      ] as DialogueGoalPlanRunRecord;
+      const receipt = await this.#rulePlugins.executeRecoverable({
+        requestId: identity.ruleRequestId,
+        candidateFactory: async () =>
+          this.#createGoalPlanValidationRequest({
+            command: input.command,
+            proposal,
+            identity,
+            modelReceipt: input.modelReceipt,
+            expectedWorldRevision,
+          }),
+        modelInvocations: [input.modelReceipt],
+      });
+      await this.#assertGoalPlanReceiptIdentity({
+        command: input.command,
+        proposal,
+        identity,
+        modelReceipt: input.modelReceipt,
+        receipt,
+        expectedWorldRevision,
+      });
+      if (receipt.proposal === undefined) {
+        continue;
+      }
+      const committed =
+        await this.#mutations.commitRulePluginReceipt(receipt);
+      expectedWorldRevision = assertNextCommittedRevision({
+        command: input.command,
+        committed: committed.value,
+        currentWorldRevision: expectedWorldRevision,
+        stage: "goal_plan",
+        proposalId: identity.proposalId,
+      });
+    }
+    return expectedWorldRevision;
+  }
+
+  async #createDefinitionValidationRequest(input: {
+    readonly command: StoredReceivedCommand;
+    readonly proposal: JsonObject;
+    readonly identity: DialogueDefinitionRunRecord;
+    readonly modelReceipt: VerifiedModelInvocationReceipt;
+    readonly expectedWorldRevision: number;
+  }): Promise<JsonObject> {
+    const binding = await this.#worlds.resolveCurrent(
+      input.command.session.worldId,
+    );
+    assertWorldRevision(
+      binding,
+      input.expectedWorldRevision,
+      input.command,
+      "definition",
+    );
+    const type = requireDefinitionProposalType({
+      catalog: this.#catalog,
+      contentBinding: binding.contentBinding,
+      proposal: input.proposal,
+      command: input.command,
+    });
+    const invocation = resolveRulePluginInvocationBinding({
+      binding: binding.contentBinding,
+      operationKind: "definition.validate",
+      abi: this.#rulePluginAbi,
+      sourcePredicate: (candidate) =>
+        expectString(
+          candidate.source,
+          "owner_kind",
+          "RulePlugin operation source",
+        ) === "type_definition" &&
+        expectString(
+          candidate.source,
+          "owner_id",
+          "RulePlugin operation source",
+        ) === type.typeId,
+      faultOwner: `type_definition:${type.typeId}`,
+    });
+    const constraints = worldLawRefs(
+      this.#catalog,
+      binding.contentBinding,
+      input.command,
+    );
+    return this.#createSystemPlanningRequest({
+      command: input.command,
+      modelReceipt: input.modelReceipt,
+      expectedWorldRevision: input.expectedWorldRevision,
+      preparedAt: input.identity.preparedAt,
+      requestId: input.identity.ruleRequestId,
+      invocation,
+      operationKind: "definition.validate",
+      input: Object.freeze({
+        definition_id: input.identity.definitionId,
+        proposal: input.proposal,
+        constraints,
+        model_proof: input.modelReceipt.proof.value,
+      }),
+      binding,
+    });
+  }
+
+  async #createGoalPlanValidationRequest(input: {
+    readonly command: StoredReceivedCommand;
+    readonly proposal: JsonObject;
+    readonly identity: DialogueGoalPlanRunRecord;
+    readonly modelReceipt: VerifiedModelInvocationReceipt;
+    readonly expectedWorldRevision: number;
+  }): Promise<JsonObject> {
+    const binding = await this.#worlds.resolveCurrent(
+      input.command.session.worldId,
+    );
+    assertWorldRevision(
+      binding,
+      input.expectedWorldRevision,
+      input.command,
+      "goal_plan",
+    );
+    assertGoalPlanProposalSemantics({
+      catalog: this.#catalog,
+      contentBinding: binding.contentBinding,
+      proposal: input.proposal,
+      worldState: worldStateFromSnapshot(
+        binding.record.snapshot.value,
+      ),
+      command: input.command,
+    });
+    const invocation = resolveRulePluginInvocationBinding({
+      binding: binding.contentBinding,
+      operationKind: "goal_plan.validate",
+      abi: this.#rulePluginAbi,
+      faultOwner: "WorldDefinition.goal_plan_validator",
+    });
+    return this.#createSystemPlanningRequest({
+      command: input.command,
+      modelReceipt: input.modelReceipt,
+      expectedWorldRevision: input.expectedWorldRevision,
+      preparedAt: input.identity.preparedAt,
+      requestId: input.identity.ruleRequestId,
+      invocation,
+      operationKind: "goal_plan.validate",
+      input: Object.freeze({
+        plan_id: input.identity.planId,
+        proposal: input.proposal,
+        model_proof: input.modelReceipt.proof.value,
+      }),
+      binding,
+    });
+  }
+
+  #createSystemPlanningRequest(input: {
+    readonly command: StoredReceivedCommand;
+    readonly modelReceipt: VerifiedModelInvocationReceipt;
+    readonly expectedWorldRevision: number;
+    readonly preparedAt: string;
+    readonly requestId: string;
+    readonly invocation: RuntimeRulePluginInvocationBinding;
+    readonly operationKind:
+      | "definition.validate"
+      | "goal_plan.validate";
+    readonly input: JsonObject;
+    readonly binding: RuntimeWorldBinding;
+  }): JsonObject {
+    const snapshot = input.binding.record.snapshot;
+    const worldState = worldStateFromSnapshot(snapshot.value);
+    const output = readModelOutput(input.modelReceipt);
+    const outputDigest = expectString(
+      input.modelReceipt.proof.value,
+      "output_digest",
+      "VerifiedModelOutputRef",
+    );
+    const deterministicContext = this.#deterministicContexts.issue({
+      worldId: input.command.session.worldId,
+      logicalTime: expectProperty(worldState, "clock", "WorldState"),
+      randomChoices: [],
+      externalResults: [
+        Object.freeze({
+          result_id: "director_system_dialogue_output",
+          content_digest: outputDigest,
+          payload: output,
+        }),
+        Object.freeze({
+          result_id: "system_provenance_created_at",
+          content_digest: this.#digest.sha256(input.preparedAt),
+          payload: input.preparedAt,
+        }),
+      ],
+    });
+    return Object.freeze({
+      contract_version: "rule-plugin.v1",
+      record_type: "rule_plugin.request",
+      request_id: input.requestId,
+      plugin_lock: input.invocation.pluginLock,
+      operation_id: input.invocation.operationId,
+      operation_kind: input.operationKind,
+      basis_revision: input.expectedWorldRevision,
+      readonly_world: snapshot.value,
+      deterministic_context: deterministicContext.value,
+      input: input.input,
+    });
+  }
+
+  async #assertDefinitionReceiptIdentity(input: {
+    readonly command: StoredReceivedCommand;
+    readonly proposal: JsonObject;
+    readonly identity: DialogueDefinitionRunRecord;
+    readonly modelReceipt: VerifiedModelInvocationReceipt;
+    readonly receipt: VerifiedRulePluginInvocationReceipt;
+    readonly expectedWorldRevision: number;
+  }): Promise<void> {
+    const binding = await this.#worlds.resolveCurrent(
+      input.command.session.worldId,
+    );
+    const type = requireDefinitionProposalType({
+      catalog: this.#catalog,
+      contentBinding: binding.contentBinding,
+      proposal: input.proposal,
+      command: input.command,
+    });
+    const invocation = resolveRulePluginInvocationBinding({
+      binding: binding.contentBinding,
+      operationKind: "definition.validate",
+      abi: this.#rulePluginAbi,
+      sourcePredicate: (candidate) =>
+        expectString(
+          candidate.source,
+          "owner_kind",
+          "RulePlugin operation source",
+        ) === "type_definition" &&
+        expectString(
+          candidate.source,
+          "owner_id",
+          "RulePlugin operation source",
+        ) === type.typeId,
+      faultOwner: `type_definition:${type.typeId}`,
+    });
+    const constraints = worldLawRefs(
+      this.#catalog,
+      binding.contentBinding,
+      input.command,
+    );
+    assertSystemPlanningReceiptIdentity({
+      command: input.command,
+      receipt: input.receipt,
+      expectedRequestId: input.identity.ruleRequestId,
+      expectedBasisRevision: input.expectedWorldRevision,
+      operationKind: "definition.validate",
+      invocation,
+      identityField: "definition_id",
+      expectedWorldRecordId: input.identity.definitionId,
+      expectedProposal: input.proposal,
+      expectedModelProof: input.modelReceipt.proof.value,
+      expectedPreparedAt: input.identity.preparedAt,
+      digest: this.#digest,
+      expectedConstraints: constraints,
+    });
+  }
+
+  async #assertGoalPlanReceiptIdentity(input: {
+    readonly command: StoredReceivedCommand;
+    readonly proposal: JsonObject;
+    readonly identity: DialogueGoalPlanRunRecord;
+    readonly modelReceipt: VerifiedModelInvocationReceipt;
+    readonly receipt: VerifiedRulePluginInvocationReceipt;
+    readonly expectedWorldRevision: number;
+  }): Promise<void> {
+    const binding = await this.#worlds.resolveCurrent(
+      input.command.session.worldId,
+    );
+    assertGoalPlanProposalSemantics({
+      catalog: this.#catalog,
+      contentBinding: binding.contentBinding,
+      proposal: input.proposal,
+      worldState: worldStateFromSnapshot(
+        expectJsonObject(
+          expectProperty(
+            input.receipt.request.value,
+            "readonly_world",
+            "RulePluginRequest",
+          ),
+          "RulePluginRequest.readonly_world",
+        ),
+      ),
+      command: input.command,
+    });
+    const invocation = resolveRulePluginInvocationBinding({
+      binding: binding.contentBinding,
+      operationKind: "goal_plan.validate",
+      abi: this.#rulePluginAbi,
+      faultOwner: "WorldDefinition.goal_plan_validator",
+    });
+    assertSystemPlanningReceiptIdentity({
+      command: input.command,
+      receipt: input.receipt,
+      expectedRequestId: input.identity.ruleRequestId,
+      expectedBasisRevision: input.expectedWorldRevision,
+      operationKind: "goal_plan.validate",
+      invocation,
+      identityField: "plan_id",
+      expectedWorldRecordId: input.identity.planId,
+      expectedProposal: input.proposal,
+      expectedModelProof: input.modelReceipt.proof.value,
+      expectedPreparedAt: input.identity.preparedAt,
+      digest: this.#digest,
+      expectedConstraints: undefined,
+    });
+  }
+
+  async #publishDirectorEventCards(input: {
+    readonly command: StoredReceivedCommand;
+    readonly run: DialogueDirectorRunRecord;
+    readonly modelReceipt: VerifiedModelInvocationReceipt;
+    readonly startingWorldRevision: number;
+    readonly identities?: readonly DialogueEventCardRunRecord[];
+  }): Promise<number> {
+    const output = readModelOutput(input.modelReceipt);
+    const proposals = asObjectArray(
+      expectProperty(
+        output,
+        "event_cards",
+        "DirectorDialogueEventsOutput",
+      ),
+      "DirectorDialogueEventsOutput.event_cards",
+    );
+    const identities =
+      input.identities ??
+      (
+        await this.#directorRuns.prepareProposals({
+          run: input.run,
+          definitionProposalIds: [],
+          goalPlanProposalIds: [],
+          eventCardProposalIds: proposalIds(
+            proposals,
+            "EventCardProposal",
+          ),
+        })
+      ).eventCards;
+    assertProposalIdentityOrder({
+      command: input.command,
+      proposals,
+      identities,
+      proposalLabel: "EventCardProposal",
+    });
+
+    let expectedWorldRevision = input.startingWorldRevision;
+    for (const [ordinal, proposal] of proposals.entries()) {
+      const identity = identities[ordinal] as
+        | DialogueEventCardRunRecord
+        | undefined;
+      if (
+        identity === undefined ||
+        identity.ordinal !== ordinal ||
+        identity.proposalId !==
+          expectString(
+            proposal,
+            "proposal_id",
+            "EventCardProposal",
+          )
+      ) {
+        throw commandIdentityFault(
+          input.command,
+          "Persisted EventCard RulePlugin identity order differs from the verified Director response",
+          { proposal_ordinal: ordinal },
+        );
+      }
+      const receipt = await this.#rulePlugins.executeRecoverable({
+        requestId: identity.ruleRequestId,
+        candidateFactory: async () =>
+          this.#createEventCardPublishRequest({
+            command: input.command,
+            proposal,
+            modelReceipt: input.modelReceipt,
+            requestId: identity.ruleRequestId,
+            expectedWorldRevision,
+          }),
+        modelInvocations: [input.modelReceipt],
+      });
+      await this.#assertEventCardPublishReceiptIdentity({
+        command: input.command,
+        proposal,
+        modelReceipt: input.modelReceipt,
+        receipt,
+        requestId: identity.ruleRequestId,
+        expectedWorldRevision,
+      });
+      if (receipt.proposal === undefined) {
+        continue;
+      }
+      const committed =
+        await this.#mutations.commitRulePluginReceipt(receipt);
+      const nextRevision = expectedWorldRevision + 1;
+      if (!Number.isSafeInteger(nextRevision)) {
+        throw new EngineFault(
+          "dialogue.orchestration.world_revision_exhausted",
+          "EventCard publication cannot advance world revision safely",
+          {
+            session_id: input.command.session.sessionId,
+            command_id: input.command.commandId,
+            world_revision: expectedWorldRevision,
+          },
+        );
+      }
+      const actualRevision = expectInteger(
+        committed.value,
+        "world_revision",
+        "ApplyPacketResult",
+      );
+      if (actualRevision !== nextRevision) {
+        throw commandIdentityFault(
+          input.command,
+          "EventCard publication returned an unexpected world revision",
+          {
+            proposal_id: identity.proposalId,
+            expected_world_revision: nextRevision,
+            actual_world_revision: actualRevision,
+          },
+        );
+      }
+      expectedWorldRevision = nextRevision;
+    }
+    return expectedWorldRevision;
+  }
+
+  async #createEventCardPublishRequest(input: {
+    readonly command: StoredReceivedCommand;
+    readonly proposal: JsonObject;
+    readonly modelReceipt: VerifiedModelInvocationReceipt;
+    readonly requestId: string;
+    readonly expectedWorldRevision: number;
+  }): Promise<JsonObject> {
+    const binding = await this.#worlds.resolveCurrent(
+      input.command.session.worldId,
+    );
+    assertWorldRevision(
+      binding,
+      input.expectedWorldRevision,
+      input.command,
+      "event_card",
+    );
+    const invocation = resolveRulePluginInvocationBinding({
+      binding: binding.contentBinding,
+      operationKind: "event_card.publish",
+      abi: this.#rulePluginAbi,
+      faultOwner: "WorldDefinition.event_budget.card_cost_resolver",
+    });
+    const snapshot = binding.record.snapshot;
+    const worldState = expectJsonObject(
+      expectProperty(
+        snapshot.value,
+        "world_state",
+        "WorldSnapshot",
+      ),
+      "WorldSnapshot.world_state",
+    );
+    const modelOutputDigest = expectString(
+      input.modelReceipt.proof.value,
+      "output_digest",
+      "VerifiedModelOutputRef",
+    );
+    const modelOutput = readModelOutput(input.modelReceipt);
+    const requestKind = expectString(
+      input.modelReceipt.proof.value,
+      "request_kind",
+      "VerifiedModelOutputRef",
+    );
+    const deterministicContext = this.#deterministicContexts.issue({
+      worldId: input.command.session.worldId,
+      logicalTime: expectProperty(worldState, "clock", "WorldState"),
+      randomChoices: [],
+      externalResults: [
+        Object.freeze({
+          result_id:
+            requestKind === "director.system_dialogue"
+              ? "director_system_dialogue_output"
+              : "director_dialogue_events_output",
+          content_digest: modelOutputDigest,
+          payload: modelOutput,
+        }),
+      ],
+    });
+    return Object.freeze({
+      contract_version: "rule-plugin.v1",
+      record_type: "rule_plugin.request",
+      request_id: input.requestId,
+      plugin_lock: invocation.pluginLock,
+      operation_id: invocation.operationId,
+      operation_kind: "event_card.publish",
+      basis_revision: input.expectedWorldRevision,
+      readonly_world: snapshot.value,
+      deterministic_context: deterministicContext.value,
+      input: Object.freeze({
+        control: Object.freeze({
+          binding_id: input.command.session.controlBindingId,
+        }),
+        proposal: input.proposal,
+        policy: binding.contentBinding.eventBudget,
+        model_proof: input.modelReceipt.proof.value,
+      }),
+    });
+  }
+
+  async #assertEventCardPublishReceiptIdentity(input: {
+    readonly command: StoredReceivedCommand;
+    readonly proposal: JsonObject;
+    readonly modelReceipt: VerifiedModelInvocationReceipt;
+    readonly receipt: VerifiedRulePluginInvocationReceipt;
+    readonly requestId: string;
+    readonly expectedWorldRevision: number;
+  }): Promise<void> {
+    const binding = await this.#worlds.resolveCurrent(
+      input.command.session.worldId,
+    );
+    const invocation = resolveRulePluginInvocationBinding({
+      binding: binding.contentBinding,
+      operationKind: "event_card.publish",
+      abi: this.#rulePluginAbi,
+      faultOwner: "WorldDefinition.event_budget.card_cost_resolver",
+    });
+    const request = input.receipt.request.value;
+    const readonlyWorld = expectJsonObject(
+      expectProperty(
+        request,
+        "readonly_world",
+        "RulePluginRequest",
+      ),
+      "RulePluginRequest.readonly_world",
+    );
+    const requestInput = expectJsonObject(
+      expectProperty(request, "input", "RulePluginRequest"),
+      "RulePluginRequest.input",
+    );
+    const control = expectJsonObject(
+      expectProperty(
+        requestInput,
+        "control",
+        "EventCardPublishInput",
+      ),
+      "EventCardPublishInput.control",
+    );
+    if (
+      input.receipt.worldId !== input.command.session.worldId ||
+      input.receipt.basisRevision !== input.expectedWorldRevision ||
+      expectString(request, "request_id", "RulePluginRequest") !==
+        input.requestId ||
+      expectString(request, "operation_kind", "RulePluginRequest") !==
+        "event_card.publish" ||
+      expectString(request, "operation_id", "RulePluginRequest") !==
+        invocation.operationId ||
+      expectInteger(request, "basis_revision", "RulePluginRequest") !==
+        input.expectedWorldRevision ||
+      expectString(readonlyWorld, "world_id", "WorldSnapshot") !==
+        input.command.session.worldId ||
+      expectInteger(
+        readonlyWorld,
+        "world_revision",
+        "WorldSnapshot",
+      ) !== input.expectedWorldRevision ||
+      expectString(control, "binding_id", "ControlBindingRef") !==
+        input.command.session.controlBindingId ||
+      !jsonEquals(
+        expectProperty(
+          requestInput,
+          "proposal",
+          "EventCardPublishInput",
+        ),
+        input.proposal,
+      ) ||
+      !jsonEquals(
+        expectProperty(
+          requestInput,
+          "policy",
+          "EventCardPublishInput",
+        ),
+        binding.contentBinding.eventBudget,
+      ) ||
+      !jsonEquals(
+        expectProperty(
+          requestInput,
+          "model_proof",
+          "EventCardPublishInput",
+        ),
+        input.modelReceipt.proof.value,
+      ) ||
+      !jsonEquals(
+        expectProperty(request, "plugin_lock", "RulePluginRequest"),
+        invocation.pluginLock,
+      )
+    ) {
+      throw commandIdentityFault(
+        input.command,
+        "Recovered EventCard RulePlugin invocation differs from its Director proposal identity",
+        {
+          request_id: input.requestId,
+          proposal_id: expectString(
+            input.proposal,
+            "proposal_id",
+            "EventCardProposal",
+          ),
+          expected_basis_revision: input.expectedWorldRevision,
+        },
+      );
+    }
   }
 
   async #assertHumanReceiptIdentity(
     command: StoredReceivedCommand,
     receipt: VerifiedRulePluginInvocationReceipt,
-  ): Promise<string> {
+  ): Promise<DialogueResponder> {
     const execution = requireDialogueExecution(command);
     const operationKind: DialogueOperationKind =
       command.commandKind === "dialogue.start"
@@ -517,12 +1607,12 @@ class DefaultDialogueCommandOrchestrator
         ),
         "DialogueStart.recipient",
       );
-      const recipientEntityId = requireBasicNpcRecipient(
+      const responder = requireDialogueStartResponder({
         worldState,
-        recipient,
-        command.session.worldId,
-        command.session.playerEntityId,
-      );
+        participant: recipient,
+        worldId: command.session.worldId,
+        playerEntityId: command.session.playerEntityId,
+      });
       const dayCycle = expectJsonObject(
         expectProperty(worldState, "day_cycle", "WorldState"),
         "WorldState.day_cycle",
@@ -537,9 +1627,9 @@ class DefaultDialogueCommandOrchestrator
               command.session.worldId,
               command.session.playerEntityId,
             ),
-            entityParticipant(
+            responderParticipant(
               command.session.worldId,
-              recipientEntityId,
+              responder,
             ),
           ],
           first_turn: humanTurn,
@@ -554,12 +1644,12 @@ class DefaultDialogueCommandOrchestrator
       worldState,
       execution.dialogueId,
     );
-    requireBasicNpcDialogueResponder(
+    requireDialogueResponder({
       worldState,
       dialogue,
-      command.session.worldId,
-      command.session.playerEntityId,
-    );
+      worldId: command.session.worldId,
+      playerEntityId: command.session.playerEntityId,
+    });
     return Object.freeze({
       binding,
       input: Object.freeze({
@@ -697,7 +1787,7 @@ function assertRulePluginRequestHeader(input: {
   readonly command: StoredReceivedCommand;
   readonly expectedRequestId: string;
   readonly expectedBasisRevision: number;
-  readonly operationKind: DialogueOperationKind;
+  readonly operationKind: OrchestratedOperationKind;
   readonly invocation: RuntimeRulePluginInvocationBinding;
 }): void {
   const request = input.receipt.request.value;
@@ -939,6 +2029,52 @@ function createCharacterTurn(input: {
   return Object.freeze(turn);
 }
 
+function createDirectorSystemTurn(input: {
+  readonly command: StoredReceivedCommand;
+  readonly run: DialogueDirectorRunRecord;
+  readonly worldState: JsonObject;
+  readonly output: JsonObject;
+  readonly outputDigest: string;
+}): JsonObject {
+  const reply = expectJsonObject(
+    expectProperty(
+      input.output,
+      "reply",
+      "DirectorSystemDialogueOutput",
+    ),
+    "DirectorSystemDialogueOutput.reply",
+  );
+  const turn: Record<string, JsonValue> = {
+    turn_id: requireSystemRunIdentity(
+      input.command,
+      input.run.responseTurnId,
+      "response_turn_id",
+    ),
+    speaker: Object.freeze({ participant_kind: "system" }),
+    locale: expectString(reply, "locale", "DialogueReplyDraft"),
+    text: expectString(reply, "text", "DialogueReplyDraft"),
+    occurred_at: expectProperty(
+      input.worldState,
+      "clock",
+      "WorldState",
+    ),
+    source: Object.freeze({
+      source_kind: "director_system",
+      model_request_id: input.run.modelRequestId,
+      model_output_digest: input.outputDigest,
+    }),
+    agency_commitments: [],
+  };
+  if (reply.emotion_id !== undefined) {
+    turn.emotion_id = expectString(
+      reply,
+      "emotion_id",
+      "DialogueReplyDraft",
+    );
+  }
+  return Object.freeze(turn);
+}
+
 function resolveDialogueInvocation(
   binding: WorldContentBinding,
   operationKind: DialogueOperationKind,
@@ -950,6 +2086,168 @@ function resolveDialogueInvocation(
     abi,
     faultOwner: "world_definition",
   });
+}
+
+function requireDialogueStartResponder(input: {
+  readonly worldState: JsonObject;
+  readonly participant: JsonObject;
+  readonly worldId: string;
+  readonly playerEntityId: string;
+}): DialogueResponder {
+  const participantKind = expectString(
+    input.participant,
+    "participant_kind",
+    "DialogueParticipantRef",
+  );
+  if (participantKind === "system") {
+    return Object.freeze({
+      responderKind: "director_system",
+    });
+  }
+  return Object.freeze({
+    responderKind: "character_mind",
+    entityId: requireBasicNpcRecipient(
+      input.worldState,
+      input.participant,
+      input.worldId,
+      input.playerEntityId,
+    ),
+  });
+}
+
+function requireDialogueResponder(input: {
+  readonly worldState: JsonObject;
+  readonly dialogue: JsonObject;
+  readonly worldId: string;
+  readonly playerEntityId: string;
+}): DialogueResponder {
+  const participants = asObjectArray(
+    expectProperty(
+      input.dialogue,
+      "participants",
+      "DialogueRecord",
+    ),
+    "DialogueRecord.participants",
+  );
+  const hasSystem = participants.some(
+    (participant) =>
+      expectString(
+        participant,
+        "participant_kind",
+        "DialogueParticipantRef",
+      ) === "system",
+  );
+  if (hasSystem) {
+    requireSystemDialogueResponder(input);
+    return Object.freeze({
+      responderKind: "director_system",
+    });
+  }
+  return Object.freeze({
+    responderKind: "character_mind",
+    entityId: requireBasicNpcDialogueResponder(
+      input.worldState,
+      input.dialogue,
+      input.worldId,
+      input.playerEntityId,
+    ),
+  });
+}
+
+function requireSystemDialogueResponder(input: {
+  readonly worldState: JsonObject;
+  readonly dialogue: JsonObject;
+  readonly worldId: string;
+  readonly playerEntityId: string;
+}): void {
+  void input.worldState;
+  if (
+    expectString(input.dialogue, "status", "DialogueRecord") !==
+    "active"
+  ) {
+    throw new EngineFault(
+      "dialogue.orchestration.dialogue_not_active",
+      "System dialogue can continue only while active",
+      {
+        dialogue_id: expectString(
+          input.dialogue,
+          "dialogue_id",
+          "DialogueRecord",
+        ),
+      },
+    );
+  }
+  const participants = asObjectArray(
+    expectProperty(
+      input.dialogue,
+      "participants",
+      "DialogueRecord",
+    ),
+    "DialogueRecord.participants",
+  );
+  if (participants.length !== 2) {
+    throw new EngineFault(
+      "dialogue.orchestration.system_participants_invalid",
+      "System dialogue requires exactly the Session player and System",
+      {
+        dialogue_id: expectString(
+          input.dialogue,
+          "dialogue_id",
+          "DialogueRecord",
+        ),
+        participant_count: participants.length,
+      },
+    );
+  }
+  let systemCount = 0;
+  let playerCount = 0;
+  for (const participant of participants) {
+    const participantKind = expectString(
+      participant,
+      "participant_kind",
+      "DialogueParticipantRef",
+    );
+    if (participantKind === "system") {
+      systemCount += 1;
+      continue;
+    }
+    const entity = requireEntityParticipant(
+      participant,
+      "DialogueParticipantRef",
+    );
+    if (
+      expectString(entity, "world_id", "EntityRef") ===
+        input.worldId &&
+      expectString(entity, "entity_id", "EntityRef") ===
+        input.playerEntityId
+    ) {
+      playerCount += 1;
+    }
+  }
+  if (systemCount !== 1 || playerCount !== 1) {
+    throw new EngineFault(
+      "dialogue.orchestration.system_participants_invalid",
+      "System dialogue participants must be exactly one System and the Session player",
+      {
+        dialogue_id: expectString(
+          input.dialogue,
+          "dialogue_id",
+          "DialogueRecord",
+        ),
+        system_count: systemCount,
+        player_count: playerCount,
+      },
+    );
+  }
+}
+
+function responderParticipant(
+  worldId: string,
+  responder: DialogueResponder,
+): JsonObject {
+  return responder.responderKind === "director_system"
+    ? Object.freeze({ participant_kind: "system" })
+    : entityParticipant(worldId, responder.entityId);
 }
 
 function requireBasicNpcRecipient(
@@ -1228,7 +2526,7 @@ function resolveRecipientFromHumanInput(
   input: JsonObject,
   worldState: JsonObject,
   command: StoredReceivedCommand,
-): string {
+): DialogueResponder {
   const execution = requireDialogueExecution(command);
   if (
     expectString(
@@ -1255,12 +2553,12 @@ function resolveRecipientFromHumanInput(
       ),
       "DialogueStart.recipient",
     );
-    const recipientEntityId = requireBasicNpcRecipient(
+    const responder = requireDialogueStartResponder({
       worldState,
-      recipient,
-      command.session.worldId,
-      command.session.playerEntityId,
-    );
+      participant: recipient,
+      worldId: command.session.worldId,
+      playerEntityId: command.session.playerEntityId,
+    });
     const participantSource = expectProperty(
       input,
       "participants",
@@ -1271,9 +2569,9 @@ function resolveRecipientFromHumanInput(
         command.session.worldId,
         command.session.playerEntityId,
       ),
-      entityParticipant(
+      responderParticipant(
         command.session.worldId,
-        recipientEntityId,
+        responder,
       ),
     ];
     const dayCycle = expectJsonObject(
@@ -1291,7 +2589,7 @@ function resolveRecipientFromHumanInput(
         {},
       );
     }
-    return recipientEntityId;
+    return responder;
   }
 
   const dialogue = requireDialogue(worldState, execution.dialogueId);
@@ -1308,12 +2606,12 @@ function resolveRecipientFromHumanInput(
       {},
     );
   }
-  return requireBasicNpcDialogueResponder(
+  return requireDialogueResponder({
     worldState,
     dialogue,
-    command.session.worldId,
-    command.session.playerEntityId,
-  );
+    worldId: command.session.worldId,
+    playerEntityId: command.session.playerEntityId,
+  });
 }
 
 function assertCharacterModelReceiptIdentity(
@@ -1402,6 +2700,898 @@ function assertCharacterModelReceiptIdentity(
   }
 }
 
+function assertDirectorDialogueReceiptIdentity(input: {
+  readonly command: StoredReceivedCommand;
+  readonly requestId: string;
+  readonly modelProfileId: string;
+  readonly receipt: Awaited<
+    ReturnType<RuntimeModelFacades["directorDialogueEvents"]>
+  >;
+  readonly expectedBasisRevision: number;
+}): void {
+  const execution = requireDialogueExecution(input.command);
+  const request = input.receipt.request.value;
+  const proof = input.receipt.proof.value;
+  const snapshot = input.receipt.snapshot.value;
+  const dynamicInput = expectJsonObject(
+    expectProperty(request, "input", "ModelRequest"),
+    "ModelRequest.input",
+  );
+  const dialogue = expectJsonObject(
+    expectProperty(
+      dynamicInput,
+      "dialogue",
+      "DirectorDialogueEventsInput",
+    ),
+    "DirectorDialogueEventsInput.dialogue",
+  );
+  if (
+    input.receipt.worldId !== input.command.session.worldId ||
+    input.receipt.worldRevision !== input.expectedBasisRevision ||
+    expectString(snapshot, "world_id", "WorldSnapshot") !==
+      input.command.session.worldId ||
+    expectInteger(snapshot, "world_revision", "WorldSnapshot") !==
+      input.expectedBasisRevision ||
+    expectString(request, "request_id", "ModelRequest") !==
+      input.requestId ||
+    expectString(request, "request_kind", "ModelRequest") !==
+      "director.dialogue_events" ||
+    expectString(request, "model_profile_id", "ModelRequest") !==
+      input.modelProfileId ||
+    expectInteger(request, "basis_revision", "ModelRequest") !==
+      input.expectedBasisRevision ||
+    expectString(dialogue, "dialogue_id", "DialogueRecord") !==
+      execution.dialogueId ||
+    expectString(proof, "request_id", "VerifiedModelOutputRef") !==
+      input.requestId ||
+    expectString(proof, "request_kind", "VerifiedModelOutputRef") !==
+      "director.dialogue_events" ||
+    expectInteger(proof, "basis_revision", "VerifiedModelOutputRef") !==
+      input.expectedBasisRevision
+  ) {
+    throw commandIdentityFault(
+      input.command,
+      "Director dialogue-events receipt differs from its command-owned identity",
+      {
+        expected_request_id: input.requestId,
+        expected_world_revision: input.expectedBasisRevision,
+        dialogue_id: execution.dialogueId,
+      },
+    );
+  }
+}
+
+function readModelOutput(
+  receipt: VerifiedModelInvocationReceipt,
+): JsonObject {
+  return expectJsonObject(
+    expectProperty(
+      receipt.response.value,
+      "output",
+      "ModelResponse",
+    ),
+    "ModelResponse.output",
+  );
+}
+
+function rulePluginRequestInput(
+  receipt: VerifiedRulePluginInvocationReceipt,
+): JsonObject {
+  return expectJsonObject(
+    expectProperty(
+      receipt.request.value,
+      "input",
+      "RulePluginRequest",
+    ),
+    "RulePluginRequest.input",
+  );
+}
+
+function worldStateFromSnapshot(snapshot: JsonObject): JsonObject {
+  return expectJsonObject(
+    expectProperty(snapshot, "world_state", "WorldSnapshot"),
+    "WorldSnapshot.world_state",
+  );
+}
+
+function proposalIds(
+  proposals: readonly JsonObject[],
+  label: string,
+): readonly string[] {
+  return Object.freeze(
+    proposals.map((proposal) =>
+      expectString(proposal, "proposal_id", label),
+    ),
+  );
+}
+
+function requireSystemRunIdentity(
+  command: StoredReceivedCommand,
+  value: string | undefined,
+  identity: string,
+): string {
+  if (value === undefined) {
+    throw commandIdentityFault(
+      command,
+      "Director System run is missing a required persisted identity",
+      { identity },
+    );
+  }
+  return value;
+}
+
+function assertProposalIdentityOrder(input: {
+  readonly command: StoredReceivedCommand;
+  readonly proposals: readonly JsonObject[];
+  readonly identities: readonly {
+    readonly proposalId: string;
+    readonly ordinal: number;
+  }[];
+  readonly proposalLabel: string;
+}): void {
+  if (input.identities.length !== input.proposals.length) {
+    throw commandIdentityFault(
+      input.command,
+      "Persisted Director proposal identity count differs from the verified model response",
+      {
+        proposal_kind: input.proposalLabel,
+        proposal_count: input.proposals.length,
+        identity_count: input.identities.length,
+      },
+    );
+  }
+  for (const [ordinal, proposal] of input.proposals.entries()) {
+    const identity = input.identities[ordinal];
+    if (
+      identity === undefined ||
+      identity.ordinal !== ordinal ||
+      identity.proposalId !==
+        expectString(
+          proposal,
+          "proposal_id",
+          input.proposalLabel,
+        )
+    ) {
+      throw commandIdentityFault(
+        input.command,
+        "Persisted Director proposal identity order differs from the verified model response",
+        {
+          proposal_kind: input.proposalLabel,
+          proposal_ordinal: ordinal,
+        },
+      );
+    }
+  }
+}
+
+function assertNextCommittedRevision(input: {
+  readonly command: StoredReceivedCommand;
+  readonly committed: JsonObject;
+  readonly currentWorldRevision: number;
+  readonly stage: string;
+  readonly proposalId: string;
+}): number {
+  const nextRevision = input.currentWorldRevision + 1;
+  if (!Number.isSafeInteger(nextRevision)) {
+    throw new EngineFault(
+      "dialogue.orchestration.world_revision_exhausted",
+      "System proposal cannot advance world revision safely",
+      {
+        session_id: input.command.session.sessionId,
+        command_id: input.command.commandId,
+        stage: input.stage,
+        world_revision: input.currentWorldRevision,
+      },
+    );
+  }
+  const actualRevision = expectInteger(
+    input.committed,
+    "world_revision",
+    "ApplyPacketResult",
+  );
+  if (actualRevision !== nextRevision) {
+    throw commandIdentityFault(
+      input.command,
+      "System proposal returned an unexpected committed world revision",
+      {
+        stage: input.stage,
+        proposal_id: input.proposalId,
+        expected_world_revision: nextRevision,
+        actual_world_revision: actualRevision,
+      },
+    );
+  }
+  return nextRevision;
+}
+
+function requireDefinitionProposalType(input: {
+  readonly catalog: ContentRuntimeCatalog;
+  readonly contentBinding: WorldContentBinding;
+  readonly proposal: JsonObject;
+  readonly command: StoredReceivedCommand;
+}): {
+  readonly typeId: string;
+  readonly typeDefinition: JsonObject;
+} {
+  const draft = expectJsonObject(
+    expectProperty(
+      input.proposal,
+      "draft",
+      "DynamicDefinitionProposal",
+    ),
+    "DynamicDefinitionProposal.draft",
+  );
+  const ref = expectJsonObject(
+    expectProperty(
+      draft,
+      "definition_type",
+      "DynamicDefinitionDraft",
+    ),
+    "DynamicDefinitionDraft.definition_type",
+  );
+  const entry = requirePlanningCatalogEntry({
+    catalog: input.catalog,
+    contentBinding: input.contentBinding,
+    ref,
+    expectedKind: "definition_type",
+    command: input.command,
+  });
+  const typeId = expectString(
+    entry,
+    "type_id",
+    "TypeDefinition",
+  );
+  if (
+    entry["runtime_creatable"] !== true ||
+    entry.validator === undefined
+  ) {
+    throw new EngineFault(
+      "dialogue.orchestration.definition_type_not_creatable",
+      "Dynamic definition proposal requires a runtime-creatable definition type with an explicit validator",
+      {
+        command_id: input.command.commandId,
+        type_id: typeId,
+      },
+    );
+  }
+  return Object.freeze({ typeId, typeDefinition: entry });
+}
+
+function requirePlanningCatalogEntry(input: {
+  readonly catalog: ContentRuntimeCatalog;
+  readonly contentBinding: WorldContentBinding;
+  readonly ref: JsonObject;
+  readonly expectedKind:
+    | "definition_type"
+    | "capability"
+    | "generation_archetype";
+  readonly command: StoredReceivedCommand;
+}): JsonObject {
+  const bundleId = expectString(
+    input.ref,
+    "bundle_id",
+    "PlanningCatalogRef",
+  );
+  const bundleDigest = expectString(
+    input.ref,
+    "bundle_digest",
+    "PlanningCatalogRef",
+  );
+  const catalogKind = expectString(
+    input.ref,
+    "catalog_kind",
+    "PlanningCatalogRef",
+  );
+  const localId = expectString(
+    input.ref,
+    "local_id",
+    "PlanningCatalogRef",
+  );
+  if (
+    bundleId !== input.contentBinding.packId ||
+    bundleDigest !== input.contentBinding.bundleDigest ||
+    catalogKind !== input.expectedKind
+  ) {
+    throw new EngineFault(
+      "dialogue.orchestration.planning_catalog_ref_outside_lock",
+      "System planning catalog reference must name the expected kind in the current locked root ContentBundle",
+      {
+        command_id: input.command.commandId,
+        expected_bundle_id: input.contentBinding.packId,
+        actual_bundle_id: bundleId,
+        expected_bundle_digest:
+          input.contentBinding.bundleDigest,
+        actual_bundle_digest: bundleDigest,
+        expected_catalog_kind: input.expectedKind,
+        actual_catalog_kind: catalogKind,
+        local_id: localId,
+      },
+    );
+  }
+  const entry = input.catalog.findPlanningCatalogEntry({
+    bundle_id: bundleId,
+    bundle_digest: bundleDigest,
+    catalog_kind: input.expectedKind,
+    local_id: localId,
+  });
+  if (entry === undefined) {
+    throw new EngineFault(
+      "dialogue.orchestration.planning_catalog_ref_missing",
+      "System planning catalog reference does not exist in the locked ContentBundle",
+      {
+        command_id: input.command.commandId,
+        bundle_id: bundleId,
+        bundle_digest: bundleDigest,
+        catalog_kind: input.expectedKind,
+        local_id: localId,
+      },
+    );
+  }
+  return entry;
+}
+
+function worldLawRefs(
+  catalog: ContentRuntimeCatalog,
+  contentBinding: WorldContentBinding,
+  command: StoredReceivedCommand,
+): readonly JsonObject[] {
+  const laws = catalog.listWorldLaws({
+    bundle_id: contentBinding.packId,
+    bundle_digest: contentBinding.bundleDigest,
+  });
+  if (laws === undefined) {
+    throw new EngineFault(
+      "dialogue.orchestration.world_law_catalog_missing",
+      "Locked world-law catalog is unavailable for System planning validation",
+      {
+        command_id: command.commandId,
+        bundle_id: contentBinding.packId,
+        bundle_digest: contentBinding.bundleDigest,
+      },
+    );
+  }
+  return Object.freeze(
+    laws.map((law) =>
+      Object.freeze({
+        bundle_id: contentBinding.packId,
+        bundle_digest: contentBinding.bundleDigest,
+        rule_id: expectString(law, "law_id", "WorldLaw"),
+      }),
+    ),
+  );
+}
+
+function assertGoalPlanProposalSemantics(input: {
+  readonly catalog: ContentRuntimeCatalog;
+  readonly contentBinding: WorldContentBinding;
+  readonly proposal: JsonObject;
+  readonly worldState: JsonObject;
+  readonly command: StoredReceivedCommand;
+}): void {
+  if (
+    expectString(
+      input.proposal,
+      "owner_actor_id",
+      "GoalPlanProposal",
+    ) !== input.command.session.playerEntityId
+  ) {
+    throw new EngineFault(
+      "dialogue.orchestration.goal_plan_owner_mismatch",
+      "System GoalPlan must belong to the active Session player",
+      {
+        command_id: input.command.commandId,
+        player_entity_id: input.command.session.playerEntityId,
+      },
+    );
+  }
+  const draft = expectJsonObject(
+    expectProperty(input.proposal, "draft", "GoalPlanProposal"),
+    "GoalPlanProposal.draft",
+  );
+  const factIds = new Set(
+    asObjectArray(
+      expectProperty(input.worldState, "facts", "WorldState"),
+      "WorldState.facts",
+    ).map((fact) =>
+      expectString(fact, "fact_id", "FactRecord"),
+    ),
+  );
+  for (const factRef of expectStringArray(
+    expectProperty(draft, "fact_refs", "GoalPlanDraft"),
+    "GoalPlanDraft.fact_refs",
+  )) {
+    if (!factIds.has(factRef)) {
+      throw new EngineFault(
+        "dialogue.orchestration.goal_plan_fact_missing",
+        "GoalPlan draft references a fact absent from the authoritative WorldState",
+        {
+          command_id: input.command.commandId,
+          fact_id: factRef,
+        },
+      );
+    }
+  }
+  assertPlanningRuleRefs({
+    catalog: input.catalog,
+    contentBinding: input.contentBinding,
+    rules: asObjectArray(
+      expectProperty(draft, "constraints", "GoalPlanDraft"),
+      "GoalPlanDraft.constraints",
+    ),
+    command: input.command,
+    field: "GoalPlanDraft.constraints",
+  });
+
+  const nodes = asObjectArray(
+    expectProperty(draft, "nodes", "GoalPlanDraft"),
+    "GoalPlanDraft.nodes",
+  );
+  const nodeByKey = new Map<string, JsonObject>();
+  const demandIds = new Set<string>();
+  for (const node of nodes) {
+    const nodeKey = expectString(
+      node,
+      "node_key",
+      "GoalNodeDraft",
+    );
+    if (nodeByKey.has(nodeKey)) {
+      throw new EngineFault(
+        "dialogue.orchestration.goal_plan_node_duplicate",
+        "GoalPlan draft node_key values must be unique",
+        { command_id: input.command.commandId, node_key: nodeKey },
+      );
+    }
+    nodeByKey.set(nodeKey, node);
+    assertPlanningRuleRefs({
+      catalog: input.catalog,
+      contentBinding: input.contentBinding,
+      rules: asObjectArray(
+        expectProperty(
+          node,
+          "completion_rules",
+          "GoalNodeDraft",
+        ),
+        "GoalNodeDraft.completion_rules",
+      ),
+      command: input.command,
+      field: `GoalNodeDraft(${nodeKey}).completion_rules`,
+    });
+    const requirement = expectJsonObject(
+      expectProperty(
+        node,
+        "capability_requirement",
+        "GoalNodeDraft",
+      ),
+      "GoalNodeDraft.capability_requirement",
+    );
+    const requirementKind = expectString(
+      requirement,
+      "requirement_kind",
+      "CapabilityRequirement",
+    );
+    if (requirementKind === "bound") {
+      requirePlanningCatalogEntry({
+        catalog: input.catalog,
+        contentBinding: input.contentBinding,
+        ref: expectJsonObject(
+          expectProperty(
+            requirement,
+            "capability",
+            "CapabilityRequirement",
+          ),
+          "CapabilityRequirement.capability",
+        ),
+        expectedKind: "capability",
+        command: input.command,
+      });
+      continue;
+    }
+    if (requirementKind !== "demand") {
+      throw new EngineFault(
+        "dialogue.orchestration.goal_plan_requirement_unknown",
+        "GoalPlan draft has an unknown capability requirement kind",
+        {
+          command_id: input.command.commandId,
+          node_key: nodeKey,
+          requirement_kind: requirementKind,
+        },
+      );
+    }
+    const demand = expectJsonObject(
+      expectProperty(
+        requirement,
+        "demand",
+        "CapabilityRequirement",
+      ),
+      "CapabilityRequirement.demand",
+    );
+    const demandId = expectString(
+      demand,
+      "demand_id",
+      "CapabilityDemand",
+    );
+    if (demandIds.has(demandId)) {
+      throw new EngineFault(
+        "dialogue.orchestration.goal_plan_demand_duplicate",
+        "GoalPlan CapabilityDemand IDs must be unique",
+        { command_id: input.command.commandId, demand_id: demandId },
+      );
+    }
+    demandIds.add(demandId);
+    assertPlanningRuleRefs({
+      catalog: input.catalog,
+      contentBinding: input.contentBinding,
+      rules: asObjectArray(
+        expectProperty(
+          demand,
+          "constraints",
+          "CapabilityDemand",
+        ),
+        "CapabilityDemand.constraints",
+      ),
+      command: input.command,
+      field: `CapabilityDemand(${demandId}).constraints`,
+    });
+    for (const archetypeRef of asObjectArray(
+      expectProperty(
+        demand,
+        "allowed_archetypes",
+        "CapabilityDemand",
+      ),
+      "CapabilityDemand.allowed_archetypes",
+    )) {
+      const archetype = requirePlanningCatalogEntry({
+        catalog: input.catalog,
+        contentBinding: input.contentBinding,
+        ref: archetypeRef,
+        expectedKind: "generation_archetype",
+        command: input.command,
+      });
+      if (
+        expectString(
+          archetype,
+          "world_id",
+          "GenerationArchetype",
+        ) !==
+        expectString(
+          input.contentBinding.worldDefinition,
+          "world_id",
+          "WorldDefinition",
+        )
+      ) {
+        throw new EngineFault(
+          "dialogue.orchestration.goal_plan_archetype_world_mismatch",
+          "GoalPlan generation archetype belongs to a different WorldDefinition",
+          {
+            command_id: input.command.commandId,
+            demand_id: demandId,
+            archetype_id: expectString(
+              archetype,
+              "archetype_id",
+              "GenerationArchetype",
+            ),
+          },
+        );
+      }
+    }
+  }
+  assertGoalPlanGraph(nodeByKey, input.command);
+}
+
+function assertPlanningRuleRefs(input: {
+  readonly catalog: ContentRuntimeCatalog;
+  readonly contentBinding: WorldContentBinding;
+  readonly rules: readonly JsonObject[];
+  readonly command: StoredReceivedCommand;
+  readonly field: string;
+}): void {
+  for (const rule of input.rules) {
+    const bundleId = expectString(rule, "bundle_id", "RuleRef");
+    const bundleDigest = expectString(
+      rule,
+      "bundle_digest",
+      "RuleRef",
+    );
+    const ruleId = expectString(rule, "rule_id", "RuleRef");
+    if (
+      bundleId !== input.contentBinding.packId ||
+      bundleDigest !== input.contentBinding.bundleDigest ||
+      input.catalog.resolveRuleEvaluationBinding({
+        bundle_id: bundleId,
+        bundle_digest: bundleDigest,
+        rule_id: ruleId,
+      }) === undefined
+    ) {
+      throw new EngineFault(
+        "dialogue.orchestration.goal_plan_rule_unresolved",
+        "GoalPlan RuleRef must resolve in the current locked root ContentBundle",
+        {
+          command_id: input.command.commandId,
+          field: input.field,
+          bundle_id: bundleId,
+          bundle_digest: bundleDigest,
+          rule_id: ruleId,
+        },
+      );
+    }
+  }
+}
+
+function assertGoalPlanGraph(
+  nodeByKey: ReadonlyMap<string, JsonObject>,
+  command: StoredReceivedCommand,
+): void {
+  for (const [nodeKey, node] of nodeByKey) {
+    for (const [field, refs] of [
+      [
+        "depends_on",
+        expectStringArray(
+          expectProperty(node, "depends_on", "GoalNodeDraft"),
+          "GoalNodeDraft.depends_on",
+        ),
+      ],
+      [
+        "alternative_node_keys",
+        expectStringArray(
+          expectProperty(
+            node,
+            "alternative_node_keys",
+            "GoalNodeDraft",
+          ),
+          "GoalNodeDraft.alternative_node_keys",
+        ),
+      ],
+    ] as const) {
+      for (const ref of refs) {
+        if (ref === nodeKey || !nodeByKey.has(ref)) {
+          throw new EngineFault(
+            "dialogue.orchestration.goal_plan_graph_ref_invalid",
+            "GoalPlan dependency and alternative references must name a different node in the same draft",
+            {
+              command_id: command.commandId,
+              node_key: nodeKey,
+              field,
+              referenced_node_key: ref,
+            },
+          );
+        }
+      }
+    }
+  }
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (nodeKey: string): void => {
+    if (visiting.has(nodeKey)) {
+      throw new EngineFault(
+        "dialogue.orchestration.goal_plan_dependency_cycle",
+        "GoalPlan depends_on graph must be acyclic",
+        { command_id: command.commandId, node_key: nodeKey },
+      );
+    }
+    if (visited.has(nodeKey)) {
+      return;
+    }
+    visiting.add(nodeKey);
+    const node = nodeByKey.get(nodeKey) as JsonObject;
+    for (const dependency of expectStringArray(
+      expectProperty(node, "depends_on", "GoalNodeDraft"),
+      "GoalNodeDraft.depends_on",
+    )) {
+      visit(dependency);
+    }
+    visiting.delete(nodeKey);
+    visited.add(nodeKey);
+  };
+  for (const nodeKey of nodeByKey.keys()) {
+    visit(nodeKey);
+  }
+}
+
+function expectStringArray(
+  value: JsonValue,
+  label: string,
+): readonly string[] {
+  if (!Array.isArray(value)) {
+    throw new EngineFault(
+      "dialogue.orchestration.array_expected",
+      `${label} must be an array`,
+      { label },
+    );
+  }
+  return Object.freeze(
+    value.map((entry, index) => {
+      if (typeof entry !== "string") {
+        throw new EngineFault(
+          "dialogue.orchestration.string_expected",
+          `${label}[${index}] must be a string`,
+          { label, index },
+        );
+      }
+      return entry;
+    }),
+  );
+}
+
+function assertSystemPlanningReceiptIdentity(input: {
+  readonly command: StoredReceivedCommand;
+  readonly receipt: VerifiedRulePluginInvocationReceipt;
+  readonly expectedRequestId: string;
+  readonly expectedBasisRevision: number;
+  readonly operationKind:
+    | "definition.validate"
+    | "goal_plan.validate";
+  readonly invocation: RuntimeRulePluginInvocationBinding;
+  readonly identityField: "definition_id" | "plan_id";
+  readonly expectedWorldRecordId: string;
+  readonly expectedProposal: JsonObject;
+  readonly expectedModelProof: JsonObject;
+  readonly expectedPreparedAt: string;
+  readonly digest: JsonDigest;
+  readonly expectedConstraints: readonly JsonObject[] | undefined;
+}): void {
+  assertRulePluginRequestHeader({
+    receipt: input.receipt,
+    command: input.command,
+    expectedRequestId: input.expectedRequestId,
+    expectedBasisRevision: input.expectedBasisRevision,
+    operationKind: input.operationKind,
+    invocation: input.invocation,
+  });
+  const request = input.receipt.request.value;
+  const requestInput = rulePluginRequestInput(input.receipt);
+  const deterministicContext = expectJsonObject(
+    expectProperty(
+      request,
+      "deterministic_context",
+      "RulePluginRequest",
+    ),
+    "RulePluginRequest.deterministic_context",
+  );
+  const externalResults = asObjectArray(
+    expectProperty(
+      deterministicContext,
+      "external_results",
+      "DeterministicContext",
+    ),
+    "DeterministicContext.external_results",
+  ).filter(
+    (result) =>
+      expectString(
+        result,
+        "result_id",
+        "DeterministicExternalResult",
+      ) === "system_provenance_created_at",
+  );
+  const provenanceResult = externalResults[0];
+  if (
+    expectString(
+      requestInput,
+      input.identityField,
+      input.operationKind,
+    ) !== input.expectedWorldRecordId ||
+    !jsonEquals(
+      expectProperty(
+        requestInput,
+        "proposal",
+        input.operationKind,
+      ),
+      input.expectedProposal,
+    ) ||
+    !jsonEquals(
+      expectProperty(
+        requestInput,
+        "model_proof",
+        input.operationKind,
+      ),
+      input.expectedModelProof,
+    ) ||
+    (input.expectedConstraints !== undefined &&
+      !jsonEquals(
+        expectProperty(
+          requestInput,
+          "constraints",
+          input.operationKind,
+        ),
+        input.expectedConstraints as JsonValue,
+      )) ||
+    externalResults.length !== 1 ||
+    provenanceResult === undefined ||
+    provenanceResult.payload !== input.expectedPreparedAt ||
+    expectString(
+      provenanceResult,
+      "content_digest",
+      "DeterministicExternalResult",
+    ) !== input.digest.sha256(input.expectedPreparedAt)
+  ) {
+    throw commandIdentityFault(
+      input.command,
+      "Recovered System planning RulePlugin request differs from its persisted proposal identity",
+      {
+        request_id: input.expectedRequestId,
+        operation_kind: input.operationKind,
+        proposal_id: expectString(
+          input.expectedProposal,
+          "proposal_id",
+          "SystemProposal",
+        ),
+      },
+    );
+  }
+}
+
+function assertDirectorSystemReceiptIdentity(input: {
+  readonly command: StoredReceivedCommand;
+  readonly requestId: string;
+  readonly modelProfileId: string;
+  readonly receipt: VerifiedModelInvocationReceipt;
+  readonly expectedBasisRevision: number;
+}): void {
+  const execution = requireDialogueExecution(input.command);
+  const request = input.receipt.request.value;
+  const proof = input.receipt.proof.value;
+  const snapshot = input.receipt.snapshot.value;
+  const dynamicInput = expectJsonObject(
+    expectProperty(request, "input", "ModelRequest"),
+    "ModelRequest.input",
+  );
+  const dialogue = expectJsonObject(
+    expectProperty(
+      dynamicInput,
+      "dialogue",
+      "DirectorSystemDialogueInput",
+    ),
+    "DirectorSystemDialogueInput.dialogue",
+  );
+  const knowledgeView = expectJsonObject(
+    expectProperty(
+      dynamicInput,
+      "knowledge_view",
+      "DirectorSystemDialogueInput",
+    ),
+    "DirectorSystemDialogueInput.knowledge_view",
+  );
+  if (
+    input.receipt.worldId !== input.command.session.worldId ||
+    input.receipt.worldRevision !== input.expectedBasisRevision ||
+    expectString(snapshot, "world_id", "WorldSnapshot") !==
+      input.command.session.worldId ||
+    expectInteger(snapshot, "world_revision", "WorldSnapshot") !==
+      input.expectedBasisRevision ||
+    expectString(request, "request_id", "ModelRequest") !==
+      input.requestId ||
+    expectString(request, "request_kind", "ModelRequest") !==
+      "director.system_dialogue" ||
+    expectString(request, "model_profile_id", "ModelRequest") !==
+      input.modelProfileId ||
+    expectInteger(request, "basis_revision", "ModelRequest") !==
+      input.expectedBasisRevision ||
+    expectString(dialogue, "dialogue_id", "DialogueRecord") !==
+      execution.dialogueId ||
+    expectString(
+      knowledgeView,
+      "viewer_entity_id",
+      "KnowledgeView",
+    ) !== input.command.session.playerEntityId ||
+    expectString(proof, "request_id", "VerifiedModelOutputRef") !==
+      input.requestId ||
+    expectString(proof, "request_kind", "VerifiedModelOutputRef") !==
+      "director.system_dialogue" ||
+    expectInteger(proof, "basis_revision", "VerifiedModelOutputRef") !==
+      input.expectedBasisRevision
+  ) {
+    throw commandIdentityFault(
+      input.command,
+      "Director System receipt differs from its command-owned identity",
+      {
+        expected_request_id: input.requestId,
+        expected_world_revision: input.expectedBasisRevision,
+        dialogue_id: execution.dialogueId,
+        player_entity_id: input.command.session.playerEntityId,
+      },
+    );
+  }
+}
+
 function readRejectCode(
   receipt: VerifiedRulePluginInvocationReceipt,
 ): string {
@@ -1433,7 +3623,7 @@ function assertCommittedRevision(
   result: JsonObject,
   expectedRevision: number,
   command: StoredReceivedCommand,
-  stage: "human" | "character",
+  stage: "human" | "character" | "director_system",
 ): void {
   const actualRevision = expectInteger(
     result,
@@ -1459,7 +3649,13 @@ function assertWorldRevision(
   binding: RuntimeWorldBinding,
   expectedRevision: number,
   command: StoredReceivedCommand,
-  stage: "human" | "character",
+  stage:
+    | "human"
+    | "character"
+    | "director_system"
+    | "definition"
+    | "goal_plan"
+    | "event_card",
 ): void {
   const actualRevision = expectInteger(
     binding.record.snapshot.value,

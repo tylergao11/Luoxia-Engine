@@ -45,6 +45,7 @@ export interface RuntimeModelFacades {
   directorDialogueEvents(input: {
     readonly worldId: string;
     readonly dialogueId: string;
+    readonly requestId: string;
     readonly model_profile_id: string;
   }): Promise<VerifiedModelInvocationReceipt>;
 
@@ -52,6 +53,7 @@ export interface RuntimeModelFacades {
     readonly worldId: string;
     readonly dialogueId: string;
     readonly playerEntityId: string;
+    readonly requestId: string;
     readonly model_profile_id: string;
   }): Promise<VerifiedModelInvocationReceipt>;
 
@@ -200,37 +202,47 @@ class ModelRequestAssembly {
     });
   }
 
-  public directorDialogueEvents(input: {
+  public async directorDialogueEvents(input: {
     readonly worldId: string;
     readonly dialogueId: string;
+    readonly requestId: string;
     readonly model_profile_id: string;
   }): Promise<VerifiedModelInvocationReceipt> {
-    return this.#runDirector("dialogue_events", input, async (ctx) => {
-      const day = readDayNumber(ctx.worldState);
-      return Object.freeze({
-        world_view: projectDirectorWorldView(ctx.worldState, day),
-        dialogue: projectDialogue(ctx.worldState, input.dialogueId),
-      });
-    });
+    return this.#directorDialogueInvocation(
+      "dialogue_events",
+      input,
+      async (ctx) => {
+        const day = readDayNumber(ctx.worldState);
+        return Object.freeze({
+          world_view: projectDirectorWorldView(ctx.worldState, day),
+          dialogue: projectDialogue(ctx.worldState, input.dialogueId),
+        });
+      },
+    );
   }
 
-  public directorSystemDialogue(input: {
+  public async directorSystemDialogue(input: {
     readonly worldId: string;
     readonly dialogueId: string;
     readonly playerEntityId: string;
+    readonly requestId: string;
     readonly model_profile_id: string;
   }): Promise<VerifiedModelInvocationReceipt> {
-    return this.#runDirector("system_dialogue", input, async (ctx) => {
-      const day = readDayNumber(ctx.worldState);
-      return Object.freeze({
-        world_view: projectDirectorWorldView(ctx.worldState, day),
-        knowledge_view: projectKnowledgeView(
-          ctx.worldState,
-          input.playerEntityId,
-        ),
-        dialogue: projectDialogue(ctx.worldState, input.dialogueId),
-      });
-    });
+    return this.#directorDialogueInvocation(
+      "system_dialogue",
+      input,
+      async (ctx) => {
+        const day = readDayNumber(ctx.worldState);
+        return Object.freeze({
+          world_view: projectDirectorWorldView(ctx.worldState, day),
+          knowledge_view: projectKnowledgeView(
+            ctx.worldState,
+            input.playerEntityId,
+          ),
+          dialogue: projectDialogue(ctx.worldState, input.dialogueId),
+        });
+      },
+    );
   }
 
   public characterDialogue(input: {
@@ -454,10 +466,109 @@ class ModelRequestAssembly {
     });
   }
 
+  async #directorDialogueInvocation(
+    mode: "dialogue_events" | "system_dialogue",
+    input: {
+      readonly worldId: string;
+      readonly dialogueId: string;
+      readonly playerEntityId?: string;
+      readonly requestId: string;
+      readonly model_profile_id: string;
+    },
+    buildInput: (ctx: {
+      readonly worldState: JsonObject;
+      readonly snapshot: WorldSnapshotDocument;
+    }) => Promise<JsonObject>,
+  ): Promise<VerifiedModelInvocationReceipt> {
+    const stored = await this.#journal.readByRequestId(input.requestId);
+    if (stored !== undefined) {
+      return this.#recoverDirectorDialogue(mode, input, stored);
+    }
+    try {
+      return await this.#runDirector(mode, input, buildInput);
+    } catch (error: unknown) {
+      if (
+        !(error instanceof EngineFault) ||
+        error.code !== "model.invocation.identity_conflict"
+      ) {
+        throw error;
+      }
+      const raced = await this.#journal.readByRequestId(input.requestId);
+      if (raced === undefined) {
+        throw error;
+      }
+      return this.#recoverDirectorDialogue(mode, input, raced);
+    }
+  }
+
+  async #recoverDirectorDialogue(
+    mode: "dialogue_events" | "system_dialogue",
+    input: {
+      readonly worldId: string;
+      readonly dialogueId: string;
+      readonly playerEntityId?: string;
+      readonly requestId: string;
+      readonly model_profile_id: string;
+    },
+    stored: StoredModelInvocation,
+  ): Promise<VerifiedModelInvocationReceipt> {
+    assertStoredDirectorDialogueIdentity(stored, mode, input);
+    if (stored.phase === "verified") {
+      const recovered = await this.#journal.recoverVerifiedByRequestId(
+        input.requestId,
+      );
+      if (recovered === undefined) {
+        throw new EngineFault(
+          "model.assembly.verified_receipt_missing",
+          "Verified Director dialogue invocation could not be recovered",
+          { request_id: input.requestId },
+        );
+      }
+      return recovered;
+    }
+    if (stored.phase === "dispatched_ambiguous") {
+      throw new EngineFault(
+        "runtime.kernel.model_dispatch_ambiguous",
+        "Director dialogue model invocation was dispatched without a verified receipt; execution is blocked",
+        {
+          request_id: input.requestId,
+          request_kind: stored.requestKind,
+          world_id: stored.worldId,
+          world_revision: stored.worldRevision,
+        },
+      );
+    }
+
+    const worldBinding = await this.#worldBindingResolver.resolveCurrent(
+      input.worldId,
+    );
+    const materialized = this.#materializer.materializeDirector({
+      contentBinding: worldBinding.contentBinding,
+      mode,
+    });
+    const prepared = this.#modelGateway.prepare(
+      Object.freeze({ snapshot: stored.snapshot }),
+      stored.request.value,
+      Object.freeze({
+        prompt_blocks: materialized.ordered_blocks,
+        event_context: materialized.event_context,
+      }),
+    );
+    return continueModelFromStored({
+      modelGateway: this.#modelGateway,
+      journal: this.#journal,
+      prepared,
+      stored,
+      requestId: input.requestId,
+      dailyRunId: undefined,
+    });
+  }
+
   async #runDirector(
     mode: DirectorMode,
     input: {
       readonly worldId: string;
+      readonly requestId: string;
       readonly model_profile_id: string;
     },
     buildInput: (ctx: {
@@ -492,6 +603,7 @@ class ModelRequestAssembly {
       promptBlocks: materialized.ordered_blocks,
       eventContext: materialized.event_context,
       dynamicInput,
+      requestId: input.requestId,
     });
   }
 
@@ -824,6 +936,72 @@ function assertStoredDirectorDailyIdentity(
         day: stored.day,
         request_id: stored.invocation.requestId,
         model_profile_id: input.model_profile_id,
+      },
+    );
+  }
+}
+
+function assertStoredDirectorDialogueIdentity(
+  stored: StoredModelInvocation,
+  mode: "dialogue_events" | "system_dialogue",
+  input: {
+    readonly worldId: string;
+    readonly dialogueId: string;
+    readonly playerEntityId?: string;
+    readonly requestId: string;
+    readonly model_profile_id: string;
+  },
+): void {
+  const request = stored.request.value;
+  const dynamicInput = expectJsonObject(
+    expectProperty(request, "input", "ModelRequest"),
+    "ModelRequest.input",
+  );
+  const dialogue = expectJsonObject(
+    expectProperty(dynamicInput, "dialogue", "DirectorDialogueInput"),
+    "DirectorDialogueInput.dialogue",
+  );
+  const expectedKind =
+    mode === "dialogue_events"
+      ? "director.dialogue_events"
+      : "director.system_dialogue";
+  let playerIdentityMatches = true;
+  if (mode === "system_dialogue") {
+    const knowledgeView = expectJsonObject(
+      expectProperty(
+        dynamicInput,
+        "knowledge_view",
+        "DirectorSystemDialogueInput",
+      ),
+      "DirectorSystemDialogueInput.knowledge_view",
+    );
+    playerIdentityMatches =
+      input.playerEntityId !== undefined &&
+      expectString(
+        knowledgeView,
+        "viewer_entity_id",
+        "KnowledgeView",
+      ) === input.playerEntityId;
+  }
+  if (
+    stored.requestId !== input.requestId ||
+    stored.worldId !== input.worldId ||
+    stored.requestKind !== expectedKind ||
+    expectString(request, "model_profile_id", "ModelRequest") !==
+      input.model_profile_id ||
+    expectString(dialogue, "dialogue_id", "DialogueRecord") !==
+      input.dialogueId ||
+    !playerIdentityMatches
+  ) {
+    throw new EngineFault(
+      "model.assembly.director_dialogue_identity_conflict",
+      "Persisted Director dialogue invocation differs from its command-owned identity",
+      {
+        request_id: input.requestId,
+        request_kind: expectedKind,
+        world_id: input.worldId,
+        dialogue_id: input.dialogueId,
+        player_entity_id: input.playerEntityId ?? null,
       },
     );
   }

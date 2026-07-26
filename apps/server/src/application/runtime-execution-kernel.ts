@@ -34,6 +34,7 @@ import {
 import { createPostgresAtomicPacketStore } from "../adapters/postgres/atomic-packet-store.js";
 import { createPostgresCommandJournal } from "../adapters/postgres/command-journal.js";
 import { createPostgresDayCycleExecutionIdentityJournal } from "../adapters/postgres/day-cycle-execution-identity.js";
+import { createPostgresDialogueDirectorRunJournal } from "../adapters/postgres/dialogue-director-run.js";
 import { createPostgresCommandFinalizer } from "../adapters/postgres/command-finalizer.js";
 import { createPostgresEngineSessionRepository } from "../adapters/postgres/engine-session-repository.js";
 import { createPostgresPlayerDayEndRunJournal } from "../adapters/postgres/player-day-end-run.js";
@@ -76,6 +77,10 @@ import {
   createEngineSessionService,
   type EngineSessionService,
 } from "./engine-session.js";
+import {
+  createEventCardCommandOrchestrator,
+  type EventCardCommandOrchestrator,
+} from "./event-card-command-orchestrator.js";
 import { createModelInvocationAuthorizationChannel } from "./model-dispatch-authorization.js";
 import {
   ModelGateway,
@@ -178,6 +183,10 @@ export interface RuntimeExecutionKernelDependencies {
   readonly characterDialogueModelProfileId: string;
   /** Explicit deployment selection for Director daily settlement calls. */
   readonly directorDailySettlementModelProfileId: string;
+  /** Explicit deployment selection for Director NPC dialogue event calls. */
+  readonly directorDialogueEventsModelProfileId: string;
+  /** Explicit deployment selection for Director System dialogue calls. */
+  readonly directorSystemDialogueModelProfileId: string;
   /** Explicit deployment selection for CharacterMind reaction calls. */
   readonly characterReactModelProfileId: string;
 }
@@ -223,6 +232,8 @@ export interface RuntimeExecutionKernel {
   readonly commands: CommandJournal;
   /** Recoverable two-packet Human → CharacterMind dialogue command path. */
   readonly dialogues: DialogueCommandOrchestrator;
+  /** Recoverable sealed EventCard trigger/invalidation command path. */
+  readonly eventCards: EventCardCommandOrchestrator;
   /** Recoverable player_day.end command path. */
   readonly playerDays: PlayerDayCommandOrchestrator;
   /** Closed Client Bridge command dispatch; unsupported kinds fail explicitly. */
@@ -480,6 +491,8 @@ export function createRuntimeExecutionKernel(
   });
   const dialogues = createDialogueCommandOrchestrator({
     contracts: dependencies.contracts,
+    digest: dependencies.digest,
+    catalog: dependencies.contentRuntimeCatalog,
     commands,
     worlds: worldBindingResolver,
     rulePluginAbi,
@@ -488,9 +501,24 @@ export function createRuntimeExecutionKernel(
     models,
     mutations,
     finalizer: commandFinalizer,
+    directorRuns: createPostgresDialogueDirectorRunJournal({
+      pool: dependencies.pool,
+      contracts: dependencies.contracts,
+      idFactory: createNodeCommandExecutionIdFactory(),
+    }),
     commitmentIds: createNodeDialogueCommitmentIdFactory(),
     characterDialogueModelProfileId:
       dependencies.characterDialogueModelProfileId,
+    directorDialogueEventsModelProfileId:
+      dependencies.directorDialogueEventsModelProfileId,
+    directorSystemDialogueModelProfileId:
+      dependencies.directorSystemDialogueModelProfileId,
+  });
+  const eventCards = createEventCardCommandOrchestrator({
+    contracts: dependencies.contracts,
+    commands,
+    mutations,
+    finalizer: commandFinalizer,
   });
   const playerDays = createPlayerDayCommandOrchestrator({
     contracts: dependencies.contracts,
@@ -505,6 +533,7 @@ export function createRuntimeExecutionKernel(
   const clientCommands = createClientCommandRouter({
     contracts: dependencies.contracts,
     dialogues,
+    eventCards,
     playerDays,
   });
 
@@ -525,6 +554,7 @@ export function createRuntimeExecutionKernel(
     sessions,
     commands,
     dialogues,
+    eventCards,
     playerDays,
     clientCommands,
     dayCycle,

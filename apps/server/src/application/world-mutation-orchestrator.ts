@@ -90,7 +90,7 @@ class DefaultWorldMutationOrchestrator implements WorldMutationOrchestrator {
     input: EventCardClickPacketInput,
   ): Promise<EventCardClickCommitResult> {
     const duplicate = await this.#committedPackets.readByPacketId(
-      input.commandId,
+      input.packetId,
     );
     if (duplicate !== undefined) {
       return recoverEventCardClickResult(duplicate, input);
@@ -131,7 +131,7 @@ function recoverEventCardClickResult(
     "ContentPacket.source",
   );
   if (
-    expectString(packet, "packet_id", "ContentPacket") !== input.commandId ||
+    expectString(packet, "packet_id", "ContentPacket") !== input.packetId ||
     expectString(packet, "world_id", "ContentPacket") !== input.worldId ||
     expectString(packet, "cause_id", "ContentPacket") !== input.eventCardId ||
     expectString(source, "source_kind", "PacketSource") !==
@@ -140,9 +140,10 @@ function recoverEventCardClickResult(
   ) {
     throw new EngineFault(
       "runtime.mutation.command_identity_conflict",
-      "command_id is already committed for a different world mutation",
+      "EventCard packet identity is already committed for a different world mutation",
       {
         command_id: input.commandId,
+        packet_id: input.packetId,
         world_id: input.worldId,
         event_card_id: input.eventCardId,
       },
@@ -161,7 +162,9 @@ function recoverEventCardClickResult(
   if (
     terminalKind === "event_card.trigger" &&
     expectString(terminalOp, "event_card_id", "EventCardTriggerOp") ===
-      input.eventCardId
+      input.eventCardId &&
+    readControlBindingId(terminalOp, "EventCardTriggerOp") ===
+      input.controlBindingId
   ) {
     return Object.freeze({ branch: "trigger" as const, result: record.result });
   }
@@ -169,7 +172,9 @@ function recoverEventCardClickResult(
     ops.length === 1 &&
     terminalKind === "event_card.invalidate" &&
     expectString(terminalOp, "event_card_id", "EventCardInvalidateOp") ===
-      input.eventCardId
+      input.eventCardId &&
+    readControlBindingId(terminalOp, "EventCardInvalidateOp") ===
+      input.controlBindingId
   ) {
     return Object.freeze({
       branch: "invalidate" as const,
@@ -177,6 +182,14 @@ function recoverEventCardClickResult(
     });
   }
   throw committedPacketShapeFault(input);
+}
+
+function readControlBindingId(op: JsonObject, scope: string): string {
+  const control = expectJsonObject(
+    expectProperty(op, "control", scope),
+    `${scope}.control`,
+  );
+  return expectString(control, "binding_id", "ControlBindingRef");
 }
 
 function asObjectArray(value: JsonValue, path: string): readonly JsonObject[] {
@@ -197,9 +210,10 @@ function committedPacketShapeFault(
 ): EngineFault {
   return new EngineFault(
     "runtime.mutation.committed_packet_corrupt",
-    "Committed EventCard command has no recognized terminal operation",
+      "Committed EventCard command has no recognized terminal operation",
     {
       command_id: input.commandId,
+      packet_id: input.packetId,
       event_card_id: input.eventCardId,
     },
   );

@@ -23,7 +23,9 @@ export type ContentPacketDocument = ValidatedJsonObject<
 
 export interface EventCardClickPacketInput {
   readonly worldId: string;
+  readonly controlBindingId: string;
   readonly commandId: string;
+  readonly packetId: string;
   readonly eventCardId: string;
 }
 
@@ -191,7 +193,7 @@ class DefaultAuthoritativePacketBuilder implements AuthoritativePacketBuilder {
     return this.#sealPacket({
       contract_version: "world-runtime.v1",
       record_type: "content.packet",
-      packet_id: input.commandId,
+      packet_id: input.packetId,
       cause_id: loaded.eventCardId,
       world_id: loaded.worldId,
       basis_revision: loaded.currentRevision,
@@ -228,7 +230,7 @@ class DefaultAuthoritativePacketBuilder implements AuthoritativePacketBuilder {
     return this.#sealPacket({
       contract_version: "world-runtime.v1",
       record_type: "content.packet",
-      packet_id: input.commandId,
+      packet_id: input.packetId,
       cause_id: loaded.eventCardId,
       world_id: loaded.worldId,
       basis_revision: loaded.currentRevision,
@@ -256,6 +258,16 @@ class DefaultAuthoritativePacketBuilder implements AuthoritativePacketBuilder {
   }> {
     const { snapshot } = await this.#worlds.readCurrent(input.worldId);
     const worldId = expectString(snapshot.value, "world_id", "WorldSnapshot");
+    if (worldId !== input.worldId) {
+      throw new EngineFault(
+        "runtime.packet_builder.world_identity_mismatch",
+        "Runtime world reader returned a snapshot for another world",
+        {
+          requested_world_id: input.worldId,
+          actual_world_id: worldId,
+        },
+      );
+    }
     const currentRevision = expectInteger(
       snapshot.value,
       "world_revision",
@@ -286,11 +298,39 @@ class DefaultAuthoritativePacketBuilder implements AuthoritativePacketBuilder {
       );
     }
     const card = matches[0] as JsonObject;
-    assertEqual(
-      "event_card.status",
-      "available",
-      expectString(card, "status", "EventCardState"),
+    const status = expectString(card, "status", "EventCardState");
+    if (status !== "available") {
+      throw new EngineFault(
+        "runtime.packet_builder.event_card_unavailable",
+        "Only an available EventCard can be triggered",
+        {
+          world_id: worldId,
+          event_card_id: input.eventCardId,
+          status,
+        },
+      );
+    }
+    const control = expectJsonObject(
+      expectProperty(card, "control", "EventCardState"),
+      "EventCardState.control",
     );
+    const cardControlBindingId = expectString(
+      control,
+      "binding_id",
+      "ControlBindingRef",
+    );
+    if (cardControlBindingId !== input.controlBindingId) {
+      throw new EngineFault(
+        "runtime.packet_builder.event_card_control_mismatch",
+        "EventCard is not owned by the command Session control binding",
+        {
+          world_id: worldId,
+          event_card_id: input.eventCardId,
+          session_control_binding_id: input.controlBindingId,
+          card_control_binding_id: cardControlBindingId,
+        },
+      );
+    }
 
     const sealed = expectJsonObject(
       expectProperty(card, "sealed_result", "EventCardState"),

@@ -11,6 +11,8 @@ export interface ServerEnvelopeIdFactory {
   createMessageId(): string;
 }
 
+export type EventCardCompletionBranch = "trigger" | "invalidate";
+
 export interface CommandFinalizer {
   readCompleted(
     sessionId: string,
@@ -26,7 +28,7 @@ export interface CommandFinalizer {
     readonly sessionId: string;
     readonly commandId: string;
     readonly finalWorldRevision: number;
-    readonly characterTurnId: string;
+    readonly responseTurnId: string;
   }): Promise<readonly ServerEnvelopeDocument[]>;
 
   /**
@@ -37,6 +39,19 @@ export interface CommandFinalizer {
     readonly sessionId: string;
     readonly commandId: string;
     readonly finalWorldRevision: number;
+  }): Promise<readonly ServerEnvelopeDocument[]>;
+
+  /**
+   * Atomically advances the Session and emits the sealed result presentation
+   * only for a successfully triggered EventCard. The branch must match the
+   * committed packet and final WorldState.
+   */
+  completeEventCardAccepted(input: {
+    readonly sessionId: string;
+    readonly commandId: string;
+    readonly finalWorldRevision: number;
+    readonly eventCardId: string;
+    readonly branch: EventCardCompletionBranch;
   }): Promise<readonly ServerEnvelopeDocument[]>;
 
   /**

@@ -18,6 +18,7 @@ import type {
   CommandJournal,
   CommandResultDocument,
   DialogueCommandExecutionIdentity,
+  EventCardCommandExecutionIdentity,
   StoredCommand,
   StoredCompletedCommand,
 } from "../../application/command-journal.js";
@@ -63,6 +64,7 @@ interface CommandRow {
   readonly character_model_request_id: string | null;
   readonly character_turn_id: string | null;
   readonly character_rule_request_id: string | null;
+  readonly event_card_packet_id: string | null;
   readonly command_status: string;
   readonly result_document: unknown | null;
 }
@@ -151,6 +153,12 @@ class PostgresCommandJournal implements CommandJournal {
             this.#idFactory,
             received,
           );
+          const eventCardExecution =
+            createEventCardExecutionIdentity(
+              this.#contracts,
+              this.#idFactory,
+              received,
+            );
           const insert = await client.query(
             `INSERT INTO luoxia_engine.command_journal (
                session_id,
@@ -170,6 +178,7 @@ class PostgresCommandJournal implements CommandJournal {
                character_model_request_id,
                character_turn_id,
                character_rule_request_id,
+               event_card_packet_id,
                command_status,
                received_at
              ) VALUES (
@@ -190,6 +199,7 @@ class PostgresCommandJournal implements CommandJournal {
                $15::uuid,
                $16::uuid,
                $17::uuid,
+               $18::uuid,
                'received',
                clock_timestamp()
              )`,
@@ -211,6 +221,7 @@ class PostgresCommandJournal implements CommandJournal {
               dialogueExecution?.characterModelRequestId ?? null,
               dialogueExecution?.characterTurnId ?? null,
               dialogueExecution?.characterRuleRequestId ?? null,
+              eventCardExecution?.packetId ?? null,
             ],
           );
           if (insert.rowCount !== 1) {
@@ -234,6 +245,9 @@ class PostgresCommandJournal implements CommandJournal {
             ...(dialogueExecution === undefined
               ? {}
               : { dialogueExecution }),
+            ...(eventCardExecution === undefined
+              ? {}
+              : { eventCardExecution }),
           });
         },
       );
@@ -408,6 +422,7 @@ const COMMAND_SELECT = `SELECT
   character_model_request_id::text AS character_model_request_id,
   character_turn_id::text AS character_turn_id,
   character_rule_request_id::text AS character_rule_request_id,
+  event_card_packet_id::text AS event_card_packet_id,
   command_status,
   result_document
 FROM luoxia_engine.command_journal`;
@@ -527,6 +542,39 @@ function createDialogueExecutionIdentity(
   return identity;
 }
 
+function createEventCardExecutionIdentity(
+  contracts: ContractValidator,
+  idFactory: CommandExecutionIdFactory,
+  command: ReceivedCommandCandidate,
+): EventCardCommandExecutionIdentity | undefined {
+  if (command.commandKind !== "event_card.trigger") {
+    return undefined;
+  }
+  const packetId = assertUuid(contracts, idFactory.createId());
+  if (packetId !== packetId.toLowerCase()) {
+    throw new EngineFault(
+      "command.journal.generated_identity_noncanonical",
+      "Server-generated EventCard packet UUID must use lowercase canonical text",
+      {
+        command_id: command.commandId,
+        identity: "event_card_packet_id",
+        uuid: packetId,
+      },
+    );
+  }
+  if (packetId === command.commandId) {
+    throw new EngineFault(
+      "command.journal.event_card_identity_collision",
+      "EventCard packet identity must differ from its Session-scoped command identity",
+      {
+        command_id: command.commandId,
+        event_card_packet_id: packetId,
+      },
+    );
+  }
+  return Object.freeze({ packetId });
+}
+
 function validateCommandRow(
   contracts: ContractValidator,
   digest: JsonDigest,
@@ -598,6 +646,12 @@ function validateCommandRow(
     message,
     commandKind,
   );
+  const eventCardExecution = readEventCardExecutionIdentity(
+    contracts,
+    row,
+    commandKind,
+    commandId,
+  );
   const base = Object.freeze({
     session,
     commandId,
@@ -606,6 +660,9 @@ function validateCommandRow(
     envelope,
     message,
     ...(dialogueExecution === undefined ? {} : { dialogueExecution }),
+    ...(eventCardExecution === undefined
+      ? {}
+      : { eventCardExecution }),
   });
   if (row.command_status === "received") {
     if (row.result_document !== null) {
@@ -634,6 +691,44 @@ function validateCommandRow(
   );
   assertFinalCommandResult(result, commandId);
   return Object.freeze({ ...base, phase: "completed", result });
+}
+
+function readEventCardExecutionIdentity(
+  contracts: ContractValidator,
+  row: CommandRow,
+  commandKind: string,
+  commandId: string,
+): EventCardCommandExecutionIdentity | undefined {
+  if (commandKind !== "event_card.trigger") {
+    if (row.event_card_packet_id !== null) {
+      throw new EngineFault(
+        "command.journal.database_corrupt",
+        "Non-EventCard command contains an EventCard packet identity",
+        { session_id: row.session_id, command_id: row.command_id },
+      );
+    }
+    return undefined;
+  }
+  if (row.event_card_packet_id === null) {
+    throw new EngineFault(
+      "command.journal.database_corrupt",
+      "EventCard command is missing its persisted packet identity",
+      { session_id: row.session_id, command_id: row.command_id },
+    );
+  }
+  const packetId = assertUuid(contracts, row.event_card_packet_id);
+  if (packetId === commandId) {
+    throw new EngineFault(
+      "command.journal.database_corrupt",
+      "EventCard packet identity collides with its Session-scoped command identity",
+      {
+        session_id: row.session_id,
+        command_id: row.command_id,
+        event_card_packet_id: packetId,
+      },
+    );
+  }
+  return Object.freeze({ packetId });
 }
 
 function readDialogueExecutionIdentity(

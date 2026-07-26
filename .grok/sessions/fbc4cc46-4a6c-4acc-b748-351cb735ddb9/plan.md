@@ -173,3 +173,312 @@
 5. **Engine 污染**：当前已干净；若复检再出现，先报告再清（需授权）。  
 
 **一句话：** Gate 已开，正式工程未建；先复检 U0/U1 把接缝钉死，路径与版本你一点头，再纵向打穿 U2→U4 真实对话，全程不碰假 Server、不发明协议、不污染 Engine。
+
+---
+
+# RESULTS（批准后执行 · 2026-07-26）
+
+## PLAN STATUS
+
+**U0 + U1 EXECUTED · U2 BLOCKED ON EXPLICIT PATH/VERSION CONFIRMATION · NO UNITY PROJECT CREATED · NO CONTRACTS MODIFIED**
+
+---
+
+## Step 0 — 真相源 — DONE
+
+已读：
+
+| 路径 | 用途 |
+|---|---|
+| `.agents/grok-unity-owner-task.md` | 身份、Gate 通过、U0–U8、纪律 |
+| `AGENTS.md` | 禁止第二真相、依赖方向、验证纪律 |
+| `README.md` | 基础对话已闭合；尚无 Unity Runtime；HTTP 接缝 |
+| `docs/architecture.md` | SessionView/basis/对话编排/客户端边界 |
+| `contracts/common.v1.schema.json` | EntityRef、AssetContentRef、Uuid… |
+| `contracts/client-bridge.v1.schema.json` | Envelope + 10 Client + 10 Server 消息 |
+| `contracts/world-runtime.v1.schema.json` | SessionView、DialogueView、RenderNode… |
+| `contracts/materialization.v1.schema.json` | VisualBinding 等（资产服务端侧） |
+
+Schema 摘要（SHA256 前 16）：
+
+- `A050DC99555BEAC1` client-bridge.v1
+- `9B2B11951B030773` common.v1
+- `A6B32B4DB4BD83D0` world-runtime.v1
+- `FBC42E2A87A3922A` materialization.v1
+
+未在 Engine 仓写入报告 md。
+
+---
+
+## Step 1 — Phase U0 环境预检 — DONE
+
+### U0.1 Unity.exe
+
+| 字段 | 值 |
+|---|---|
+| 路径 | `C:\Ai\Unity\2022.3.62f3c1\Editor\Unity.exe` |
+| FileVersion | `2022.3.62.1451004` |
+| ProductVersion | `2022.3.62f3c1_1623fc0bbb97` |
+| ProductName | `Unity` |
+| Company | Unity Technologies |
+| Size | 89411408 |
+| PE | MZ 有效 |
+| LastWriteTime | 2025-11-27 |
+
+**说明：** 此为 U0 候选证据，**不是**已锁定的正式 Runtime 版本；U2 须你/Codex 显式选定后写入工程。
+
+### U0.2 模块与构建目标
+
+| 项 | 证据 |
+|---|---|
+| PlaybackEngines | `windowsstandalonesupport`、`WebGLSupport` |
+| modules.json selected | `webgl`、`documentation` |
+| Docs | `...\Editor\Data\Documentation\en` = True |
+| Windows Player 变体 | mono only：`win64_player_*_mono`、`win32_player_*_mono`（Variations 下无 il2cpp 变体） |
+| windows-il2cpp 模块 | **未安装**（modules.json not selected） |
+| Android/iOS/Mac/Linux | 未安装 |
+
+### U0.3 工具链
+
+| 组件 | 路径 / 结果 |
+|---|---|
+| mono | `...\MonoBleedingEdge\bin\mono.exe` 存在 |
+| NetCoreRuntime | `...\NetCoreRuntime\dotnet.exe` 存在 |
+| Roslyn | `...\DotNetSdkRoslyn` 存在 |
+| UPM | `...\PackageManager\Server\UnityPackageManager.exe` 存在 |
+| UnityEngine.dll | `...\Managed\UnityEngine.dll` 存在 |
+| MSBuild.exe | Editor 树内 **0**（正常；编译走 Unity 自身） |
+| batchmode | 调用形态：`Unity.exe -batchmode -quit -nographics -projectPath <CONFIRMED> -logFile <path>`；**禁止**对 Engine 根使用 |
+
+### U0.4 Hub / 产品身份
+
+| 产品 | 路径 | ProductName | FileVersion |
+|---|---|---|---|
+| Unity Hub | `C:\Program Files\Unity Hub\Unity Hub.exe` | Unity Hub | 3.3.3-c7 |
+| Tuanjie Hub | `C:\Ai\Unity\Tuanjie Hub\Tuanjie Hub.exe` | Tuanjie Hub | 1.4.4 |
+| 本 Editor | 上表 | **Unity**（非 Tuanjie 运行时） | 2022.3.62f3c1 |
+
+### U0.5 是否已有 Luoxia Unity 项目
+
+| 检查 | 结果 |
+|---|---|
+| `C:\Ai\Luoxia-Unity` | **不存在** |
+| `C:\Ai` depth4 `ProjectVersion.txt` | **0** |
+| Engine 根 ProjectSettings/Library/Assets/UserSettings/Temp/Logs | **均不存在** |
+| `packages/manifest.json` UPM 污染 | **不存在** |
+| `packages/` 内容 | 仅 `contracts-runtime`、`world-core` |
+| `C:\Ai\Luoxia-Deployment` | **存在**（assets/content/operations/src…） |
+
+### U0.6 真实缺口（只列不装不删）
+
+1. 无正式 Unity Host 工程  
+2. 无 Windows IL2CPP 模块（U8 Player 若要 IL2CPP 需另装；当前仅 Mono Player）  
+3. 无 Android/iOS 等（U8 仅 Windows 时足够）  
+4. Editor 树无 MSBuild.exe（不阻塞 Unity 编译）  
+5. Session 打开 / 世界创建不在公开 `POST /api/client-envelope`（管理面/部署责任）  
+6. U2 路径与版本锁尚未由人确认  
+
+### U0.7 项目根目录建议
+
+- **建议：** `C:\Ai\Luoxia-Unity`（与 Engine / Deployment 并列）  
+- **禁止：** `C:\Ai\Unity\...` 安装树内；`C:\Ai\Luoxia-Engine` 内嵌  
+- **状态：** 候选，**未创建**；非空冲突规则：先报告不覆盖  
+
+---
+
+## Step 2 — Phase U1 接缝蓝图 12 项 — DONE
+
+### 1) ClientMessage / ServerMessage → Unity 责任
+
+**ClientMessage（10）→ 发送方模块**
+
+| type | 模块 | 责任 |
+|---|---|---|
+| `client.ready` | Transport/Host | 能力宣告（build digest + supported_protocols） |
+| `client.ack` | Transport/Session | 确认已消费的 server message_id + view_revision |
+| `session.resync_request` | Session | 请求全量 SessionView |
+| `dialogue.start` | Dialogue | command_id + basis_token + recipient + locale + text |
+| `dialogue.continue` | Dialogue | command_id + basis_token + dialogue_id + locale + text |
+| `map.move` | Presentation/Host | 地图位移意图（U4 后） |
+| `stage.input` | Stage | 本地输入意图（非世界提交） |
+| `stage.outcome_proposal` | Stage | 提案 only |
+| `event_card.trigger` | Presentation | 触发已发卡卡片 |
+| `player_day.end` | Session/Host | 日终 |
+
+**ServerMessage（10）→ 消费方模块**
+
+| type | 模块 | 责任 |
+|---|---|---|
+| `session.view` | Session | **全量替换**权威 SessionView（含 basis_token、dialogues） |
+| `session.delta` | Session | 严格 base_view_revision 匹配后应用 ViewChange |
+| `command.result` | Session/Dialogue | accepted/rejected/**pending**；绑定 command_id |
+| `dialogue.reply` | Dialogue | 低延迟 turn；权威集合仍以同 revision SessionView 为准 |
+| `presentation.frame` | Presentation | 表现 ops（非世界真相） |
+| `stage.open/update/close` | Stage | 本地 Stage 生命周期 |
+| `asset.binding` | Assets | ClientAssetBinding 下载与 digest |
+| `protocol.error` | Transport/Host | retry/resync/reconnect/fatal |
+
+### 2) Envelope 字段所有者
+
+来源：`client-bridge` `ClientEnvelope` / `ServerEnvelope` required：`protocol_version`、`envelope_type`、`message_id`、`session_id`、`sequence`、`message`；`correlation_id` 可选。
+
+| 字段 | 生成 | 校验/消费 |
+|---|---|---|
+| `protocol_version` | 双方固定 `client-bridge.v1` | 未知 → 明确失败 |
+| `envelope_type` | client / server | 方向校验 |
+| `message_id` | 发送方 UUID | 幂等、ACK、去重 |
+| `session_id` | **Server** 打开 Session 时 | 客户端全程回显；不得自造 |
+| `sequence` | 发送方会话序；Server 侧 `engine_sessions.next_server_sequence` 为权威游标（architecture） | gap → 失败/resync |
+| `correlation_id` | 可选；关联请求-响应 | 路由辅助，非世界真相 |
+| 内层 `command_id` | **Client** 生成并保持身份 | 断线重发必须同 ID；Server journal 幂等 |
+| 内层 `basis_token` | **Server** 经 SessionView/Delta 下发 | Client 只保存最新；命令携带 |
+
+### 3) basis_token
+
+- **保存：** 仅内存/会话运行时；来自最新 `SessionView.basis_token` 或 `session.delta.basis_token`  
+- **替换：** 每次新 view_revision 的 View/Delta 覆盖  
+- **失效：** architecture：View/World revision/Session/ControlBinding 变化即失效；旧 token 仅对**同 command_id 同正文重放**仍可恢复 journal 结果  
+- **禁止：** PlayerPrefs 当权威；本地发明；TTL 猜测  
+
+### 4) SessionView vs SessionDelta
+
+- **session.view：** 整份 `SessionView` 替换（`world-runtime` `$defs/SessionView`）  
+- **session.delta：** 要求 `base_view_revision` 精确等于本地当前 revision，再升到 `view_revision`，应用 `changes[]`  
+- **ViewChange 闭合集合（仅 4 种）：**  
+  - `render_node.upsert` / `render_node.remove`  
+  - `goal_plans.replace`  
+  - `world_time.set`  
+- **不匹配 base → resync**（发 `session.resync_request`），禁止猜补  
+
+### 5) dialogue.reply vs SessionView.dialogues
+
+- `dialogue.reply`：`dialogue_id` + `DialogueTurnView`（**无** view_revision / basis_token 字段）  
+- `SessionView.dialogues[]`：`DialogueView`（dialogue_id、day、participants、turns、status active|closed）为**权威集合**  
+- UI 规则：reply 可作低延迟提示；同 revision 的 SessionView 到达后以 View 为准合并；禁止两份冲突真相；不展示 model request id / digest / 内部 dialogue revision  
+
+### 6) Presentation / Stage 生命周期
+
+```text
+StageOpen  → 创建本地 Stage（module_id/scene_id/visible_context/allowed_input_types/bindings）
+StageUpdate → 仅更新 visible_state（JsonObject）；升 stage_revision
+StageInput / StageOutcomeProposal → 意图/提案，非 WorldState
+StageClose → 幂等清理本地对象
+PresentationFrame → 与 view_revision 对齐的表现 ops（可丢弃播放进度）
+```
+
+重连：本地 Stage 可丢弃，由后续 Server 消息重建。
+
+### 7) RenderNode / AssetBinding / visible state
+
+- **RenderNode**（SessionView / Presentation / Delta）：`node_id` 稳定身份；`node_kind` ∈ scene|portrait|cg|overlay|text|interaction_anchor；可选 subject/asset/text + parameters  
+- **ClientAssetBinding**：binding_id、render_node_id、slot_id、`AssetContentRef{content_hash,media_type}`、fetch_uri  
+- **身份：** content_hash 是资产身份，路径/URI 不是  
+- **visible_state：** 自由 JsonObject；不得反向写 WorldState；未知原语 → 协议不兼容  
+
+### 8) JSON Schema 2020-12 库能力
+
+Unity 侧必须：
+
+- Draft 2020-12  
+- `$ref` 跨文件（common / world-runtime / client-bridge）  
+- `oneOf` + `const` discriminator  
+- `additionalProperties: false`  
+- `format: uri`、pattern、enum  
+
+原则：验证**正式 Schema 资源副本**（从 Engine contracts 同步为只读资源），不手写字段表当真相。
+
+### 9) C# JSON 边界（防第二真相）
+
+- 入站：原始 JSON → Schema 验证 → 只读 Validated 文档 API  
+- 路由：`type` 闭合 map，未知 type 失败  
+- **禁止：** `JsonUtility` 镜像 Schema；可写 DTO 复制字段真相；Zod/第二套模型  
+- 出站：按 Schema 形状构造 JSON 对象后发送（字段集合以 Schema required 为准）  
+
+### 10) 未来 asmdef 依赖图
+
+```text
+Luoxia.Contracts          （Schema 资源 + 验证入口；无 UnityEngine 业务）
+    ↑
+Luoxia.Transport          （HTTP、sequence、correlation、ACK、重连）
+    ↑
+Luoxia.Session            （session_id、basis_token、view revision、resync）
+    ↑
+Luoxia.Dialogue | Luoxia.Presentation | Luoxia.Stage | Luoxia.Assets
+    ↑
+Luoxia.UnityHost          （MonoBehaviour 组合根、UI/输入/场景）
+```
+
+- 无 BaseManager 继承树  
+- UnityHost 不 import World Core  
+- 与任务推荐一致；合同未要求改图  
+
+### 11) 状态所有权
+
+| 仅 Unity 可丢弃 | Server 独占（Unity 不得当真相缓存） |
+|---|---|
+| 动画/镜头/音频播放进度 | WorldState / apply_packet 结果 |
+| 对象池、临时 GO | SessionView 权威字段（dialogues、player_entity_id…） |
+| UI 滚动位置、输入草稿 | basis_token 语义、command 最终结果 |
+| 本地 Stage 表现状态机 | Command Journal 阶段、model ambiguous |
+| 资产下载缓存（须 digest 校验） | Entity 身份与关系、隐藏真相 |
+
+### 12) 合同 / 接缝缺口（只报告，不改 contracts）
+
+| ID | 缺口 | Unity 影响 | 建议所有者 |
+|---|---|---|---|
+| G1 | `session.delta` 的 ViewChange **不含** dialogues / event_cards / notices / event_budget / player 等 | 对话与卡片变化必须靠全量 `session.view` 或扩 delta；客户端不得本地补字段 | Codex：是否扩展 ViewChange 或保证对话必带 full view |
+| G2 | `dialogue.reply` **无** view_revision / basis_token | 只能靠 envelope 序 + 后续 SessionView 对齐；UI 须容忍乱序窗口 | Codex 确认投递顺序保证；或补关联字段 |
+| G3 | 公开 HTTP 仅 `POST /api/client-envelope`；**无** session.open / world.create 客户端消息 | U3 前须部署管理面提供 session_id + 初始 SessionView/token | 部署/Codex 管理 API |
+| G4 | Envelope **强制** session_id，但 session 由 Server 创建 | 首包 chicken-egg：client.ready 也需已有 session | 部署约定：先管理面开 Session，再连 Unity |
+| G5 | `correlation_id` 可选，无强制请求-响应对 | 客户端应用 command_id + sequence 为主关联 | 可接受；文档化即可 |
+| G6 | `CommandResult.status=pending` 非完成 | UI 必须展示 pending/blocked，禁止兜底 NPC 文本 | 已有合同；Unity 实现纪律 |
+| G7 | Stage `visible_state` / `visible_context` 为自由 JsonObject | 无通用字段表；依赖 StageModule 版本化约定 | 内容/StageModule + 不发明世界字段 |
+| G8 | 传输层：当前 Server 为 HTTP JSON；Schema 未定义 WebSocket 帧 | U3 先实现 HTTP；WS 若需要由 Codex 扩合同 | Codex |
+| G9 | `EntityRef.expected_revision` 可选；architecture 称对话投影不带越权 revision | 客户端发送 recipient 时只用 SessionView 给出的稳定 ref | 已对齐任务 §0 |
+| G10 | materialization 服务端 VisualBinding vs 客户端 ClientAssetBinding | Unity 只消费 bridge 的 ClientAssetBinding | 清晰；无改合同 |
+
+---
+
+## Step 3 — U2 门禁 — BLOCKED（按 plan）
+
+| 决策 | 状态 |
+|---|---|
+| 项目路径 | **未确认**（建议 `C:\Ai\Luoxia-Unity`） |
+| Editor 版本锁 | **未确认**（候选 `2022.3.62f3c1`） |
+| 工程创建 | **未执行** |
+
+收到你明确确认路径 + 版本后，另开/续执行 Step 4–6（U2→U4）。
+
+---
+
+## Step 7 — 固定交接格式
+
+| 项 | 内容 |
+|---|---|
+| **当前阶段** | U0 + U1 **完成**；U2 **阻塞于路径/版本确认** |
+| **检查路径** | 见 U0 绝对路径；Schema 四文件；`C:\Ai\Luoxia-Deployment` 存在 |
+| **已证明** | Editor 候选版本与模块；无正式工程；Engine 无 Unity 污染；ClientMsg=10/ServerMsg=10；12 项蓝图；缺口 G1–G10 |
+| **合同缺口** | G1–G10（上表） |
+| **需 Codex/你** | ① 确认 `C:\Ai\Luoxia-Unity` 或其它路径 ② 确认 Editor 版本锁 ③ G1/G3/G4 Session 发放方式 ④ 联调 Server 基址（非硬编码默认） |
+| **下一步** | 你确认路径+版本 → U2 建工程 → U3 Transport → U4 对话链 |
+| **Headless Dialogue Gate 阻挡** | **false**（任务 §0 已宣布通过） |
+| **运行时阻塞** | 无 Unity 工程；Session 管理面未在本任务接通 |
+
+---
+
+## Verification — DONE
+
+1. [x] U0 绝对路径 + 版本/模块列表  
+2. [x] U1 12 项可回溯 Schema / architecture  
+3. [x] `git status contracts/` 干净；未建测试工程；未创建 `Luoxia-Unity`；未污染 Engine  
+4. [x] 未改 Server/contracts；未假 Server  
+
+**EXECUTION CHECKLIST**
+
+- [x] Step 0 真相源  
+- [x] Step 1 U0 七项  
+- [x] Step 2 U1 十二项  
+- [x] Step 3 U2 门禁停止（待确认）  
+- [x] Verification  
+- [ ] Step 4–6 U2–U4（需路径/版本确认后）
+
