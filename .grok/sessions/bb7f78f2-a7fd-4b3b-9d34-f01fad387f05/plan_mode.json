@@ -1,0 +1,9 @@
+{
+  "state": "inactive",
+  "was_previously_active": true,
+  "reminder_count": 0,
+  "pending_exit_reminder": false,
+  "awaiting_plan_approval": false,
+  "mode": "normal",
+  "plan_file": "D:\\Luoxia-Engine\\.grok\\sessions\\bb7f78f2-a7fd-4b3b-9d34-f01fad387f05\\plan.md"
+}

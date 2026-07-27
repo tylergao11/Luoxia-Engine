@@ -1,0 +1,22 @@
+{
+  "todos": [
+    {
+      "id": "u0",
+      "content": "U0: Unity 环境全量只读探针与证据",
+      "status": "completed",
+      "priority": "medium"
+    },
+    {
+      "id": "u1",
+      "content": "U1: Schema/架构精读与消息责任映射",
+      "status": "completed",
+      "priority": "medium"
+    },
+    {
+      "id": "report",
+      "content": "合并 §9 交接报告 + U2 门禁确认项",
+      "status": "completed",
+      "priority": "medium"
+    }
+  ]
+}

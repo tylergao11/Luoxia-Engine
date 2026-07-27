@@ -1,0 +1,21 @@
+{
+  "server": {
+    "base_url": null,
+    "health_path": "/api/health",
+    "client_envelope_path": "/api/client-envelope"
+  },
+  "workspace": {
+    "engine_sibling_name": "Luoxia-Engine",
+    "deployment_sibling_name": "Luoxia-Deployment",
+    "contracts_relative": "contracts"
+  },
+  "session": {
+    "session_id": null,
+    "basis_token": null,
+    "note": "Injected by external gateway / deployment management plane; Host must not invent or guess."
+  },
+  "client": {
+    "supported_protocols": ["client-bridge.v1"],
+    "client_build_digest": null
+  }
+}

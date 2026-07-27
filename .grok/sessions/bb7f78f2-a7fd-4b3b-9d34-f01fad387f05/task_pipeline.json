@@ -1,0 +1,63 @@
+{
+  "phase": "paused",
+  "baseline_git_head": "cddf9c080596013d0003531a343429737b289c18",
+  "baseline_git_tree": "274ad53fb7a8df97682de43ff1a39e8992095fc7",
+  "baseline_dirty_note": "2 dirty path(s) frozen in workspace tree",
+  "approved_plan_digest": "e24b296deda3789bb8be27e1416cec5d5334a52eb56b5f88b0d61b8a061a7d46",
+  "approved_plan_file": "D:\\Luoxia-Engine\\.grok\\sessions\\bb7f78f2-a7fd-4b3b-9d34-f01fad387f05\\plan.md",
+  "approved_plan_content": "# 计划模式演示（无代码改动）\n\n## Goal\n\n让你看到 **Plan Mode** 的完整交互：计划文件 → 审批 →（可选）进入执行。\n\n本计划 **不修改仓库代码**，仅作流程演示。\n\n## 计划模式是什么\n\n| 阶段 | 你看到什么 | 我能做什么 |\n|------|------------|------------|\n| **Plan** | 本文件可编辑/预览 | 探索代码、讨论、只写 plan.md |\n| **Approve** | 审批 UI（通过 / 改计划） | 等你拍板 |\n| **Execute** | 自动继续实现 | 改代码、跑测试（本演示跳过） |\n| **Audit** | 独立审计 diff | 有实现时才触发 |\n\n## Execution Steps\n\n1. 你阅读本计划，确认界面与文案是否符合预期。\n2. 若只想看流程：点 **拒绝/取消** 或要求改计划即可，不会动代码。\n3. 若点 **批准**：我会回复「演示结束、无实现」，不提交任何工程改动。\n\n## Impact Scope\n\n- **会写**：仅本 session 的 `plan.md`（会话目录，非业务代码）\n- **不会写**：`src/`、`contracts/`、`docs/`、git 历史等\n\n## Risks / Irreversible Actions\n\n无。纯演示，无破坏性操作。\n\n## Verification\n\n- 你能打开并阅读本计划文件\n- 审批控件可见\n- 批准后工作区业务文件仍无 diff（`git status` 干净）\n",
+  "execute_rounds": 3,
+  "audit_rounds": 0,
+  "fix_rounds": 0,
+  "max_execute_rounds": 32,
+  "max_audit_rounds": 5,
+  "max_fix_rounds": 32,
+  "checklist_seen": true,
+  "plan_checklist_items": [
+    "你阅读本计划，确认界面与文案是否符合预期。",
+    "若只想看流程：点 **拒绝/取消** 或要求改计划即可，不会动代码。",
+    "若点 **批准**：我会回复「演示结束、无实现」，不提交任何工程改动。"
+  ],
+  "plan_checklist_source": "bullet",
+  "ready_for_audit_candidate": false,
+  "last_findings": [],
+  "last_audit_verdict": null,
+  "last_audit_summary": "",
+  "last_audit_checks": [],
+  "report_history": [
+    {
+      "event_id": "bb7f78f2-a7fd-4b3b-9d34-f01fad387f05:pipeline:audit_start:76917d5dda2f4985bc2f6ba7274712e8",
+      "kind": "audit_start",
+      "phase": "audit",
+      "round": 0,
+      "verdict": "",
+      "summary": "",
+      "checks": [],
+      "report": "═══ Audit starting ═══\nIndependent auditor reviews all diffs since plan approval.",
+      "mode": "harness",
+      "error": ""
+    },
+    {
+      "event_id": "bb7f78f2-a7fd-4b3b-9d34-f01fad387f05:pipeline:audit:53934a0d97e14eb3b06d97d6d7795640",
+      "kind": "audit",
+      "phase": "paused",
+      "round": 0,
+      "verdict": "",
+      "summary": "",
+      "checks": [],
+      "report": "═══ Audit unavailable ═══\nError: AUDIT_CHAIN_BREAK: workspace changed while the independent audit was running (953b3b36730eb0f34ebfd4d44ae38a09d66e52bb -> fd4e16688ad1b3077995bb495cb9b4f6c68a78a7)\nPipeline phase: paused",
+      "mode": "chain_break",
+      "error": "AUDIT_CHAIN_BREAK: workspace changed while the independent audit was running (953b3b36730eb0f34ebfd4d44ae38a09d66e52bb -> fd4e16688ad1b3077995bb495cb9b4f6c68a78a7)"
+    }
+  ],
+  "pause_reason": "AUDIT_CHAIN_BREAK: workspace changed while the independent audit was running (953b3b36730eb0f34ebfd4d44ae38a09d66e52bb -> fd4e16688ad1b3077995bb495cb9b4f6c68a78a7)",
+  "paused_from": "audit",
+  "metadata": {
+    "execute_kick_pending": false,
+    "execute_epoch": 1,
+    "post_approve_work_rounds": 1,
+    "require_post_approve_work": false,
+    "post_fix_work_rounds": 0,
+    "require_post_fix_work": false
+  }
+}
