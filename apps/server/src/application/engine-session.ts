@@ -1,3 +1,5 @@
+import type { SessionViewDocument } from "@luoxia/world-core";
+
 export interface EngineSessionRecord {
   readonly sessionId: string;
   readonly worldId: string;
@@ -11,6 +13,11 @@ export interface EngineSessionRecord {
 export interface EngineSessionHandle {
   readonly session: EngineSessionRecord;
   readonly basisToken: string;
+}
+
+export interface OpenedEngineSession {
+  readonly session: EngineSessionRecord;
+  readonly view: SessionViewDocument;
 }
 
 export interface EngineSessionBasisTokenAuthority {
@@ -27,7 +34,7 @@ export interface EngineSessionRepository {
   create(input: {
     readonly worldId: string;
     readonly controlBindingId: string;
-  }): Promise<EngineSessionRecord>;
+  }): Promise<OpenedEngineSession>;
   readCurrent(sessionId: string): Promise<EngineSessionRecord>;
   advanceView(input: {
     readonly sessionId: string;
@@ -39,7 +46,7 @@ export interface EngineSessionService {
   open(input: {
     readonly worldId: string;
     readonly controlBindingId: string;
-  }): Promise<EngineSessionHandle>;
+  }): Promise<OpenedEngineSession>;
   readCurrent(sessionId: string): Promise<EngineSessionHandle>;
   advanceView(input: {
     readonly sessionId: string;
@@ -65,8 +72,8 @@ export function createEngineSessionService(
     async open(input: {
       readonly worldId: string;
       readonly controlBindingId: string;
-    }): Promise<EngineSessionHandle> {
-      return withToken(await dependencies.repository.create(input));
+    }): Promise<OpenedEngineSession> {
+      return dependencies.repository.create(input);
     },
     async readCurrent(sessionId: string): Promise<EngineSessionHandle> {
       return withToken(

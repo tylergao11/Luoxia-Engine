@@ -18,10 +18,7 @@ import type {
 } from "@luoxia/world-core/composition";
 
 import type { CommandJournal, StoredReceivedCommand } from "./command-journal.js";
-import type {
-  CommandFinalizer,
-  ServerEnvelopeDocument,
-} from "./command-finalizer.js";
+import type { CommandFinalizer } from "./command-finalizer.js";
 import type {
   DialogueDefinitionRunRecord,
   DialogueDirectorRunJournal,
@@ -44,6 +41,7 @@ import type {
   RuntimeWorldBinding,
   RuntimeWorldBindingResolver,
 } from "./runtime-world-binding.js";
+import type { ServerEnvelopeDocument } from "./server-envelope.js";
 import type { WorldMutationOrchestrator } from "./world-mutation-orchestrator.js";
 
 type DialogueOperationKind = "dialogue.open" | "dialogue.turn.append";
@@ -576,6 +574,9 @@ class DefaultDialogueCommandOrchestrator
           "revision",
           "DialogueRecord",
         ),
+        control: Object.freeze({
+          binding_id: input.command.session.controlBindingId,
+        }),
         model_proof: input.modelReceipt.proof.value,
         turn: createDirectorSystemTurn({
           command: input.command,
@@ -633,6 +634,14 @@ class DefaultDialogueCommandOrchestrator
       expectProperty(turn, "speaker", "DialogueTurn"),
       "DialogueTurn.speaker",
     );
+    const control = expectJsonObject(
+      expectProperty(
+        requestInput,
+        "control",
+        "DirectorSystemDialogueTurnAppendInput",
+      ),
+      "DirectorSystemDialogueTurnAppendInput.control",
+    );
     if (
       expectString(
         requestInput,
@@ -647,6 +656,11 @@ class DefaultDialogueCommandOrchestrator
         ),
         input.modelReceipt.proof.value,
       ) ||
+      expectString(
+        control,
+        "binding_id",
+        "ControlBindingRef",
+      ) !== input.command.session.controlBindingId ||
       expectString(turn, "turn_id", "DialogueTurn") !==
         requireSystemRunIdentity(
           input.command,

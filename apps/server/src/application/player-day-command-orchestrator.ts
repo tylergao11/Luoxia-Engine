@@ -8,12 +8,10 @@ import {
 } from "@luoxia/contracts-runtime";
 
 import type { CommandJournal } from "./command-journal.js";
-import type {
-  CommandFinalizer,
-  ServerEnvelopeDocument,
-} from "./command-finalizer.js";
+import type { CommandFinalizer } from "./command-finalizer.js";
 import type { DayCycleOrchestrator } from "./day-cycle-orchestrator.js";
 import type { PlayerDayEndRunJournal } from "./player-day-end-run.js";
+import type { ServerEnvelopeDocument } from "./server-envelope.js";
 
 export interface PlayerDayCommandOrchestrator {
   execute(

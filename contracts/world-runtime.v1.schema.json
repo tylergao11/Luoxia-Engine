@@ -1554,6 +1554,7 @@
         "request_id",
         "goal_node_id",
         "demand_id",
+        "selected_archetype",
         "reason_code"
       ],
       "properties": {
@@ -1565,6 +1566,9 @@
         },
         "demand_id": {
           "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "selected_archetype": {
+          "$ref": "#/$defs/GenerationArchetypeCatalogRef"
         },
         "reason_code": {
           "$ref": "common.v1.schema.json#/$defs/Identifier"
@@ -1771,6 +1775,16 @@
         }
       }
     },
+    "RenderNodeKind": {
+      "enum": [
+        "scene",
+        "portrait",
+        "cg",
+        "overlay",
+        "text",
+        "interaction_anchor"
+      ]
+    },
     "RenderNode": {
       "type": "object",
       "additionalProperties": false,
@@ -1785,14 +1799,7 @@
           "$ref": "common.v1.schema.json#/$defs/Identifier"
         },
         "node_kind": {
-          "enum": [
-            "scene",
-            "portrait",
-            "cg",
-            "overlay",
-            "text",
-            "interaction_anchor"
-          ]
+          "$ref": "#/$defs/RenderNodeKind"
         },
         "slot_id": {
           "$ref": "common.v1.schema.json#/$defs/Identifier"
@@ -1973,6 +1980,9 @@
         "name": {
           "$ref": "common.v1.schema.json#/$defs/LocalizedText"
         },
+        "summary": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
         "components": {
           "type": "array",
           "items": {
@@ -2014,6 +2024,9 @@
           "$ref": "common.v1.schema.json#/$defs/DefinitionRef"
         },
         "name": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "summary": {
           "$ref": "common.v1.schema.json#/$defs/LocalizedText"
         },
         "components": {

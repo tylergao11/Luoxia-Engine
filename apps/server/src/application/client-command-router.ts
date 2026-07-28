@@ -7,10 +7,14 @@ import {
   type ContractValidator,
 } from "@luoxia/contracts-runtime";
 
-import type { ServerEnvelopeDocument } from "./command-finalizer.js";
 import type { DialogueCommandOrchestrator } from "./dialogue-command-orchestrator.js";
+import type { DialogueCloseCommandOrchestrator } from "./dialogue-close-command-orchestrator.js";
 import type { EventCardCommandOrchestrator } from "./event-card-command-orchestrator.js";
+import type { MapMoveCommandOrchestrator } from "./map-move-command-orchestrator.js";
 import type { PlayerDayCommandOrchestrator } from "./player-day-command-orchestrator.js";
+import type { ServerEnvelopeDocument } from "./server-envelope.js";
+import type { SessionSynchronizationService } from "./session-synchronization.js";
+import type { StageOutcomeCommandOrchestrator } from "./stage-outcome-command-orchestrator.js";
 
 export interface ClientCommandRouter {
   execute(
@@ -21,8 +25,12 @@ export interface ClientCommandRouter {
 export interface ClientCommandRouterDependencies {
   readonly contracts: ContractValidator;
   readonly dialogues: DialogueCommandOrchestrator;
+  readonly dialogueCloses: DialogueCloseCommandOrchestrator;
   readonly eventCards: EventCardCommandOrchestrator;
+  readonly mapMoves: MapMoveCommandOrchestrator;
   readonly playerDays: PlayerDayCommandOrchestrator;
+  readonly stageOutcomes: StageOutcomeCommandOrchestrator;
+  readonly sessionSynchronization: SessionSynchronizationService;
 }
 
 export function createClientCommandRouter(
@@ -46,13 +54,24 @@ export function createClientCommandRouter(
         "ClientMessage",
       );
       switch (commandKind) {
+        case "client.ready":
+        case "session.resync_request":
+          return dependencies.sessionSynchronization.execute(
+            envelope.value,
+          );
         case "dialogue.start":
         case "dialogue.continue":
           return dependencies.dialogues.execute(envelope.value);
+        case "dialogue.close":
+          return dependencies.dialogueCloses.execute(envelope.value);
         case "event_card.trigger":
           return dependencies.eventCards.execute(envelope.value);
+        case "map.move":
+          return dependencies.mapMoves.execute(envelope.value);
         case "player_day.end":
           return dependencies.playerDays.execute(envelope.value);
+        case "stage.outcome_proposal":
+          return dependencies.stageOutcomes.execute(envelope.value);
         default:
           throw new EngineFault(
             "client_command.router.unsupported",

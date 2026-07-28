@@ -27,6 +27,7 @@ import { createNodeEngineSessionIdFactory } from "../adapters/crypto/engine-sess
 import { createNodeRuleHoldRequestIdFactory } from "../adapters/crypto/rule-hold-request-id-factory.js";
 import { createNodeRuntimeWorldCreationIdFactory } from "../adapters/crypto/runtime-world-creation-id-factory.js";
 import { createNodeServerEnvelopeIdFactory } from "../adapters/crypto/server-envelope-id-factory.js";
+import { createNodeWorldExtensionExecutionIdentityFactory } from "../adapters/crypto/world-extension-execution-id-factory.js";
 import {
   createHmacSessionBasisTokenAuthority,
   type SessionBasisHmacKeyring,
@@ -38,6 +39,7 @@ import { createPostgresDialogueDirectorRunJournal } from "../adapters/postgres/d
 import { createPostgresCommandFinalizer } from "../adapters/postgres/command-finalizer.js";
 import { createPostgresEngineSessionRepository } from "../adapters/postgres/engine-session-repository.js";
 import { createPostgresPlayerDayEndRunJournal } from "../adapters/postgres/player-day-end-run.js";
+import { createPostgresSessionSynchronization } from "../adapters/postgres/session-synchronization.js";
 import {
   createPostgresRuntimeInvocationJournal,
   type PostgresRuntimeInvocationJournal,
@@ -52,6 +54,7 @@ import {
 import { createPostgresRuntimeSaveRepository } from "../adapters/postgres/runtime-save-repository.js";
 import { createSystemRuntimeSaveClock } from "../adapters/system/runtime-save-clock.js";
 import { createSystemRuntimeWorldCreationClock } from "../adapters/system/runtime-world-creation-clock.js";
+import { createSystemWorldExtensionProvenanceClock } from "../adapters/system/world-extension-provenance-clock.js";
 import {
   createAuthoritativePacketBuilder,
   type AuthoritativePacketBuilder,
@@ -70,6 +73,10 @@ import {
   type DialogueCommandOrchestrator,
 } from "./dialogue-command-orchestrator.js";
 import {
+  createDialogueCloseCommandOrchestrator,
+  type DialogueCloseCommandOrchestrator,
+} from "./dialogue-close-command-orchestrator.js";
+import {
   createDecimalAmountComparer,
   createLedgerPostArithmetic,
 } from "./decimal-ledger.js";
@@ -81,6 +88,10 @@ import {
   createEventCardCommandOrchestrator,
   type EventCardCommandOrchestrator,
 } from "./event-card-command-orchestrator.js";
+import {
+  createMapMoveCommandOrchestrator,
+  type MapMoveCommandOrchestrator,
+} from "./map-move-command-orchestrator.js";
 import { createModelInvocationAuthorizationChannel } from "./model-dispatch-authorization.js";
 import {
   ModelGateway,
@@ -98,6 +109,9 @@ import {
 } from "./player-day-command-orchestrator.js";
 import { createRuleHoldEvaluator } from "./rule-hold-evaluator.js";
 import { createRuntimeWorldBindingResolver } from "./runtime-world-binding.js";
+import { createServerEnvelopeFactory } from "./server-envelope.js";
+import { createSessionRenderNodeProjector } from "./session-render-node-projector.js";
+import { createSessionViewAssembler } from "./session-view-assembler.js";
 import {
   createRuntimeWorldCreationService,
   type RuntimeWorldCreationService,
@@ -128,9 +142,17 @@ import {
 } from "./rule-plugin-executor.js";
 import type { StageModuleRegistry } from "./stage-module-registry.js";
 import {
+  createStageOutcomeCommandOrchestrator,
+  type StageOutcomeCommandOrchestrator,
+} from "./stage-outcome-command-orchestrator.js";
+import {
   createWorldMutationOrchestrator,
   type WorldMutationOrchestrator,
 } from "./world-mutation-orchestrator.js";
+import {
+  createWorldExtensionOrchestrator,
+  type WorldExtensionOrchestrator,
+} from "./world-extension-orchestrator.js";
 
 /**
  * Kernel composition inputs. Decimal/ledger strategies and the sole RulePlugin ABI
@@ -232,14 +254,21 @@ export interface RuntimeExecutionKernel {
   readonly commands: CommandJournal;
   /** Recoverable two-packet Human → CharacterMind dialogue command path. */
   readonly dialogues: DialogueCommandOrchestrator;
+  readonly dialogueCloses: DialogueCloseCommandOrchestrator;
   /** Recoverable sealed EventCard trigger/invalidation command path. */
   readonly eventCards: EventCardCommandOrchestrator;
+  /** Recoverable model-free map.move -> navigation.resolve command path. */
+  readonly mapMoves: MapMoveCommandOrchestrator;
   /** Recoverable player_day.end command path. */
   readonly playerDays: PlayerDayCommandOrchestrator;
   /** Closed Client Bridge command dispatch; unsupported kinds fail explicitly. */
   readonly clientCommands: ClientCommandRouter;
   /** Recoverable autonomous → Director → player world-day authority. */
   readonly dayCycle: DayCycleOrchestrator;
+  /** Resolves committed, archetype-selected expansion requests in autonomous phase. */
+  readonly worldExtensions: WorldExtensionOrchestrator;
+  /** Recoverable StageOutcomeProposal -> RulePlugin -> apply_packet path. */
+  readonly stageOutcomes: StageOutcomeCommandOrchestrator;
   /** Schema-closed revision-zero world bootstrap and atomic persistence. */
   readonly worldCreation: RuntimeWorldCreationService;
   /** PostgreSQL-backed SaveEnvelope export and create-only import boundary. */
@@ -291,11 +320,24 @@ export function createRuntimeExecutionKernel(
     digest: dependencies.digest,
     keyring: dependencies.sessionBasisHmacKeyring,
   });
+  const sessionViews = createSessionViewAssembler({
+    contracts: dependencies.contracts,
+    basisTokens: sessionBasisTokens,
+    renderNodes: createSessionRenderNodeProjector({
+      catalog: dependencies.contentRuntimeCatalog,
+      identityMapper: dependencies.contentRuntimeIdentityMapper,
+      digest: dependencies.digest,
+    }),
+    projector: createSessionViewProjector({
+      contracts: dependencies.contracts,
+    }),
+  });
   const sessions = createEngineSessionService({
     repository: createPostgresEngineSessionRepository({
       pool: dependencies.pool,
       contracts: dependencies.contracts,
       idFactory: createNodeEngineSessionIdFactory(),
+      views: sessionViews,
     }),
     basisTokens: sessionBasisTokens,
   });
@@ -463,6 +505,17 @@ export function createRuntimeExecutionKernel(
     journal,
     events: readers.events,
   });
+  const worldExtensions = createWorldExtensionOrchestrator({
+    contracts: dependencies.contracts,
+    digest: dependencies.digest,
+    worlds: worldBindingResolver,
+    identities: createNodeWorldExtensionExecutionIdentityFactory(),
+    provenanceClock: createSystemWorldExtensionProvenanceClock(),
+    rulePluginAbi,
+    rulePlugins: rulePluginExecutor,
+    deterministicContexts: deterministicContextAuthority,
+    mutations,
+  });
   const dayCycle = createDayCycleOrchestrator({
     worlds: worldBindingResolver,
     identities: createPostgresDayCycleExecutionIdentityJournal({
@@ -475,19 +528,23 @@ export function createRuntimeExecutionKernel(
     deterministicContexts: deterministicContextAuthority,
     models,
     mutations,
+    worldExtensions,
     directorDailySettlementModelProfileId:
       dependencies.directorDailySettlementModelProfileId,
     characterReactModelProfileId:
       dependencies.characterReactModelProfileId,
   });
+  const serverEnvelopeIds = createNodeServerEnvelopeIdFactory();
+  const serverEnvelopes = createServerEnvelopeFactory({
+    contracts: dependencies.contracts,
+    idFactory: serverEnvelopeIds,
+  });
   const commandFinalizer = createPostgresCommandFinalizer({
     pool: dependencies.pool,
     contracts: dependencies.contracts,
-    basisTokens: sessionBasisTokens,
-    projector: createSessionViewProjector({
-      contracts: dependencies.contracts,
-    }),
-    idFactory: createNodeServerEnvelopeIdFactory(),
+    views: sessionViews,
+    envelopes: serverEnvelopes,
+    idFactory: serverEnvelopeIds,
   });
   const dialogues = createDialogueCommandOrchestrator({
     contracts: dependencies.contracts,
@@ -520,6 +577,16 @@ export function createRuntimeExecutionKernel(
     mutations,
     finalizer: commandFinalizer,
   });
+  const dialogueCloses = createDialogueCloseCommandOrchestrator({
+    contracts: dependencies.contracts,
+    commands,
+    worlds: worldBindingResolver,
+    rulePluginAbi,
+    rulePlugins: rulePluginExecutor,
+    deterministicContexts: deterministicContextAuthority,
+    mutations,
+    finalizer: commandFinalizer,
+  });
   const playerDays = createPlayerDayCommandOrchestrator({
     contracts: dependencies.contracts,
     commands,
@@ -530,11 +597,43 @@ export function createRuntimeExecutionKernel(
     dayCycle,
     finalizer: commandFinalizer,
   });
+  const mapMoves = createMapMoveCommandOrchestrator({
+    contracts: dependencies.contracts,
+    commands,
+    worlds: worldBindingResolver,
+    rulePluginAbi,
+    rulePlugins: rulePluginExecutor,
+    deterministicContexts: deterministicContextAuthority,
+    mutations,
+    finalizer: commandFinalizer,
+  });
+  const stageOutcomes = createStageOutcomeCommandOrchestrator({
+    contracts: dependencies.contracts,
+    commands,
+    worlds: worldBindingResolver,
+    stageModules: dependencies.stageModuleRegistry,
+    rulePluginAbi,
+    rulePlugins: rulePluginExecutor,
+    deterministicContexts: deterministicContextAuthority,
+    mutations,
+    finalizer: commandFinalizer,
+  });
+  const sessionSynchronization =
+    createPostgresSessionSynchronization({
+      pool: dependencies.pool,
+      contracts: dependencies.contracts,
+      views: sessionViews,
+      envelopes: serverEnvelopes,
+    });
   const clientCommands = createClientCommandRouter({
     contracts: dependencies.contracts,
     dialogues,
+    dialogueCloses,
     eventCards,
+    mapMoves,
     playerDays,
+    stageOutcomes,
+    sessionSynchronization,
   });
 
   const deterministicContexts: DeterministicContextIssuePort = Object.freeze({
@@ -554,10 +653,14 @@ export function createRuntimeExecutionKernel(
     sessions,
     commands,
     dialogues,
+    dialogueCloses,
     eventCards,
+    mapMoves,
     playerDays,
     clientCommands,
     dayCycle,
+    worldExtensions,
+    stageOutcomes,
     worldCreation,
     saves,
     executeRulePlugin(

@@ -108,6 +108,7 @@ export interface WorldContentBinding {
   readonly directorProfile: JsonObject;
   readonly eventBudget: JsonObject;
   readonly initialization: WorldInitializationContent;
+  readonly presentation: WorldPresentationContent;
   readonly rulePluginOperations: readonly ContentRulePluginOperationBinding[];
 }
 
@@ -122,6 +123,17 @@ export interface WorldInitializationContent {
   readonly characterMinds: readonly JsonObject[];
   readonly stateMachines: readonly JsonObject[];
   readonly machineBindings: readonly JsonObject[];
+}
+
+/**
+ * Original frozen presentation objects available to the selected world.
+ * This is a digest-locked read view over ContentBundle JSON, not a second
+ * presentation model.
+ */
+export interface WorldPresentationContent {
+  readonly assets: readonly JsonObject[];
+  readonly materializationProfiles: readonly JsonObject[];
+  readonly bindings: readonly JsonObject[];
 }
 
 export interface ContentRuntimeCatalog extends StaticComponentDigestLookup {
@@ -209,6 +221,9 @@ interface IndexedBundle {
   readonly capabilities: ReadonlyMap<string, JsonObject>;
   readonly capabilitiesOrdered: readonly JsonObject[];
   readonly generationArchetypes: ReadonlyMap<string, JsonObject>;
+  readonly presentationAssets: readonly JsonObject[];
+  readonly presentationMaterializationProfiles: readonly JsonObject[];
+  readonly presentationBindings: readonly JsonObject[];
 }
 
 export function createContentRuntimeCatalog(
@@ -492,6 +507,27 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
       "simulation.initial_machine_bindings",
     );
 
+    const presentation = expectJsonObject(
+      expectProperty(bundle, "presentation", "bundle"),
+      "bundle.presentation",
+    );
+    const presentationAssets = asObjectArray(
+      expectProperty(presentation, "assets", "presentation"),
+      "presentation.assets",
+    );
+    const presentationMaterializationProfiles = asObjectArray(
+      expectProperty(
+        presentation,
+        "materialization_profiles",
+        "presentation",
+      ),
+      "presentation.materialization_profiles",
+    );
+    const presentationBindings = asObjectArray(
+      expectProperty(presentation, "bindings", "presentation"),
+      "presentation.bindings",
+    );
+
     const worldsList = asObjectArray(
       expectProperty(bundle, "worlds", "bundle"),
       "bundle.worlds",
@@ -545,6 +581,11 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
         capabilities,
         capabilitiesOrdered: Object.freeze([...capabilitiesOrdered]),
         generationArchetypes,
+        presentationAssets: Object.freeze([...presentationAssets]),
+        presentationMaterializationProfiles: Object.freeze([
+          ...presentationMaterializationProfiles,
+        ]),
+        presentationBindings: Object.freeze([...presentationBindings]),
       }),
     );
   }
@@ -793,6 +834,25 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
       stateMachines: Object.freeze(stateMachines),
       machineBindings: Object.freeze(machineBindings),
     });
+    const presentation: WorldPresentationContent = Object.freeze({
+      assets: indexed.presentationAssets,
+      materializationProfiles:
+        indexed.presentationMaterializationProfiles,
+      bindings: Object.freeze(
+        indexed.presentationBindings.filter((binding) => {
+          const subjectKind = expectString(
+            binding,
+            "subject_kind",
+            "PackBinding",
+          );
+          return (
+            subjectKind !== "world" ||
+            expectString(binding, "subject_id", "PackBinding") ===
+              worldDefinitionId
+          );
+        }),
+      ),
+    });
 
     return Object.freeze({
       packId: indexed.packId,
@@ -802,6 +862,7 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
       directorProfile,
       eventBudget,
       initialization,
+      presentation,
       rulePluginOperations,
     });
   }

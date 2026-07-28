@@ -113,6 +113,9 @@
           "$ref": "#/$defs/DialogueContinue"
         },
         {
+          "$ref": "#/$defs/DialogueClose"
+        },
+        {
           "$ref": "#/$defs/EventCardTrigger"
         },
         {
@@ -991,6 +994,32 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 20000
+        }
+      }
+    },
+    "DialogueClose": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "command_id",
+        "basis_token",
+        "dialogue_id"
+      ],
+      "properties": {
+        "type": {
+          "const": "dialogue.close"
+        },
+        "command_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "basis_token": {
+          "type": "string",
+          "minLength": 32,
+          "maxLength": 512
+        },
+        "dialogue_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
         }
       }
     },

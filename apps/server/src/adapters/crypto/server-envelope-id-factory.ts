@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import type { ServerEnvelopeIdFactory } from "../../application/command-finalizer.js";
+import type { ServerEnvelopeIdFactory } from "../../application/server-envelope.js";
 
 export function createNodeServerEnvelopeIdFactory(): ServerEnvelopeIdFactory {
   return Object.freeze({

@@ -10,10 +10,17 @@ import type {
 import type { Ajv2020 } from "ajv/dist/2020.js";
 import type { FormatsPlugin } from "ajv-formats";
 
-import type { ContractValidator } from "./contract-validator.js";
+import type {
+  ContractSchemaExporter,
+  ContractValidator,
+} from "./contract-validator.js";
 import { EngineFault } from "./fault.js";
-import type { JsonObject } from "./json.js";
-import { assertJsonValue, isJsonObject } from "./json.js";
+import type { JsonObject, JsonValue } from "./json.js";
+import {
+  assertJsonValue,
+  deepFreezeJson,
+  isJsonObject,
+} from "./json.js";
 import {
   sealValidatedJson,
   type ValidatedJson,
@@ -28,14 +35,22 @@ const addFormats = (
   require("ajv-formats") as { readonly default: FormatsPlugin }
 ).default;
 
-export class SchemaRegistry implements ContractValidator {
+export class SchemaRegistry
+  implements ContractValidator, ContractSchemaExporter
+{
   public readonly schemaIds: readonly string[];
 
   readonly #ajv: Ajv2020;
+  readonly #schemasById: ReadonlyMap<string, JsonObject>;
 
-  private constructor(ajv: Ajv2020, schemaIds: readonly string[]) {
+  private constructor(
+    ajv: Ajv2020,
+    schemaIds: readonly string[],
+    schemasById: ReadonlyMap<string, JsonObject>,
+  ) {
     this.#ajv = ajv;
     this.schemaIds = Object.freeze([...schemaIds]);
+    this.#schemasById = schemasById;
   }
 
   public static async load(directory: string): Promise<SchemaRegistry> {
@@ -63,6 +78,7 @@ export class SchemaRegistry implements ContractValidator {
     addFormats(ajv);
 
     const schemaIds: string[] = [];
+    const schemasById = new Map<string, JsonObject>();
     for (const fileName of schemaFiles) {
       const filePath = resolve(absoluteDirectory, fileName);
       const source = await readFile(filePath, "utf8");
@@ -92,13 +108,25 @@ export class SchemaRegistry implements ContractValidator {
 
       ajv.addSchema(parsed as AnySchemaObject, schemaId);
       schemaIds.push(schemaId);
+      assertJsonValue(parsed, fileName);
+      if (!isJsonObject(parsed)) {
+        throw new EngineFault(
+          "contract.schema.root_invalid",
+          `${fileName} must contain a JSON object`,
+        );
+      }
+      schemasById.set(schemaId, deepFreezeJson(parsed));
     }
 
     for (const schemaId of schemaIds) {
       requireValidator(ajv, schemaId);
     }
 
-    return new SchemaRegistry(ajv, schemaIds);
+    return new SchemaRegistry(
+      ajv,
+      schemaIds,
+      new Map(schemasById),
+    );
   }
 
   public assert<const TSchemaRef extends string>(
@@ -135,6 +163,227 @@ export class SchemaRegistry implements ContractValidator {
 
     return sealValidatedJson(schemaRef, validated.value);
   }
+
+  public exportStandaloneSchema(schemaRef: string): JsonObject {
+    return exportStandaloneSchema(this.#schemasById, schemaRef);
+  }
+}
+
+function exportStandaloneSchema(
+  schemasById: ReadonlyMap<string, JsonObject>,
+  schemaRef: string,
+): JsonObject {
+  const rootTarget = resolveSchemaTarget(schemasById, schemaRef);
+  if (!isJsonObject(rootTarget.value)) {
+    throw new EngineFault(
+      "contract.schema.export_target_not_object",
+      "Standalone schema export target must be a JSON object",
+      { schema_ref: schemaRef },
+    );
+  }
+
+  const definitions: Record<string, JsonValue> = {};
+  const definitionKeys = new Map<string, string>();
+
+  const ensureDefinition = (targetRef: string): string => {
+    const canonicalRef = canonicalSchemaRef(targetRef);
+    const existing = definitionKeys.get(canonicalRef);
+    if (existing !== undefined) {
+      return existing;
+    }
+
+    const key = `schema_${definitionKeys.size}`;
+    definitionKeys.set(canonicalRef, key);
+    definitions[key] = {};
+    const target = resolveSchemaTarget(schemasById, canonicalRef);
+    definitions[key] = cloneSchemaNode(
+      target.value,
+      target.documentId,
+      ensureDefinition,
+    );
+    return key;
+  };
+
+  const clonedRoot = cloneSchemaNode(
+    rootTarget.value,
+    rootTarget.documentId,
+    ensureDefinition,
+  );
+  if (!isJsonObject(clonedRoot)) {
+    throw new EngineFault(
+      "contract.schema.export_target_not_object",
+      "Standalone schema export target must remain a JSON object",
+      { schema_ref: schemaRef },
+    );
+  }
+
+  const exported: Record<string, JsonValue> = {};
+  const draft = rootTarget.document["$schema"];
+  if (typeof draft === "string") {
+    exported["$schema"] = draft;
+  }
+  for (const [key, value] of Object.entries(clonedRoot)) {
+    exported[key] = value;
+  }
+  if (Object.keys(definitions).length > 0) {
+    exported["$defs"] = definitions;
+  }
+  return deepFreezeJson(exported);
+}
+
+interface ResolvedSchemaTarget {
+  readonly documentId: string;
+  readonly document: JsonObject;
+  readonly value: JsonValue;
+}
+
+function resolveSchemaTarget(
+  schemasById: ReadonlyMap<string, JsonObject>,
+  schemaRef: string,
+): ResolvedSchemaTarget {
+  const canonicalRef = canonicalSchemaRef(schemaRef);
+  const url = new URL(canonicalRef);
+  const fragment = url.hash;
+  url.hash = "";
+  const documentId = url.toString();
+  const document = schemasById.get(documentId);
+  if (document === undefined) {
+    throw new EngineFault(
+      "contract.schema.export_document_unknown",
+      "Standalone schema export references an unloaded contract document",
+      { schema_ref: canonicalRef, document_id: documentId },
+    );
+  }
+
+  let value: JsonValue = document;
+  if (fragment.length > 0 && fragment !== "#") {
+    if (!fragment.startsWith("#/")) {
+      throw new EngineFault(
+        "contract.schema.export_fragment_unsupported",
+        "Standalone schema export supports JSON Pointer fragments only",
+        { schema_ref: canonicalRef, fragment },
+      );
+    }
+    const decodedPointer = decodeURIComponent(fragment.slice(2));
+    const segments = decodedPointer
+      .split("/")
+      .map((segment) =>
+        segment.replaceAll("~1", "/").replaceAll("~0", "~"),
+      );
+    for (const segment of segments) {
+      if (Array.isArray(value)) {
+        if (!/^(?:0|[1-9][0-9]*)$/u.test(segment)) {
+          throw unresolvedSchemaPointer(canonicalRef, segment);
+        }
+        const entry: JsonValue | undefined = (
+          value as readonly JsonValue[]
+        )[Number(segment)];
+        if (entry === undefined) {
+          throw unresolvedSchemaPointer(canonicalRef, segment);
+        }
+        value = entry;
+        continue;
+      }
+      if (!isJsonObject(value)) {
+        throw unresolvedSchemaPointer(canonicalRef, segment);
+      }
+      const entry = value[segment];
+      if (entry === undefined) {
+        throw unresolvedSchemaPointer(canonicalRef, segment);
+      }
+      value = entry;
+    }
+  }
+
+  return Object.freeze({
+    documentId,
+    document,
+    value,
+  });
+}
+
+function cloneSchemaNode(
+  node: JsonValue,
+  baseDocumentId: string,
+  ensureDefinition: (targetRef: string) => string,
+): JsonValue {
+  if (
+    node === null ||
+    typeof node === "string" ||
+    typeof node === "boolean" ||
+    typeof node === "number"
+  ) {
+    return node;
+  }
+  if (!isJsonObject(node)) {
+    return (node as readonly JsonValue[]).map((entry) =>
+      cloneSchemaNode(entry, baseDocumentId, ensureDefinition),
+    );
+  }
+
+  const nestedId = node["$id"];
+  const effectiveBase =
+    typeof nestedId === "string"
+      ? new URL(nestedId, baseDocumentId).toString()
+      : baseDocumentId;
+  const cloned: Record<string, JsonValue> = {};
+  for (const [key, value] of Object.entries(node)) {
+    if (key === "$schema" || key === "$id" || key === "$defs") {
+      continue;
+    }
+    if (key === "$ref") {
+      if (typeof value !== "string") {
+        throw new EngineFault(
+          "contract.schema.export_ref_invalid",
+          "JSON Schema $ref must be a string",
+          { base_document_id: effectiveBase },
+        );
+      }
+      const targetRef = new URL(value, effectiveBase).toString();
+      cloned["$ref"] = `#/$defs/${ensureDefinition(targetRef)}`;
+      continue;
+    }
+    cloned[key] = cloneSchemaNode(
+      value,
+      effectiveBase,
+      ensureDefinition,
+    );
+  }
+  return cloned;
+}
+
+function canonicalSchemaRef(schemaRef: string): string {
+  if (
+    typeof schemaRef !== "string" ||
+    schemaRef.length === 0 ||
+    schemaRef !== schemaRef.trim()
+  ) {
+    throw new EngineFault(
+      "contract.schema.export_ref_invalid",
+      "Standalone schema export requires one clean absolute schema reference",
+      { schema_ref: schemaRef },
+    );
+  }
+  try {
+    return new URL(schemaRef).toString();
+  } catch {
+    throw new EngineFault(
+      "contract.schema.export_ref_invalid",
+      "Standalone schema export requires one clean absolute schema reference",
+      { schema_ref: schemaRef },
+    );
+  }
+}
+
+function unresolvedSchemaPointer(
+  schemaRef: string,
+  segment: string,
+): EngineFault {
+  return new EngineFault(
+    "contract.schema.export_pointer_unresolved",
+    "Standalone schema export could not resolve a JSON Pointer segment",
+    { schema_ref: schemaRef, segment },
+  );
 }
 
 function requireValidator(ajv: Ajv2020, schemaRef: string): ValidateFunction {

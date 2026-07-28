@@ -22,6 +22,12 @@ import {
   type DeterministicContextHmacKeyring,
 } from "../adapters/crypto/deterministic-context-hmac-token-codec.js";
 import type { SessionBasisHmacKeyring } from "../adapters/crypto/session-basis-hmac-authority.js";
+import {
+  createAssetProviderRegistry,
+  type AssetProviderAdapterV1,
+  type AssetProviderRegistry,
+  type RegisteredAssetProvider,
+} from "./asset-provider-registry.js";
 import type { ModelProvider } from "./model-gateway.js";
 import type { RulePluginDependencyIdentity } from "./rule-plugin-abi.js";
 import type { RulePluginModuleV1 } from "./rule-plugin-abi.js";
@@ -51,6 +57,11 @@ export interface RuntimeContentActivationInput {
   readonly contentBundleCandidates: readonly unknown[];
   /** Trusted in-process RulePlugin modules; no scan, download, or defaults. */
   readonly rulePluginModules: readonly RulePluginModuleV1[];
+  /**
+   * Explicit deployment-owned AssetProvider adapters. Empty is valid only when
+   * activated content has no required asset_provider dependency.
+   */
+  readonly assetProviderAdapters: readonly AssetProviderAdapterV1[];
   /**
    * Untrusted StageModule manifest JSON documents; order is owned by the deployer.
    * Required field — no default empty array, overload, or compatibility entry.
@@ -108,6 +119,10 @@ export interface RuntimeContentActivation {
    * objects as the registry — validates and orders only; does not load artifacts.
    */
   readonly requiredStageModules: readonly RegisteredStageModule[];
+  /** Sole explicit registry used to satisfy asset_provider DependencyLocks. */
+  readonly assetProviders: AssetProviderRegistry;
+  /** Exact registered adapters required by the activated ContentBundles. */
+  readonly requiredAssetProviders: readonly RegisteredAssetProvider[];
 }
 
 interface LoadedBundleRecord {
@@ -226,10 +241,15 @@ export async function createRuntimeContentActivation(
     contracts: input.contracts,
     manifestCandidates: input.stageModuleManifestCandidates,
   });
+  const assetProviders = createAssetProviderRegistry({
+    contracts: input.contracts,
+    adapters: input.assetProviderAdapters,
+  });
 
   const packIndex = buildPackIndex(records);
   const requiredRulePluginDependencies: RulePluginDependencyIdentity[] = [];
   const requiredStageModuleRoots: RegisteredStageModule[] = [];
+  const requiredAssetProviderSet = new Set<RegisteredAssetProvider>();
   for (const record of records) {
     collectAndAssertDependencies(
       record,
@@ -237,6 +257,8 @@ export async function createRuntimeContentActivation(
       requiredRulePluginDependencies,
       stageModules,
       requiredStageModuleRoots,
+      assetProviders,
+      requiredAssetProviderSet,
     );
   }
 
@@ -246,6 +268,11 @@ export async function createRuntimeContentActivation(
 
   const requiredStageModules = stageModules.planRequiredModules(
     requiredStageModuleRoots,
+  );
+  const requiredAssetProviders = Object.freeze(
+    assetProviders.registeredProviders.filter((provider) =>
+      requiredAssetProviderSet.has(provider),
+    ),
   );
 
   const deterministicContextTokenCodec =
@@ -309,6 +336,8 @@ export async function createRuntimeContentActivation(
     bundles,
     stageModules,
     requiredStageModules,
+    assetProviders,
+    requiredAssetProviders,
   });
 }
 
@@ -401,6 +430,8 @@ function collectAndAssertDependencies(
   requiredRulePlugins: RulePluginDependencyIdentity[],
   stageModules: StageModuleRegistry,
   requiredStageModuleRoots: RegisteredStageModule[],
+  assetProviders: AssetProviderRegistry,
+  requiredAssetProviders: Set<RegisteredAssetProvider>,
 ): void {
   for (const [depIndex, dependency] of record.dependencies.entries()) {
     const required = dependency.required;
@@ -477,17 +508,14 @@ function collectAndAssertDependencies(
         break;
       }
       case "asset_provider": {
-        throw new EngineFault(
-          "runtime.activation.dependency_kind_unsupported",
-          "Required dependency kind cannot be satisfied by Runtime Content Activation v1",
-          {
-            dependent_pack_id: record.packId,
-            dependent_bundle_digest: record.bundleDigest,
-            dependency_id: dependencyId,
-            dependency_kind: kind,
+        requiredAssetProviders.add(
+          assetProviders.requireAdapterForDependency({
             package_id: packageId,
-          },
+            version,
+            integrity_sha256: integrity,
+          }),
         );
+        break;
       }
       default: {
         throw new EngineFault(

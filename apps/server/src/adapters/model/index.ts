@@ -1,4 +1,10 @@
 export {
+  createDeepSeekChatModelProvider,
+  type DeepSeekChatModelProviderConfig,
+  type DeepSeekChatModelProviderDependencies,
+  type DeepSeekThinkingMode,
+} from "./deepseek-chat-model-provider.js";
+export {
   createOpenAIResponsesModelProvider,
   type OpenAIResponsesModelProviderConfig,
   type OpenAIResponsesModelProviderDependencies,

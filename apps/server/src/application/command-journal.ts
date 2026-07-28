@@ -22,7 +22,10 @@ interface StoredCommandBase {
   readonly envelope: ClientEnvelopeDocument;
   readonly message: JsonObject;
   readonly dialogueExecution?: DialogueCommandExecutionIdentity;
+  readonly dialogueCloseExecution?: DialogueCloseCommandExecutionIdentity;
   readonly eventCardExecution?: EventCardCommandExecutionIdentity;
+  readonly navigationExecution?: NavigationCommandExecutionIdentity;
+  readonly stageOutcomeExecution?: StageOutcomeCommandExecutionIdentity;
 }
 
 /**
@@ -40,12 +43,39 @@ export interface DialogueCommandExecutionIdentity {
 }
 
 /**
+ * Server-owned globally unique RulePlugin request identity for dialogue.close.
+ * Client command_id remains scoped to a Session and the target dialogue stays
+ * in the validated ClientMessage instead of becoming a second stored fact.
+ */
+export interface DialogueCloseCommandExecutionIdentity {
+  readonly ruleRequestId: string;
+}
+
+/**
  * Server-owned globally unique packet identity for the single authoritative
  * EventCard click packet. Client command_id is scoped to a Session and cannot
  * satisfy the global ContentPacket packet_id uniqueness contract.
  */
 export interface EventCardCommandExecutionIdentity {
   readonly packetId: string;
+}
+
+/**
+ * Server-owned globally unique RulePlugin request identity for map.move.
+ * Client command_id is scoped to a Session and cannot own the global
+ * RulePlugin Invocation Journal key.
+ */
+export interface NavigationCommandExecutionIdentity {
+  readonly ruleRequestId: string;
+}
+
+/**
+ * Server-owned globally unique RulePlugin request identity for one
+ * StageOutcomeProposal. The Stage instance and proposal remain in the
+ * validated ClientMessage.
+ */
+export interface StageOutcomeCommandExecutionIdentity {
+  readonly ruleRequestId: string;
 }
 
 export interface CommandExecutionIdFactory {

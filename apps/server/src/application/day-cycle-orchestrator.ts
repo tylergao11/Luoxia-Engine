@@ -36,6 +36,7 @@ import type {
   RuntimeWorldBindingResolver,
 } from "./runtime-world-binding.js";
 import type { WorldMutationOrchestrator } from "./world-mutation-orchestrator.js";
+import type { WorldExtensionOrchestrator } from "./world-extension-orchestrator.js";
 
 type DayCyclePhase = "autonomous" | "director_settlement" | "player";
 type DayCycleTransitionKind =
@@ -80,6 +81,7 @@ export interface DayCycleOrchestratorDependencies {
   readonly deterministicContexts: DeterministicContextAuthority;
   readonly models: RuntimeModelFacades;
   readonly mutations: WorldMutationOrchestrator;
+  readonly worldExtensions: WorldExtensionOrchestrator;
   readonly directorDailySettlementModelProfileId: string;
   readonly characterReactModelProfileId: string;
 }
@@ -112,6 +114,7 @@ class DefaultDayCycleOrchestrator implements DayCycleOrchestrator {
   readonly #deterministicContexts: DeterministicContextAuthority;
   readonly #models: RuntimeModelFacades;
   readonly #mutations: WorldMutationOrchestrator;
+  readonly #worldExtensions: WorldExtensionOrchestrator;
   readonly #directorDailySettlementModelProfileId: string;
   readonly #characterReactModelProfileId: string;
 
@@ -123,6 +126,7 @@ class DefaultDayCycleOrchestrator implements DayCycleOrchestrator {
     this.#deterministicContexts = dependencies.deterministicContexts;
     this.#models = dependencies.models;
     this.#mutations = dependencies.mutations;
+    this.#worldExtensions = dependencies.worldExtensions;
     this.#directorDailySettlementModelProfileId =
       dependencies.directorDailySettlementModelProfileId;
     this.#characterReactModelProfileId =
@@ -183,6 +187,13 @@ class DefaultDayCycleOrchestrator implements DayCycleOrchestrator {
     }
 
     if (current.phase === "autonomous") {
+      await this.#worldExtensions.resolvePending({
+        worldId: current.worldId,
+      });
+      current = await this.#readState(input.worldId);
+      if (current.phase !== "autonomous") {
+        throw phaseFault(current, "autonomous");
+      }
       await this.#advanceStateMachines(current);
       current = await this.#readState(input.worldId);
       if (current.phase === "autonomous") {

@@ -1,4 +1,5 @@
 import type {
+  ContractSchemaExporter,
   ContractValidator,
   JsonDigest,
 } from "@luoxia/contracts-runtime";
@@ -11,7 +12,7 @@ export type RuntimeDeploymentActivationInput = Omit<
 >;
 
 export interface RuntimeDeploymentFactoryInput {
-  readonly contracts: ContractValidator;
+  readonly contracts: ContractValidator & ContractSchemaExporter;
   readonly digest: JsonDigest;
 }
 

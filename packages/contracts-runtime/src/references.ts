@@ -27,8 +27,13 @@ export function definitionRef<
 
 export const CONTRACT_REF = Object.freeze({
   identifier: definitionRef(CONTRACT_ID.common, "Identifier"),
+  namespacedIdentifier: definitionRef(
+    CONTRACT_ID.common,
+    "NamespacedIdentifier",
+  ),
   uuid: definitionRef(CONTRACT_ID.common, "Uuid"),
   semVer: definitionRef(CONTRACT_ID.common, "SemVer"),
+  sha256: definitionRef(CONTRACT_ID.common, "Sha256"),
   packLock: definitionRef(CONTRACT_ID.common, "PackLock"),
   pluginLock: definitionRef(CONTRACT_ID.common, "PluginLock"),
   localizedText: definitionRef(CONTRACT_ID.common, "LocalizedText"),
@@ -57,6 +62,7 @@ export const CONTRACT_REF = Object.freeze({
   sessionView: definitionRef(CONTRACT_ID.worldRuntime, "SessionView"),
   modelRequest: definitionRef(CONTRACT_ID.modelProtocol, "ModelRequest"),
   modelResponse: definitionRef(CONTRACT_ID.modelProtocol, "ModelResponse"),
+  modelOutput: definitionRef(CONTRACT_ID.modelProtocol, "ModelOutput"),
   verifiedModelOutput: definitionRef(
     CONTRACT_ID.modelProtocol,
     "VerifiedModelOutputRef",

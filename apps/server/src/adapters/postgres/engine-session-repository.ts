@@ -8,13 +8,16 @@ import {
   type JsonObject,
   type JsonValue,
 } from "@luoxia/contracts-runtime/portable";
+import type { WorldContentLockDocument } from "@luoxia/world-core";
 import type { Pool, PoolClient } from "pg";
 
 import type {
   EngineSessionIdFactory,
+  OpenedEngineSession,
   EngineSessionRecord,
   EngineSessionRepository,
 } from "../../application/engine-session.js";
+import type { SessionViewAssembler } from "../../application/session-view-assembler.js";
 import {
   assertSafeUnsignedInteger,
   assertUuid,
@@ -28,12 +31,14 @@ export interface PostgresEngineSessionRepositoryDependencies {
   readonly pool: Pool;
   readonly contracts: ContractValidator;
   readonly idFactory: EngineSessionIdFactory;
+  readonly views: SessionViewAssembler;
 }
 
 interface WorldForSessionRow {
   readonly world_id: string;
   readonly revision_text: string;
   readonly state_document: unknown;
+  readonly world_content_lock_document: unknown;
 }
 
 interface EngineSessionContextRow {
@@ -47,6 +52,7 @@ interface EngineSessionContextRow {
   readonly nonce: string;
   readonly current_world_revision_text: string;
   readonly state_document: unknown;
+  readonly world_content_lock_document: unknown;
 }
 
 export interface LockedEngineSessionContext {
@@ -54,6 +60,7 @@ export interface LockedEngineSessionContext {
   readonly currentWorldRevision: number;
   readonly nextServerSequence: number;
   readonly worldState: JsonObject;
+  readonly worldContentLock: WorldContentLockDocument;
 }
 
 export function createPostgresEngineSessionRepository(
@@ -66,6 +73,7 @@ class PostgresEngineSessionRepository implements EngineSessionRepository {
   readonly #pool: Pool;
   readonly #contracts: ContractValidator;
   readonly #idFactory: EngineSessionIdFactory;
+  readonly #views: SessionViewAssembler;
 
   public constructor(
     dependencies: PostgresEngineSessionRepositoryDependencies,
@@ -73,12 +81,13 @@ class PostgresEngineSessionRepository implements EngineSessionRepository {
     this.#pool = dependencies.pool;
     this.#contracts = dependencies.contracts;
     this.#idFactory = dependencies.idFactory;
+    this.#views = dependencies.views;
   }
 
   public async create(input: {
     readonly worldId: string;
     readonly controlBindingId: string;
-  }): Promise<EngineSessionRecord> {
+  }): Promise<OpenedEngineSession> {
     const worldId = assertUuid(this.#contracts, input.worldId);
     const controlBindingId = assertUuid(
       this.#contracts,
@@ -101,7 +110,8 @@ class PostgresEngineSessionRepository implements EngineSessionRepository {
           const worldQuery = await client.query<WorldForSessionRow>(
             `SELECT world_id::text AS world_id,
                     revision::text AS revision_text,
-                    state_document
+                    state_document,
+                    world_content_lock_document
                FROM luoxia_engine.worlds
               WHERE world_id = $1::uuid
               FOR SHARE`,
@@ -138,6 +148,10 @@ class PostgresEngineSessionRepository implements EngineSessionRepository {
           const worldState = this.#contracts.assertObject(
             CONTRACT_REF.worldState,
             worldRow.state_document,
+          );
+          const worldContentLock = this.#contracts.assertObject(
+            CONTRACT_REF.worldContentLock,
+            worldRow.world_content_lock_document,
           );
           const playerEntityId = requireActiveHumanBinding(
             worldState.value,
@@ -185,7 +199,7 @@ class PostgresEngineSessionRepository implements EngineSessionRepository {
               { session_id: sessionId },
             );
           }
-          return Object.freeze({
+          const session: EngineSessionRecord = Object.freeze({
             sessionId,
             worldId,
             controlBindingId,
@@ -194,6 +208,13 @@ class PostgresEngineSessionRepository implements EngineSessionRepository {
             worldRevision,
             nonce,
           });
+          const view = this.#views.assemble({
+            session,
+            worldState: worldState.value,
+            worldContentLock,
+            noticeCandidates: [],
+          });
+          return Object.freeze({ session, view });
         },
       );
     } catch (error: unknown) {
@@ -323,7 +344,8 @@ export async function readEngineSessionContext(
             s.next_server_sequence::text AS next_server_sequence_text,
             s.nonce::text AS nonce,
             w.revision::text AS current_world_revision_text,
-            w.state_document
+            w.state_document,
+            w.world_content_lock_document
        FROM luoxia_engine.engine_sessions AS s
        JOIN luoxia_engine.worlds AS w
          ON w.world_id = s.world_id
@@ -348,6 +370,10 @@ export async function readEngineSessionContext(
   const worldState = contracts.assertObject(
     CONTRACT_REF.worldState,
     row.state_document,
+  );
+  const worldContentLock = contracts.assertObject(
+    CONTRACT_REF.worldContentLock,
+    row.world_content_lock_document,
   );
   const currentWorldRevision = parseSafeUnsignedInteger(
     row.current_world_revision_text,
@@ -391,6 +417,7 @@ export async function readEngineSessionContext(
     currentWorldRevision,
     nextServerSequence,
     worldState: worldState.value,
+    worldContentLock,
   });
 }
 

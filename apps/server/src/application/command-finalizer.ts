@@ -1,15 +1,4 @@
-import type {
-  CONTRACT_REF,
-  ValidatedJsonObject,
-} from "@luoxia/contracts-runtime";
-
-export type ServerEnvelopeDocument = ValidatedJsonObject<
-  typeof CONTRACT_REF.serverEnvelope
->;
-
-export interface ServerEnvelopeIdFactory {
-  createMessageId(): string;
-}
+import type { ServerEnvelopeDocument } from "./server-envelope.js";
 
 export type EventCardCompletionBranch = "trigger" | "invalidate";
 
@@ -39,6 +28,17 @@ export interface CommandFinalizer {
     readonly sessionId: string;
     readonly commandId: string;
     readonly finalWorldRevision: number;
+  }): Promise<readonly ServerEnvelopeDocument[]>;
+
+  /**
+   * Finalizes one accepted StageOutcomeProposal and emits the exact Stage
+   * update/close derived from the committed StageInstance.
+   */
+  completeStageOutcomeAccepted(input: {
+    readonly sessionId: string;
+    readonly commandId: string;
+    readonly finalWorldRevision: number;
+    readonly stageInstanceId: string;
   }): Promise<readonly ServerEnvelopeDocument[]>;
 
   /**

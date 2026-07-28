@@ -95,7 +95,10 @@ CREATE TABLE luoxia_engine.command_journal (
   character_model_request_id uuid,
   character_turn_id uuid,
   character_rule_request_id uuid,
+  dialogue_close_rule_request_id uuid,
   event_card_packet_id uuid,
+  navigation_rule_request_id uuid,
+  stage_outcome_rule_request_id uuid,
   command_status text NOT NULL,
   result_document jsonb,
   received_at timestamptz NOT NULL,
@@ -109,8 +112,14 @@ CREATE TABLE luoxia_engine.command_journal (
   CONSTRAINT command_journal_character_turn_id_unique UNIQUE (character_turn_id),
   CONSTRAINT command_journal_character_rule_request_id_unique
     UNIQUE (character_rule_request_id),
+  CONSTRAINT command_journal_dialogue_close_rule_request_id_unique
+    UNIQUE (dialogue_close_rule_request_id),
   CONSTRAINT command_journal_event_card_packet_id_unique
     UNIQUE (event_card_packet_id),
+  CONSTRAINT command_journal_navigation_rule_request_id_unique
+    UNIQUE (navigation_rule_request_id),
+  CONSTRAINT command_journal_stage_outcome_rule_request_id_unique
+    UNIQUE (stage_outcome_rule_request_id),
   CONSTRAINT command_journal_request_digest_sha256 CHECK (
     request_digest ~ '^[0-9a-f]{64}$'
   ),
@@ -202,6 +211,41 @@ CREATE TABLE luoxia_engine.command_journal (
     OR (
       command_kind <> 'event_card.trigger'
       AND event_card_packet_id IS NULL
+    )
+  ),
+  CONSTRAINT command_journal_dialogue_close_identity_shape CHECK (
+    (
+      command_kind = 'dialogue.close'
+      AND dialogue_close_rule_request_id IS NOT NULL
+      AND dialogue_close_rule_request_id <> command_id
+      AND request_document #>> '{message,dialogue_id}' IS NOT NULL
+    )
+    OR (
+      command_kind <> 'dialogue.close'
+      AND dialogue_close_rule_request_id IS NULL
+    )
+  ),
+  CONSTRAINT command_journal_navigation_identity_shape CHECK (
+    (
+      command_kind = 'map.move'
+      AND navigation_rule_request_id IS NOT NULL
+      AND navigation_rule_request_id <> command_id
+    )
+    OR (
+      command_kind <> 'map.move'
+      AND navigation_rule_request_id IS NULL
+    )
+  ),
+  CONSTRAINT command_journal_stage_outcome_identity_shape CHECK (
+    (
+      command_kind = 'stage.outcome_proposal'
+      AND stage_outcome_rule_request_id IS NOT NULL
+      AND stage_outcome_rule_request_id <> command_id
+      AND request_document #>> '{message,stage_instance_id}' IS NOT NULL
+    )
+    OR (
+      command_kind <> 'stage.outcome_proposal'
+      AND stage_outcome_rule_request_id IS NULL
     )
   ),
   CONSTRAINT command_journal_result_identity CHECK (

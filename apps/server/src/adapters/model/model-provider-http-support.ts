@@ -99,3 +99,109 @@ export function parseProviderJsonObject(input: {
   }
   return expectJsonObject(candidate as JsonValue, input.message);
 }
+
+export function copyProviderJsonObject(input: {
+  readonly candidate: unknown;
+  readonly field: string;
+  readonly providerLabel: string;
+}): JsonObject {
+  if (
+    typeof input.candidate !== "object" ||
+    input.candidate === null ||
+    Array.isArray(input.candidate)
+  ) {
+    throw providerJsonConfigFault(
+      input,
+      "must be a JSON object",
+    );
+  }
+  const copied = copyProviderJsonValue(
+    input.candidate,
+    input.field,
+    input.providerLabel,
+  );
+  if (
+    typeof copied !== "object" ||
+    copied === null ||
+    Array.isArray(copied) ||
+    Object.keys(copied).length === 0
+  ) {
+    throw providerJsonConfigFault(
+      input,
+      "must be a non-empty JSON object",
+    );
+  }
+  return copied as JsonObject;
+}
+
+function copyProviderJsonValue(
+  candidate: unknown,
+  path: string,
+  providerLabel: string,
+): JsonValue {
+  if (
+    candidate === null ||
+    typeof candidate === "string" ||
+    typeof candidate === "boolean"
+  ) {
+    return candidate;
+  }
+  if (typeof candidate === "number") {
+    if (!Number.isFinite(candidate)) {
+      throw providerJsonValueFault(providerLabel, path);
+    }
+    return candidate;
+  }
+  if (Array.isArray(candidate)) {
+    return Object.freeze(
+      candidate.map((entry, index) =>
+        copyProviderJsonValue(
+          entry,
+          `${path}[${index}]`,
+          providerLabel,
+        ),
+      ),
+    );
+  }
+  if (typeof candidate === "object") {
+    const prototype = Object.getPrototypeOf(candidate);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw providerJsonValueFault(providerLabel, path);
+    }
+    const copied: Record<string, JsonValue> = {};
+    for (const [key, value] of Object.entries(candidate)) {
+      copied[key] = copyProviderJsonValue(
+        value,
+        `${path}.${key}`,
+        providerLabel,
+      );
+    }
+    return Object.freeze(copied);
+  }
+  throw providerJsonValueFault(providerLabel, path);
+}
+
+function providerJsonConfigFault(
+  input: {
+    readonly field: string;
+    readonly providerLabel: string;
+  },
+  reason: string,
+): EngineFault {
+  return new EngineFault(
+    "model.provider.config_invalid",
+    `${input.providerLabel} ${input.field} ${reason}`,
+    { field: input.field },
+  );
+}
+
+function providerJsonValueFault(
+  providerLabel: string,
+  path: string,
+): EngineFault {
+  return new EngineFault(
+    "model.provider.config_invalid",
+    `${providerLabel} output_schema must contain JSON values only`,
+    { field: path },
+  );
+}

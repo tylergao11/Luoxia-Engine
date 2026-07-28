@@ -1,4 +1,15 @@
 export {
+  type AssetProviderAdapterV1,
+  type AssetProviderDependencyIdentity,
+  type AssetProviderInvocation,
+} from "./application/asset-provider-registry.js";
+export {
+  createDeepSeekChatModelProvider,
+  type DeepSeekChatModelProviderConfig,
+  type DeepSeekChatModelProviderDependencies,
+  type DeepSeekThinkingMode,
+} from "./adapters/model/deepseek-chat-model-provider.js";
+export {
   createOpenAIResponsesModelProvider,
   type OpenAIResponsesModelProviderConfig,
   type OpenAIResponsesModelProviderDependencies,
@@ -13,6 +24,7 @@ export {
   type RoutedModelProviderBinding,
   type RoutedModelProviderDependencies,
 } from "./adapters/model/routed-model-provider.js";
+export { createUuidV5 } from "./adapters/crypto/uuid-v5.js";
 export type {
   LuoxiaRuntimeDeploymentFactory,
   RuntimeDeploymentActivationInput,

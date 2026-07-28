@@ -1445,6 +1445,19 @@ function assertPresentation(bundle: JsonObject, index: BundleIndex): void {
     const subjectKind = expectEnum(binding, "subject_kind", path);
     const subjectId = expectString(binding, "subject_id", path);
     resolveBindingSubject(index, subjectKind, subjectId, `${path}.subject_id`);
+    if (
+      binding.node_kind !== undefined &&
+      subjectKind !== "world" &&
+      subjectKind !== "definition" &&
+      subjectKind !== "entity" &&
+      subjectKind !== "relation"
+    ) {
+      throw semanticFault(
+        "content_bundle.semantic.render_subject_kind_unsupported",
+        "2D RenderNode PackBinding must target a runtime-resolvable world, definition, entity, or relation",
+        { path, subject_kind: subjectKind },
+      );
+    }
     if (binding.asset_id !== undefined) {
       requireId(
         index.assets,
@@ -1467,14 +1480,6 @@ function assertPresentation(bundle: JsonObject, index: BundleIndex): void {
         expectString(binding, "art_profile_id", path),
         `${path}.art_profile_id`,
         "art_profile",
-      );
-    }
-    if (binding.condition_law_id !== undefined) {
-      requireId(
-        index.worldLaws,
-        expectString(binding, "condition_law_id", path),
-        `${path}.condition_law_id`,
-        "world_law",
       );
     }
     if (binding.stage !== undefined) {

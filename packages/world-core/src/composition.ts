@@ -116,6 +116,7 @@ export {
   type StaticDefinitionRefLike,
   type WorldContentBinding,
   type WorldInitializationContent,
+  type WorldPresentationContent,
   type WorldContentLockDocument,
 } from "./content-runtime-catalog.js";
 

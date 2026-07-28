@@ -6,6 +6,7 @@ import {
   expectString,
   type JsonDigest,
   type JsonObject,
+  type JsonValue,
 } from "@luoxia/contracts-runtime";
 
 import type {
@@ -20,58 +21,68 @@ import {
 
 const MAX_PROVIDER_RESPONSE_BYTES = 4 * 1024 * 1024;
 
-export interface OllamaChatModelProviderConfig {
-  /** Explicit full native chat endpoint, ending in /api/chat. */
+export type DeepSeekThinkingMode = "enabled" | "disabled";
+
+export interface DeepSeekChatModelProviderConfig {
+  /** Explicit official Chat Completions endpoint. */
   readonly endpoint: string;
+  readonly apiKey: string;
   /** Deployment ModelProfile identity accepted by this adapter instance. */
   readonly modelProfileId: string;
-  /** Exact ModelOperationKind accepted by this single-profile adapter. */
+  /** Exact ModelOperationKind accepted by this adapter instance. */
   readonly requestKind: string;
-  /** Explicit locally installed Ollama model name. */
+  /** Explicit DeepSeek model identifier; no adapter default. */
   readonly model: string;
+  /** Explicit thinking mode sent to DeepSeek. */
+  readonly thinkingMode: DeepSeekThinkingMode;
   /** Explicit provider timeout; dispatched requests are never retried. */
   readonly timeoutMs: number;
-  /** Explicit upper bound sent as options.num_predict. */
+  /** Explicit upper bound sent as max_tokens. */
   readonly maxOutputTokens: number;
-  /** Explicit sampling temperature; no Ollama default is inherited. */
+  /** Explicit sampling temperature; no provider default is inherited. */
   readonly temperature: number;
   /** JSON Schema derived by deployment from the formal ModelOutput contract. */
   readonly outputSchema: JsonObject;
 }
 
-export interface OllamaChatModelProviderDependencies {
+export interface DeepSeekChatModelProviderDependencies {
   readonly digest: JsonDigest;
-  readonly config: OllamaChatModelProviderConfig;
+  readonly config: DeepSeekChatModelProviderConfig;
 }
 
 /**
- * Real single-shot local Ollama native chat adapter. Only loopback endpoints
- * are accepted, matching Ollama's unauthenticated local API boundary. The
- * model emits one JSON object and ModelGateway remains the sole authority.
+ * Real single-shot DeepSeek Chat Completions adapter. JSON Output narrows the
+ * transport shape while ModelGateway remains the sole Schema and semantic
+ * authority over the returned ModelOutput.
  */
-export function createOllamaChatModelProvider(
-  dependencies: OllamaChatModelProviderDependencies,
+export function createDeepSeekChatModelProvider(
+  dependencies: DeepSeekChatModelProviderDependencies,
 ): ModelProvider {
-  return new OllamaChatModelProvider(dependencies);
+  return new DeepSeekChatModelProvider(dependencies);
 }
 
-class OllamaChatModelProvider implements ModelProvider {
+class DeepSeekChatModelProvider implements ModelProvider {
   readonly #digest: JsonDigest;
   readonly #endpoint: string;
+  readonly #apiKey: string;
   readonly #modelProfileId: string;
   readonly #requestKind: string;
   readonly #model: string;
+  readonly #thinkingMode: DeepSeekThinkingMode;
   readonly #timeoutMs: number;
   readonly #maxOutputTokens: number;
   readonly #temperature: number;
   readonly #outputSchema: JsonObject;
 
   public constructor(
-    dependencies: OllamaChatModelProviderDependencies,
+    dependencies: DeepSeekChatModelProviderDependencies,
   ) {
     this.#digest = dependencies.digest;
-    this.#endpoint = validateOllamaEndpoint(
+    this.#endpoint = validateDeepSeekEndpoint(
       dependencies.config.endpoint,
+    );
+    this.#apiKey = requireNonemptySecret(
+      dependencies.config.apiKey,
     );
     this.#modelProfileId = requireNonemptyText(
       dependencies.config.modelProfileId,
@@ -88,6 +99,9 @@ class OllamaChatModelProvider implements ModelProvider {
       "model",
       256,
     );
+    this.#thinkingMode = requireThinkingMode(
+      dependencies.config.thinkingMode,
+    );
     this.#timeoutMs = requirePositiveSafeInteger(
       dependencies.config.timeoutMs,
       "timeout_ms",
@@ -102,7 +116,7 @@ class OllamaChatModelProvider implements ModelProvider {
     this.#outputSchema = copyProviderJsonObject({
       candidate: dependencies.config.outputSchema,
       field: "output_schema",
-      providerLabel: "Ollama",
+      providerLabel: "DeepSeek",
     });
   }
 
@@ -113,7 +127,7 @@ class OllamaChatModelProvider implements ModelProvider {
     if (input.modelProfileId !== this.#modelProfileId) {
       throw new EngineFault(
         "model.provider.profile_not_configured",
-        "Ollama chat adapter is not configured for the requested ModelProfile",
+        "DeepSeek chat adapter is not configured for the requested ModelProfile",
         {
           requested_model_profile_id: input.modelProfileId,
           configured_model_profile_id: this.#modelProfileId,
@@ -124,7 +138,7 @@ class OllamaChatModelProvider implements ModelProvider {
     if (input.requestKind !== this.#requestKind) {
       throw new EngineFault(
         "model.provider.request_kind_not_configured",
-        "Ollama chat adapter is not configured for the requested operation kind",
+        "DeepSeek chat adapter is not configured for the requested operation kind",
         {
           model_profile_id: input.modelProfileId,
           requested_request_kind: input.requestKind,
@@ -160,31 +174,37 @@ class OllamaChatModelProvider implements ModelProvider {
       response = await fetch(this.#endpoint, {
         method: "POST",
         headers: {
+          authorization: `Bearer ${this.#apiKey}`,
           "content-type": "application/json; charset=utf-8",
         },
         body: JSON.stringify({
           model: this.#model,
-          messages: buildOllamaMessages(resolved),
-          stream: false,
-          think: false,
-          format: this.#outputSchema,
-          options: {
-            num_predict: this.#maxOutputTokens,
-            temperature: this.#temperature,
+          messages: buildDeepSeekMessages(
+            resolved,
+            this.#outputSchema,
+          ),
+          response_format: {
+            type: "json_object",
           },
+          thinking: {
+            type: this.#thinkingMode,
+          },
+          stream: false,
+          max_tokens: this.#maxOutputTokens,
+          temperature: this.#temperature,
         }),
         signal: abort.signal,
       });
       responseText = await readBoundedProviderResponseText({
         response,
         maximumBytes: MAX_PROVIDER_RESPONSE_BYTES,
-        providerLabel: "Ollama chat",
+        providerLabel: "DeepSeek chat",
       });
     } catch (error: unknown) {
       if (abort.signal.aborted) {
         throw new EngineFault(
           "model.provider.timeout",
-          "Ollama chat request exceeded its explicit timeout",
+          "DeepSeek chat request exceeded its explicit timeout",
           {
             model_profile_id: this.#modelProfileId,
             timeout_ms: this.#timeoutMs,
@@ -196,7 +216,7 @@ class OllamaChatModelProvider implements ModelProvider {
       }
       throw new EngineFault(
         "model.provider.transport_failed",
-        "Ollama chat request failed before a verifiable response was received",
+        "DeepSeek chat request failed before a verifiable response was received",
         {
           model_profile_id: this.#modelProfileId,
           cause: error instanceof Error ? error.message : String(error),
@@ -209,20 +229,20 @@ class OllamaChatModelProvider implements ModelProvider {
     if (!response.ok) {
       throw new EngineFault(
         "model.provider.http_error",
-        "Ollama chat endpoint returned a non-success status",
+        "DeepSeek chat endpoint returned a non-success status",
         {
           model_profile_id: this.#modelProfileId,
           http_status: response.status,
-          provider_error: readOllamaErrorSummary(responseText),
+          provider_error: readDeepSeekErrorSummary(responseText),
         },
       );
     }
     const providerResponse = parseProviderJsonObject({
       source: responseText,
       code: "model.provider.response_not_json",
-      message: "Ollama chat endpoint did not return a JSON object",
+      message: "DeepSeek chat endpoint did not return a JSON object",
     });
-    const output = extractOllamaOutput(
+    const output = extractDeepSeekOutput(
       providerResponse,
       this.#model,
     );
@@ -257,24 +277,26 @@ class OllamaChatModelProvider implements ModelProvider {
   }
 }
 
-function buildOllamaMessages(
+function buildDeepSeekMessages(
   resolved: ResolvedModelInvocation,
+  outputSchema: JsonObject,
 ): readonly JsonObject[] {
-  const messages: JsonObject[] = resolved.prompt_blocks.map(
-    (block) =>
+  const messages: JsonObject[] = [
+    Object.freeze({
+      role: "system",
+      content:
+        "Return exactly one json object for the requested Luoxia ModelOutput. " +
+        "Set output_kind to the ModelRequest request_kind. Do not add Markdown, prose, or wrapper fields. " +
+        `The following JSON Schema is the exact output contract: ${JSON.stringify(outputSchema)}`,
+    }),
+  ];
+  messages.push(
+    ...resolved.prompt_blocks.map((block) =>
       Object.freeze({
         role: "system",
         content: block.text,
       }),
-  );
-  messages.push(
-    Object.freeze({
-      role: "system",
-      content:
-        "Return exactly one JSON object for the requested Luoxia ModelOutput. " +
-        "Set output_kind to the ModelRequest request_kind. Do not add Markdown, prose, or wrapper fields. " +
-        "The native structured-output grammar supplied with this request is authoritative.",
-    }),
+    ),
   );
   messages.push(
     Object.freeze({
@@ -290,37 +312,70 @@ function buildOllamaMessages(
   return Object.freeze(messages);
 }
 
-function extractOllamaOutput(
+function extractDeepSeekOutput(
   response: JsonObject,
   expectedModel: string,
 ): JsonObject {
-  const model = expectString(response, "model", "Ollama chat response");
-  const done = response["done"];
-  const doneReason = expectString(
+  if (
+    expectString(response, "object", "DeepSeek chat response") !==
+    "chat.completion"
+  ) {
+    throw responseShapeFault(
+      "DeepSeek response object must be chat.completion",
+    );
+  }
+  const model = expectString(
     response,
-    "done_reason",
-    "Ollama chat response",
+    "model",
+    "DeepSeek chat response",
   );
-  if (model !== expectedModel || done !== true || doneReason !== "stop") {
+  if (model !== expectedModel) {
     throw new EngineFault(
-      "model.provider.response_incomplete",
-      "Ollama chat response did not complete with the configured model",
+      "model.provider.response_model_mismatch",
+      "DeepSeek chat response used a different model",
       {
         expected_model: expectedModel,
         actual_model: model,
-        done: typeof done === "boolean" ? done : false,
-        done_reason: doneReason,
       },
     );
   }
-  const message = expectJsonObject(
-    expectProperty(response, "message", "Ollama chat response"),
-    "Ollama chat response.message",
+  const choices = asObjectArray(
+    expectProperty(response, "choices", "DeepSeek chat response"),
+    "DeepSeek chat response.choices",
   );
-  if (expectString(message, "role", "Ollama chat message") !== "assistant") {
+  if (choices.length !== 1) {
+    throw responseShapeFault(
+      "DeepSeek chat response must contain exactly one choice",
+      { choice_count: choices.length },
+    );
+  }
+  const choice = choices[0] as JsonObject;
+  const finishReason = expectString(
+    choice,
+    "finish_reason",
+    "DeepSeek chat choice",
+  );
+  if (
+    expectInteger(choice, "index", "DeepSeek chat choice") !== 0 ||
+    finishReason !== "stop"
+  ) {
+    throw new EngineFault(
+      "model.provider.response_incomplete",
+      "DeepSeek chat response did not complete normally",
+      { finish_reason: finishReason },
+    );
+  }
+  const message = expectJsonObject(
+    expectProperty(choice, "message", "DeepSeek chat choice"),
+    "DeepSeek chat choice.message",
+  );
+  if (
+    expectString(message, "role", "DeepSeek chat message") !==
+    "assistant"
+  ) {
     throw new EngineFault(
       "model.provider.response_role_invalid",
-      "Ollama chat response message must use the assistant role",
+      "DeepSeek chat response message must use the assistant role",
       { model },
     );
   }
@@ -331,30 +386,42 @@ function extractOllamaOutput(
   ) {
     throw new EngineFault(
       "model.provider.unexpected_tool_call",
-      "Ollama chat response must not contain tool calls",
+      "DeepSeek chat response must not contain tool calls",
       { model },
     );
   }
   const outputText = expectString(
     message,
     "content",
-    "Ollama chat message",
+    "DeepSeek chat message",
   );
   if (outputText.length === 0) {
     throw new EngineFault(
       "model.provider.output_text_count",
-      "Ollama chat response must contain one non-empty JSON object",
+      "DeepSeek chat response must contain one non-empty JSON object",
       { model },
     );
   }
   return parseProviderJsonObject({
     source: outputText,
     code: "model.provider.output_not_json",
-    message: "Ollama chat message content is not one JSON object",
+    message: "DeepSeek chat message content is not one JSON object",
   });
 }
 
-function readOllamaErrorSummary(source: string): string {
+function asObjectArray(
+  value: JsonValue,
+  path: string,
+): readonly JsonObject[] {
+  if (!Array.isArray(value)) {
+    throw responseShapeFault(`${path} must be an array`, { path });
+  }
+  return value.map((entry, index) =>
+    expectJsonObject(entry as JsonValue, `${path}[${index}]`),
+  );
+}
+
+function readDeepSeekErrorSummary(source: string): string {
   try {
     const parsed = JSON.parse(source) as unknown;
     if (
@@ -363,8 +430,15 @@ function readOllamaErrorSummary(source: string): string {
       !Array.isArray(parsed)
     ) {
       const error = (parsed as Record<string, unknown>)["error"];
-      if (typeof error === "string") {
-        return error.slice(0, 1000);
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        !Array.isArray(error)
+      ) {
+        const message = (error as Record<string, unknown>)["message"];
+        if (typeof message === "string") {
+          return message.slice(0, 1000);
+        }
       }
     }
   } catch {
@@ -373,7 +447,7 @@ function readOllamaErrorSummary(source: string): string {
   return "";
 }
 
-function validateOllamaEndpoint(candidate: string): string {
+function validateDeepSeekEndpoint(candidate: string): string {
   if (
     typeof candidate !== "string" ||
     candidate !== candidate.trim()
@@ -386,20 +460,17 @@ function validateOllamaEndpoint(candidate: string): string {
   } catch {
     throw endpointFault(candidate);
   }
-  const isLoopback =
-    endpoint.hostname === "localhost" ||
-    endpoint.hostname === "127.0.0.1" ||
-    endpoint.hostname === "[::1]" ||
-    endpoint.hostname === "::1";
   const normalizedPath = endpoint.pathname.replace(/\/+$/u, "");
   if (
-    !isLoopback ||
-    (endpoint.protocol !== "http:" && endpoint.protocol !== "https:") ||
+    endpoint.protocol !== "https:" ||
+    endpoint.hostname !== "api.deepseek.com" ||
+    (endpoint.port.length > 0 && endpoint.port !== "443") ||
     endpoint.username.length > 0 ||
     endpoint.password.length > 0 ||
     endpoint.hash.length > 0 ||
     endpoint.search.length > 0 ||
-    !normalizedPath.endsWith("/api/chat")
+    (normalizedPath !== "/chat/completions" &&
+      normalizedPath !== "/v1/chat/completions")
   ) {
     throw endpointFault(candidate);
   }
@@ -409,9 +480,24 @@ function validateOllamaEndpoint(candidate: string): string {
 function endpointFault(candidate: string): EngineFault {
   return new EngineFault(
     "model.provider.endpoint_invalid",
-    "Ollama endpoint must be an absolute loopback /api/chat URL with no credentials, query, or fragment",
+    "DeepSeek endpoint must be the official HTTPS /chat/completions URL with no credentials, query, or fragment",
     { endpoint: candidate },
   );
+}
+
+function requireNonemptySecret(candidate: string): string {
+  if (
+    typeof candidate !== "string" ||
+    candidate.trim().length < 1 ||
+    candidate !== candidate.trim() ||
+    /[\r\n]/u.test(candidate)
+  ) {
+    throw new EngineFault(
+      "model.provider.api_key_missing",
+      "DeepSeek API key is required explicitly without surrounding whitespace or line breaks",
+    );
+  }
+  return candidate;
 }
 
 function requireNonemptyText(
@@ -428,12 +514,26 @@ function requireNonemptyText(
   ) {
     throw new EngineFault(
       "model.provider.config_invalid",
-      `Ollama provider ${field} must be a non-empty bounded string`,
+      `DeepSeek provider ${field} must be a non-empty bounded string`,
       { field, maximum_length: maximumLength },
     );
   }
   return candidate;
 }
+
+function requireThinkingMode(
+  candidate: DeepSeekThinkingMode,
+): DeepSeekThinkingMode {
+  if (candidate !== "enabled" && candidate !== "disabled") {
+    throw new EngineFault(
+      "model.provider.config_invalid",
+      "DeepSeek provider thinking_mode must be enabled or disabled",
+      { field: "thinking_mode" },
+    );
+  }
+  return candidate;
+}
+
 function requirePositiveSafeInteger(
   candidate: number,
   field: string,
@@ -441,7 +541,7 @@ function requirePositiveSafeInteger(
   if (!Number.isSafeInteger(candidate) || candidate < 1) {
     throw new EngineFault(
       "model.provider.config_invalid",
-      `Ollama provider ${field} must be a positive safe integer`,
+      `DeepSeek provider ${field} must be a positive safe integer`,
       { field, value: candidate },
     );
   }
@@ -457,9 +557,20 @@ function requireTemperature(candidate: number): number {
   ) {
     throw new EngineFault(
       "model.provider.config_invalid",
-      "Ollama provider temperature must be a finite number from 0 through 2",
+      "DeepSeek provider temperature must be a finite number from 0 through 2",
       { field: "temperature", value: candidate },
     );
   }
   return candidate;
+}
+
+function responseShapeFault(
+  message: string,
+  details: JsonObject = {},
+): EngineFault {
+  return new EngineFault(
+    "model.provider.response_shape",
+    message,
+    details,
+  );
 }

@@ -1406,6 +1406,15 @@
         "slot_id": {
           "$ref": "common.v1.schema.json#/$defs/Identifier"
         },
+        "node_kind": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/RenderNodeKind"
+        },
+        "parameters": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        },
+        "text": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
         "asset_id": {
           "$ref": "common.v1.schema.json#/$defs/Identifier"
         },
@@ -1413,9 +1422,6 @@
           "$ref": "common.v1.schema.json#/$defs/Identifier"
         },
         "art_profile_id": {
-          "$ref": "common.v1.schema.json#/$defs/Identifier"
-        },
-        "condition_law_id": {
           "$ref": "common.v1.schema.json#/$defs/Identifier"
         },
         "stage": {
@@ -1428,16 +1434,37 @@
           "$ref": "#/$defs/FieldValues"
         }
       },
-      "anyOf": [
+      "dependentRequired": {
+        "node_kind": [
+          "parameters"
+        ],
+        "parameters": [
+          "node_kind"
+        ],
+        "text": [
+          "node_kind"
+        ]
+      },
+      "oneOf": [
         {
           "required": [
             "asset_id"
-          ]
+          ],
+          "not": {
+            "required": [
+              "materialization_profile_id"
+            ]
+          }
         },
         {
           "required": [
             "materialization_profile_id"
-          ]
+          ],
+          "not": {
+            "required": [
+              "asset_id"
+            ]
+          }
         }
       ]
     },

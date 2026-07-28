@@ -41,6 +41,10 @@ export {
   type PostgresRuntimeSaveRepositoryDependencies,
 } from "./runtime-save-repository.js";
 export {
+  createPostgresSessionSynchronization,
+  type PostgresSessionSynchronizationDependencies,
+} from "./session-synchronization.js";
+export {
   createPostgresPlayerDayEndRunJournal,
   type PostgresPlayerDayEndRunJournalDependencies,
 } from "./player-day-end-run.js";

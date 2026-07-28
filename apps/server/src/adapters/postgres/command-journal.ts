@@ -18,7 +18,10 @@ import type {
   CommandJournal,
   CommandResultDocument,
   DialogueCommandExecutionIdentity,
+  DialogueCloseCommandExecutionIdentity,
   EventCardCommandExecutionIdentity,
+  NavigationCommandExecutionIdentity,
+  StageOutcomeCommandExecutionIdentity,
   StoredCommand,
   StoredCompletedCommand,
 } from "../../application/command-journal.js";
@@ -64,7 +67,10 @@ interface CommandRow {
   readonly character_model_request_id: string | null;
   readonly character_turn_id: string | null;
   readonly character_rule_request_id: string | null;
+  readonly dialogue_close_rule_request_id: string | null;
   readonly event_card_packet_id: string | null;
+  readonly navigation_rule_request_id: string | null;
+  readonly stage_outcome_rule_request_id: string | null;
   readonly command_status: string;
   readonly result_document: unknown | null;
 }
@@ -153,8 +159,26 @@ class PostgresCommandJournal implements CommandJournal {
             this.#idFactory,
             received,
           );
+          const dialogueCloseExecution =
+            createDialogueCloseExecutionIdentity(
+              this.#contracts,
+              this.#idFactory,
+              received,
+            );
           const eventCardExecution =
             createEventCardExecutionIdentity(
+              this.#contracts,
+              this.#idFactory,
+              received,
+            );
+          const navigationExecution =
+            createNavigationExecutionIdentity(
+              this.#contracts,
+              this.#idFactory,
+              received,
+            );
+          const stageOutcomeExecution =
+            createStageOutcomeExecutionIdentity(
               this.#contracts,
               this.#idFactory,
               received,
@@ -178,7 +202,10 @@ class PostgresCommandJournal implements CommandJournal {
                character_model_request_id,
                character_turn_id,
                character_rule_request_id,
+               dialogue_close_rule_request_id,
                event_card_packet_id,
+               navigation_rule_request_id,
+               stage_outcome_rule_request_id,
                command_status,
                received_at
              ) VALUES (
@@ -200,6 +227,9 @@ class PostgresCommandJournal implements CommandJournal {
                $16::uuid,
                $17::uuid,
                $18::uuid,
+               $19::uuid,
+               $20::uuid,
+               $21::uuid,
                'received',
                clock_timestamp()
              )`,
@@ -221,7 +251,10 @@ class PostgresCommandJournal implements CommandJournal {
               dialogueExecution?.characterModelRequestId ?? null,
               dialogueExecution?.characterTurnId ?? null,
               dialogueExecution?.characterRuleRequestId ?? null,
+              dialogueCloseExecution?.ruleRequestId ?? null,
               eventCardExecution?.packetId ?? null,
+              navigationExecution?.ruleRequestId ?? null,
+              stageOutcomeExecution?.ruleRequestId ?? null,
             ],
           );
           if (insert.rowCount !== 1) {
@@ -245,9 +278,18 @@ class PostgresCommandJournal implements CommandJournal {
             ...(dialogueExecution === undefined
               ? {}
               : { dialogueExecution }),
+            ...(dialogueCloseExecution === undefined
+              ? {}
+              : { dialogueCloseExecution }),
             ...(eventCardExecution === undefined
               ? {}
               : { eventCardExecution }),
+            ...(navigationExecution === undefined
+              ? {}
+              : { navigationExecution }),
+            ...(stageOutcomeExecution === undefined
+              ? {}
+              : { stageOutcomeExecution }),
           });
         },
       );
@@ -422,7 +464,10 @@ const COMMAND_SELECT = `SELECT
   character_model_request_id::text AS character_model_request_id,
   character_turn_id::text AS character_turn_id,
   character_rule_request_id::text AS character_rule_request_id,
+  dialogue_close_rule_request_id::text AS dialogue_close_rule_request_id,
   event_card_packet_id::text AS event_card_packet_id,
+  navigation_rule_request_id::text AS navigation_rule_request_id,
+  stage_outcome_rule_request_id::text AS stage_outcome_rule_request_id,
   command_status,
   result_document
 FROM luoxia_engine.command_journal`;
@@ -488,7 +533,7 @@ function validateCommandCandidate(
     commandKind: expectString(message, "type", "ClientMessage"),
     basisToken: expectString(message, "basis_token", "ClientMessage"),
     message,
-    requestDigest: digest.sha256(message),
+    requestDigest: digest.sha256(envelope.value),
   });
 }
 
@@ -575,6 +620,105 @@ function createEventCardExecutionIdentity(
   return Object.freeze({ packetId });
 }
 
+function createDialogueCloseExecutionIdentity(
+  contracts: ContractValidator,
+  idFactory: CommandExecutionIdFactory,
+  command: ReceivedCommandCandidate,
+): DialogueCloseCommandExecutionIdentity | undefined {
+  if (command.commandKind !== "dialogue.close") {
+    return undefined;
+  }
+  const ruleRequestId = assertUuid(contracts, idFactory.createId());
+  if (ruleRequestId !== ruleRequestId.toLowerCase()) {
+    throw new EngineFault(
+      "command.journal.generated_identity_noncanonical",
+      "Server-generated dialogue-close RulePlugin request UUID must use lowercase canonical text",
+      {
+        command_id: command.commandId,
+        identity: "dialogue_close_rule_request_id",
+        uuid: ruleRequestId,
+      },
+    );
+  }
+  if (ruleRequestId === command.commandId) {
+    throw new EngineFault(
+      "command.journal.dialogue_close_identity_collision",
+      "Dialogue-close RulePlugin request identity must differ from its Session-scoped command identity",
+      {
+        command_id: command.commandId,
+        dialogue_close_rule_request_id: ruleRequestId,
+      },
+    );
+  }
+  return Object.freeze({ ruleRequestId });
+}
+
+function createNavigationExecutionIdentity(
+  contracts: ContractValidator,
+  idFactory: CommandExecutionIdFactory,
+  command: ReceivedCommandCandidate,
+): NavigationCommandExecutionIdentity | undefined {
+  if (command.commandKind !== "map.move") {
+    return undefined;
+  }
+  const ruleRequestId = assertUuid(contracts, idFactory.createId());
+  if (ruleRequestId !== ruleRequestId.toLowerCase()) {
+    throw new EngineFault(
+      "command.journal.generated_identity_noncanonical",
+      "Server-generated navigation RulePlugin request UUID must use lowercase canonical text",
+      {
+        command_id: command.commandId,
+        identity: "navigation_rule_request_id",
+        uuid: ruleRequestId,
+      },
+    );
+  }
+  if (ruleRequestId === command.commandId) {
+    throw new EngineFault(
+      "command.journal.navigation_identity_collision",
+      "Navigation RulePlugin request identity must differ from its Session-scoped command identity",
+      {
+        command_id: command.commandId,
+        navigation_rule_request_id: ruleRequestId,
+      },
+    );
+  }
+  return Object.freeze({ ruleRequestId });
+}
+
+function createStageOutcomeExecutionIdentity(
+  contracts: ContractValidator,
+  idFactory: CommandExecutionIdFactory,
+  command: ReceivedCommandCandidate,
+): StageOutcomeCommandExecutionIdentity | undefined {
+  if (command.commandKind !== "stage.outcome_proposal") {
+    return undefined;
+  }
+  const ruleRequestId = assertUuid(contracts, idFactory.createId());
+  if (ruleRequestId !== ruleRequestId.toLowerCase()) {
+    throw new EngineFault(
+      "command.journal.generated_identity_noncanonical",
+      "Server-generated Stage outcome RulePlugin request UUID must use lowercase canonical text",
+      {
+        command_id: command.commandId,
+        identity: "stage_outcome_rule_request_id",
+        uuid: ruleRequestId,
+      },
+    );
+  }
+  if (ruleRequestId === command.commandId) {
+    throw new EngineFault(
+      "command.journal.stage_outcome_identity_collision",
+      "Stage outcome RulePlugin request identity must differ from its Session-scoped command identity",
+      {
+        command_id: command.commandId,
+        stage_outcome_rule_request_id: ruleRequestId,
+      },
+    );
+  }
+  return Object.freeze({ ruleRequestId });
+}
+
 function validateCommandRow(
   contracts: ContractValidator,
   digest: JsonDigest,
@@ -632,7 +776,7 @@ function validateCommandRow(
     sessionId !== row.session_id ||
     commandId !== row.command_id ||
     commandKind !== row.command_kind ||
-    row.request_digest !== digest.sha256(message)
+    row.request_digest !== digest.sha256(envelope.value)
   ) {
     throw new EngineFault(
       "command.journal.database_corrupt",
@@ -646,7 +790,25 @@ function validateCommandRow(
     message,
     commandKind,
   );
+  const dialogueCloseExecution = readDialogueCloseExecutionIdentity(
+    contracts,
+    row,
+    commandKind,
+    commandId,
+  );
   const eventCardExecution = readEventCardExecutionIdentity(
+    contracts,
+    row,
+    commandKind,
+    commandId,
+  );
+  const navigationExecution = readNavigationExecutionIdentity(
+    contracts,
+    row,
+    commandKind,
+    commandId,
+  );
+  const stageOutcomeExecution = readStageOutcomeExecutionIdentity(
     contracts,
     row,
     commandKind,
@@ -660,9 +822,18 @@ function validateCommandRow(
     envelope,
     message,
     ...(dialogueExecution === undefined ? {} : { dialogueExecution }),
+    ...(dialogueCloseExecution === undefined
+      ? {}
+      : { dialogueCloseExecution }),
     ...(eventCardExecution === undefined
       ? {}
       : { eventCardExecution }),
+    ...(navigationExecution === undefined
+      ? {}
+      : { navigationExecution }),
+    ...(stageOutcomeExecution === undefined
+      ? {}
+      : { stageOutcomeExecution }),
   });
   if (row.command_status === "received") {
     if (row.result_document !== null) {
@@ -691,6 +862,129 @@ function validateCommandRow(
   );
   assertFinalCommandResult(result, commandId);
   return Object.freeze({ ...base, phase: "completed", result });
+}
+
+function readDialogueCloseExecutionIdentity(
+  contracts: ContractValidator,
+  row: CommandRow,
+  commandKind: string,
+  commandId: string,
+): DialogueCloseCommandExecutionIdentity | undefined {
+  if (commandKind !== "dialogue.close") {
+    if (row.dialogue_close_rule_request_id !== null) {
+      throw new EngineFault(
+        "command.journal.database_corrupt",
+        "Non-dialogue-close command contains a dialogue-close RulePlugin request identity",
+        { session_id: row.session_id, command_id: row.command_id },
+      );
+    }
+    return undefined;
+  }
+  if (row.dialogue_close_rule_request_id === null) {
+    throw new EngineFault(
+      "command.journal.database_corrupt",
+      "Dialogue-close command is missing its persisted RulePlugin request identity",
+      { session_id: row.session_id, command_id: row.command_id },
+    );
+  }
+  const ruleRequestId = assertUuid(
+    contracts,
+    row.dialogue_close_rule_request_id,
+  );
+  if (ruleRequestId === commandId) {
+    throw new EngineFault(
+      "command.journal.database_corrupt",
+      "Dialogue-close RulePlugin request identity collides with its Session-scoped command identity",
+      {
+        session_id: row.session_id,
+        command_id: row.command_id,
+        dialogue_close_rule_request_id: ruleRequestId,
+      },
+    );
+  }
+  return Object.freeze({ ruleRequestId });
+}
+
+function readNavigationExecutionIdentity(
+  contracts: ContractValidator,
+  row: CommandRow,
+  commandKind: string,
+  commandId: string,
+): NavigationCommandExecutionIdentity | undefined {
+  if (commandKind !== "map.move") {
+    if (row.navigation_rule_request_id !== null) {
+      throw new EngineFault(
+        "command.journal.database_corrupt",
+        "Non-navigation command contains a navigation RulePlugin request identity",
+        { session_id: row.session_id, command_id: row.command_id },
+      );
+    }
+    return undefined;
+  }
+  if (row.navigation_rule_request_id === null) {
+    throw new EngineFault(
+      "command.journal.database_corrupt",
+      "Navigation command is missing its persisted RulePlugin request identity",
+      { session_id: row.session_id, command_id: row.command_id },
+    );
+  }
+  const ruleRequestId = assertUuid(
+    contracts,
+    row.navigation_rule_request_id,
+  );
+  if (ruleRequestId === commandId) {
+    throw new EngineFault(
+      "command.journal.database_corrupt",
+      "Navigation RulePlugin request identity collides with its Session-scoped command identity",
+      {
+        session_id: row.session_id,
+        command_id: row.command_id,
+        navigation_rule_request_id: ruleRequestId,
+      },
+    );
+  }
+  return Object.freeze({ ruleRequestId });
+}
+
+function readStageOutcomeExecutionIdentity(
+  contracts: ContractValidator,
+  row: CommandRow,
+  commandKind: string,
+  commandId: string,
+): StageOutcomeCommandExecutionIdentity | undefined {
+  if (commandKind !== "stage.outcome_proposal") {
+    if (row.stage_outcome_rule_request_id !== null) {
+      throw new EngineFault(
+        "command.journal.database_corrupt",
+        "Non-Stage-outcome command contains a Stage-outcome RulePlugin request identity",
+        { session_id: row.session_id, command_id: row.command_id },
+      );
+    }
+    return undefined;
+  }
+  if (row.stage_outcome_rule_request_id === null) {
+    throw new EngineFault(
+      "command.journal.database_corrupt",
+      "Stage outcome command is missing its persisted RulePlugin request identity",
+      { session_id: row.session_id, command_id: row.command_id },
+    );
+  }
+  const ruleRequestId = assertUuid(
+    contracts,
+    row.stage_outcome_rule_request_id,
+  );
+  if (ruleRequestId === commandId) {
+    throw new EngineFault(
+      "command.journal.database_corrupt",
+      "Stage outcome RulePlugin request identity collides with its Session-scoped command identity",
+      {
+        session_id: row.session_id,
+        command_id: row.command_id,
+        stage_outcome_rule_request_id: ruleRequestId,
+      },
+    );
+  }
+  return Object.freeze({ ruleRequestId });
 }
 
 function readEventCardExecutionIdentity(
@@ -829,7 +1123,7 @@ function assertSameCommand(
   if (
     stored.requestDigest !== received.requestDigest ||
     stored.commandKind !== received.commandKind ||
-    !jsonEquals(stored.message, received.message)
+    !jsonEquals(stored.envelope.value, received.envelope.value)
   ) {
     throw new EngineFault(
       "command.journal.command_id_conflict",

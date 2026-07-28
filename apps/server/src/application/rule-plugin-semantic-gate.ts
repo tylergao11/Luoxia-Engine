@@ -711,6 +711,41 @@ function assertGoalPlanNodesFromDraft(
         expectString(extension, "demand_id", "WorldExtensionRequest"),
         context.operationKind,
       );
+      const selectedArchetype = expectJsonObject(
+        expectProperty(
+          extension,
+          "selected_archetype",
+          "WorldExtensionRequest",
+        ),
+        "WorldExtensionRequest.selected_archetype",
+      );
+      const allowedArchetypes = asObjectArray(
+        expectProperty(
+          demand,
+          "allowed_archetypes",
+          "CapabilityDemand",
+        ),
+        "CapabilityDemand.allowed_archetypes",
+      );
+      if (
+        allowedArchetypes.filter((candidate) =>
+          jsonEquals(candidate, selectedArchetype),
+        ).length !== 1
+      ) {
+        throw fault(
+          "rule_plugin.semantic.goal_plan_extension_archetype_not_allowed",
+          "WorldExtensionRequest.selected_archetype must be one exact member of CapabilityDemand.allowed_archetypes",
+          {
+            operation_kind: context.operationKind,
+            node_id: nodeKey,
+            demand_id: expectString(
+              demand,
+              "demand_id",
+              "CapabilityDemand",
+            ),
+          },
+        );
+      }
       const extensionRequestId = expectString(
         extension,
         "request_id",
@@ -803,6 +838,58 @@ function handleWorldExtensionResolve(context: OperationContext): void {
         expectString(extension, "goal_node_id", "WorldExtensionRequest"),
         context.operationKind,
       );
+      const requirement = expectJsonObject(
+        expectProperty(
+          worldNode,
+          "capability_requirement",
+          "GoalNode",
+        ),
+        "GoalNode.capability_requirement",
+      );
+      const demand = expectJsonObject(
+        expectProperty(
+          requirement,
+          "demand",
+          "CapabilityRequirement",
+        ),
+        "CapabilityRequirement.demand",
+      );
+      assertEqual(
+        "world_extension.demand_id",
+        expectString(demand, "demand_id", "CapabilityDemand"),
+        expectString(extension, "demand_id", "WorldExtensionRequest"),
+        context.operationKind,
+      );
+      const selectedArchetype = expectJsonObject(
+        expectProperty(
+          extension,
+          "selected_archetype",
+          "WorldExtensionRequest",
+        ),
+        "WorldExtensionRequest.selected_archetype",
+      );
+      const allowedArchetypes = asObjectArray(
+        expectProperty(
+          demand,
+          "allowed_archetypes",
+          "CapabilityDemand",
+        ),
+        "CapabilityDemand.allowed_archetypes",
+      );
+      if (
+        allowedArchetypes.filter((candidate) =>
+          jsonEquals(candidate, selectedArchetype),
+        ).length !== 1
+      ) {
+        throw fault(
+          "rule_plugin.semantic.world_extension_archetype_not_allowed",
+          "Committed WorldExtensionRequest selected archetype is no longer allowed by its demand",
+          {
+            operation_kind: context.operationKind,
+            request_id: requestId,
+          },
+        );
+      }
 
       const ops = asObjectArray(
         expectProperty(proposal, "ops", "PacketProposal"),
@@ -831,6 +918,65 @@ function handleWorldExtensionResolve(context: OperationContext): void {
         expectString(upserted, "plan_id", "GoalPlan"),
         context.operationKind,
       );
+      const currentPlanRevision = expectInteger(
+        worldPlan,
+        "revision",
+        "GoalPlan",
+      );
+      assertEqual(
+        "world_extension.upsert.expected_revision",
+        currentPlanRevision,
+        expectInteger(
+          upserts[0] as JsonObject,
+          "expected_revision",
+          "GoalPlanUpsertOp",
+        ),
+        context.operationKind,
+      );
+      assertEqual(
+        "world_extension.upsert.revision",
+        currentPlanRevision + 1,
+        expectInteger(upserted, "revision", "GoalPlan"),
+        context.operationKind,
+      );
+      const resolvedNode = findGoalNode(upserted, goalNodeId);
+      if (resolvedNode === undefined) {
+        throw fault(
+          "rule_plugin.semantic.world_extension_resolved_node_missing",
+          "world_extension.resolve must preserve the target GoalNode",
+          {
+            operation_kind: context.operationKind,
+            goal_plan_id: goalPlanId,
+            goal_node_id: goalNodeId,
+          },
+        );
+      }
+      const resolvedRequirement = expectJsonObject(
+        expectProperty(
+          resolvedNode,
+          "capability_requirement",
+          "GoalNode",
+        ),
+        "GoalNode.capability_requirement",
+      );
+      if (
+        resolvedNode.world_extension !== undefined ||
+        expectString(
+          resolvedRequirement,
+          "requirement_kind",
+          "CapabilityRequirement",
+        ) !== "bound"
+      ) {
+        throw fault(
+          "rule_plugin.semantic.world_extension_not_consumed",
+          "world_extension.resolve must consume the target request and bind its GoalNode capability",
+          {
+            operation_kind: context.operationKind,
+            request_id: requestId,
+            goal_node_id: goalNodeId,
+          },
+        );
+      }
       return;
     }
     default:
@@ -1368,10 +1514,114 @@ function handleStageOutcomeResolve(context: OperationContext): void {
     case "choice.required":
       assertChoiceSpec(context.output);
       return;
-    case "packet.proposal":
-      assertPacketProposalProvenance(context);
+    case "packet.proposal": {
+      const proposal = assertPacketProposalProvenance(context);
       assertControlExists(context, context.input);
+      const clientProposal = expectJsonObject(
+        expectProperty(
+          context.input,
+          "proposal",
+          "StageOutcomeResolveInput",
+        ),
+        "StageOutcomeResolveInput.proposal",
+      );
+      const stageId = expectString(
+        clientProposal,
+        "stage_instance_id",
+        "StageOutcomeProposal",
+      );
+      const stageRevision = expectInteger(
+        clientProposal,
+        "stage_revision",
+        "StageOutcomeProposal",
+      );
+      const stage = findStage(context.world, stageId);
+      if (
+        stage === undefined ||
+        expectString(stage, "status", "StageInstanceState") !== "open" ||
+        expectInteger(stage, "revision", "StageInstanceState") !==
+          stageRevision
+      ) {
+        throw fault(
+          "rule_plugin.semantic.stage_outcome_basis_mismatch",
+          "Stage outcome must target the exact open StageInstance revision",
+          {
+            operation_kind: context.operationKind,
+            stage_instance_id: stageId,
+            stage_revision: stageRevision,
+          },
+        );
+      }
+      const ops = asObjectArray(
+        expectProperty(proposal, "ops", "PacketProposal"),
+        "PacketProposal.ops",
+      );
+      const stageOps = ops.filter((op) => {
+        const opKind = expectString(op, "op", "EffectOp");
+        return opKind === "stage.update" || opKind === "stage.close";
+      });
+      const stageOp = stageOps.length === 1 ? stageOps[0] : undefined;
+      if (
+        stageOp === undefined ||
+        ops[ops.length - 1] !== stageOp
+      ) {
+        throw fault(
+          "rule_plugin.semantic.stage_outcome_transition_shape",
+          "Stage outcome packet must end with exactly one stage.update or stage.close",
+          {
+            operation_kind: context.operationKind,
+            stage_operation_count: stageOps.length,
+            op_count: ops.length,
+          },
+        );
+      }
+      assertEqual(
+        "stage_outcome.stage_instance_id",
+        stageId,
+        expectString(stageOp, "stage_instance_id", "Stage outcome op"),
+        context.operationKind,
+      );
+      assertEqual(
+        "stage_outcome.revision",
+        stageRevision,
+        expectInteger(stageOp, "revision", "Stage outcome op"),
+        context.operationKind,
+      );
+      if (expectString(stageOp, "op", "EffectOp") === "stage.update") {
+        assertEqual(
+          "stage_outcome.evidence_digest",
+          expectString(
+            clientProposal,
+            "evidence_digest",
+            "StageOutcomeProposal",
+          ),
+          expectString(stageOp, "evidence_digest", "StageUpdateOp"),
+          context.operationKind,
+        );
+        return;
+      }
+      assertEqual(
+        "stage_outcome.outcome_type",
+        expectString(
+          clientProposal,
+          "outcome_type",
+          "StageOutcomeProposal",
+        ),
+        expectString(stageOp, "outcome_type", "StageCloseOp"),
+        context.operationKind,
+      );
+      assertJsonFieldEqual(
+        "stage_outcome.outcome",
+        expectProperty(
+          clientProposal,
+          "outcome",
+          "StageOutcomeProposal",
+        ),
+        expectProperty(stageOp, "outcome", "StageCloseOp"),
+        context.operationKind,
+      );
       return;
+    }
     default:
       throw unexpectedOutput(context);
   }
@@ -1520,6 +1770,8 @@ function handleDialogueTurnAppend(context: OperationContext): void {
         );
       } else if (sourceKind === "character_mind") {
         assertActiveCharacterMindSpeaker(context, turn);
+      } else if (sourceKind === "director_system") {
+        assertControlExists(context, context.input);
       }
       if (context.input.model_proof !== undefined) {
         assertModelProofRevisionCompatible(context, context.input, "model_proof");
@@ -3316,6 +3568,24 @@ function findDialogue(
   return dialogues.find(
     (dialogue) =>
       expectString(dialogue, "dialogue_id", "DialogueRecord") === dialogueId,
+  );
+}
+
+function findStage(
+  world: JsonObject,
+  stageInstanceId: string,
+): JsonObject | undefined {
+  const stages = asObjectArray(
+    expectProperty(world, "stage_instances", "WorldState"),
+    "WorldState.stage_instances",
+  );
+  return stages.find(
+    (stage) =>
+      expectString(
+        stage,
+        "stage_instance_id",
+        "StageInstanceState",
+      ) === stageInstanceId,
   );
 }
 
