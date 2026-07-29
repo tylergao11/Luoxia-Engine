@@ -64,7 +64,6 @@ interface ChoiceFacts {
   readonly entropyCommitment: string;
 }
 
-const MAX_RANDOM_CHOICES = 64;
 const MAX_REJECTION_ATTEMPTS = 256;
 const SHA256_SPACE = 1n << 256n;
 const SELECTION_DOMAIN = "luoxia.rule_plugin.weighted_choice.v1";
@@ -110,17 +109,6 @@ class DefaultRulePluginChoiceAuthority
       entropyReveal: input.entropyReveal,
     });
     const randomChoices = readRandomChoices(parentContext);
-    if (randomChoices.length >= MAX_RANDOM_CHOICES) {
-      throw new EngineFault(
-        "rule_plugin.choice.depth_exceeded",
-        "RulePlugin choice continuation exceeds the DeterministicContext limit",
-        {
-          parent_request_id: input.parentRequestId,
-          choice_count: randomChoices.length,
-          maximum: MAX_RANDOM_CHOICES,
-        },
-      );
-    }
     const nextContext = this.#deterministicContexts.issue({
       worldId: input.worldId,
       logicalTime: expectProperty(

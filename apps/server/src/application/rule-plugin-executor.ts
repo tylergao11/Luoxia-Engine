@@ -50,8 +50,6 @@ export interface RulePluginExecutorDependencies {
   readonly continuationIds: RulePluginChoiceContinuationIdFactory;
 }
 
-const MAX_CHOICE_CONTINUATIONS = 64;
-
 /**
  * Sole production RulePlugin execution path.
  *
@@ -218,11 +216,7 @@ export function createRulePluginExecutor(
   ): Promise<VerifiedRulePluginInvocationReceipt> => {
     let receipt = initial;
     const seen = new Set<string>();
-    for (
-      let depth = 0;
-      depth <= MAX_CHOICE_CONTINUATIONS;
-      depth += 1
-    ) {
+    for (;;) {
       const requestId = expectString(
         receipt.request.value,
         "request_id",
@@ -253,23 +247,8 @@ export function createRulePluginExecutor(
         executionRoots.set(receipt, rootRequestId);
         return receipt;
       }
-      if (depth === MAX_CHOICE_CONTINUATIONS) {
-        throw new EngineFault(
-          "rule_plugin.executor.choice_depth_exceeded",
-          "RulePlugin choice continuation chain exceeds the contract limit",
-          {
-            root_request_id: rootRequestId,
-            maximum: MAX_CHOICE_CONTINUATIONS,
-          },
-        );
-      }
       receipt = await continueChoice(receipt, modelInvocations);
     }
-    throw new EngineFault(
-      "rule_plugin.executor.choice_depth_exceeded",
-      "RulePlugin choice continuation chain did not terminate",
-      { root_request_id: rootRequestId },
-    );
   };
 
   return Object.freeze({

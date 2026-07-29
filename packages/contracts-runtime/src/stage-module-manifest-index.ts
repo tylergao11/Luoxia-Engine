@@ -14,12 +14,23 @@ export type StageModuleManifestDocument = ValidatedJsonObject<
   typeof CONTRACT_REF.stageModuleManifest
 >;
 
+export type StageOutcomeTransitionKind =
+  | "stage.update"
+  | "stage.close.completion"
+  | "stage.close.non_completion";
+
+export interface IndexedStageModuleOutcome {
+  readonly outcomeType: string;
+  readonly transitionKind: StageOutcomeTransitionKind;
+}
+
 export interface IndexedStageModuleScene {
   readonly document: JsonObject;
   readonly sceneId: string;
   readonly slotIds: readonly string[];
   readonly inputTypes: readonly string[];
-  readonly outcomeTypes: readonly string[];
+  readonly outcomes: readonly IndexedStageModuleOutcome[];
+  requireOutcome(outcomeType: string): IndexedStageModuleOutcome;
 }
 
 /**
@@ -93,6 +104,10 @@ export function indexStageModuleManifest(
     }
     sceneIdSet.add(sceneId);
     sceneIdList.push(sceneId);
+    const outcomes = indexSceneOutcomes(
+      scene,
+      sceneIndex,
+    );
     indexedScenes.push(
       Object.freeze({
         document: scene,
@@ -105,10 +120,24 @@ export function indexStageModuleManifest(
           expectProperty(scene, "input_types", "StageModuleScene"),
           `StageModuleManifest.scenes[${sceneIndex}].input_types`,
         ),
-        outcomeTypes: readStringArray(
-          expectProperty(scene, "outcome_types", "StageModuleScene"),
-          `StageModuleManifest.scenes[${sceneIndex}].outcome_types`,
-        ),
+        outcomes: outcomes.values,
+        requireOutcome(
+          outcomeType: string,
+        ): IndexedStageModuleOutcome {
+          const outcome = outcomes.byType.get(outcomeType);
+          if (outcome === undefined) {
+            throw new EngineFault(
+              "stage_module.manifest.outcome_not_declared",
+              "outcome type is not declared by the StageModule scene",
+              {
+                module_id: moduleId,
+                scene_id: sceneId,
+                outcome_type: outcomeType,
+              },
+            );
+          }
+          return outcome;
+        },
       }),
     );
   }
@@ -146,6 +175,60 @@ export function indexStageModuleManifest(
   };
 
   return Object.freeze(indexed);
+}
+
+function indexSceneOutcomes(
+  scene: JsonObject,
+  sceneIndex: number,
+): {
+  readonly values: readonly IndexedStageModuleOutcome[];
+  readonly byType: ReadonlyMap<string, IndexedStageModuleOutcome>;
+} {
+  const path = `StageModuleManifest.scenes[${sceneIndex}].outcomes`;
+  const source = expectJsonObject(
+    expectProperty(scene, "outcomes", "StageModuleScene"),
+    path,
+  );
+  const indexed = Object.entries(source)
+    .sort(([left], [right]) => compareText(left, right))
+    .map(([outcomeType, transition]) =>
+      Object.freeze({
+        outcomeType,
+        transitionKind: expectOutcomeTransition(
+          transition,
+          `${path}.${outcomeType}`,
+        ),
+      }),
+    );
+  const byType = new Map(
+    indexed.map((outcome) => [outcome.outcomeType, outcome]),
+  );
+  return Object.freeze({
+    values: Object.freeze(indexed),
+    byType,
+  });
+}
+
+function expectOutcomeTransition(
+  value: JsonValue,
+  path: string,
+): StageOutcomeTransitionKind {
+  if (
+    value !== "stage.update" &&
+    value !== "stage.close.completion" &&
+    value !== "stage.close.non_completion"
+  ) {
+    throw new EngineFault(
+      "stage_module.manifest.outcome_transition_unknown",
+      `${path} contains an unsupported outcome transition`,
+      { path, transition: value },
+    );
+  }
+  return value;
+}
+
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function readDependsOnModuleIds(

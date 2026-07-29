@@ -44,6 +44,7 @@ export const CONTRACT_REF = Object.freeze({
     CONTRACT_ID.common,
     "DeterministicContext",
   ),
+  decimalString: definitionRef(CONTRACT_ID.worldRuntime, "DecimalString"),
   contentBundle: CONTRACT_ID.contentBundle,
   contentUpgrade: definitionRef(
     CONTRACT_ID.contentBundle,

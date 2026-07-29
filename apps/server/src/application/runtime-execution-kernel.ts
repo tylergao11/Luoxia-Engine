@@ -398,6 +398,7 @@ export function createRuntimeExecutionKernel(
     keyring: dependencies.sessionBasisHmacKeyring,
   });
   const stageContracts = createStageContractAuthority({
+    contracts: dependencies.contracts,
     catalog: dependencies.contentRuntimeCatalog,
     stageModules: dependencies.stageModuleRegistry,
   });
@@ -472,6 +473,7 @@ export function createRuntimeExecutionKernel(
     bundles: dependencies.activatedBundles,
     rulePlugins: rulePluginAbi,
     stageModules: dependencies.stageModuleRegistry,
+    stageContracts,
   });
   const saveSchemaMigrationRegistry =
     createSaveSchemaMigrationRegistry({
@@ -519,6 +521,7 @@ export function createRuntimeExecutionKernel(
     deterministicContextAuthority,
     contentUpgradeAuthorizationAuthority,
     contentUpgradeClock,
+    stageContracts,
   });
 
   const rulePluginJournal: RulePluginInvocationJournal =
@@ -751,7 +754,7 @@ export function createRuntimeExecutionKernel(
     contracts: dependencies.contracts,
     commands,
     worlds: worldBindingResolver,
-    stageModules: dependencies.stageModuleRegistry,
+    stageContracts,
     rulePluginAbi,
     rulePlugins: rulePluginExecutor,
     deterministicContexts: deterministicContextAuthority,

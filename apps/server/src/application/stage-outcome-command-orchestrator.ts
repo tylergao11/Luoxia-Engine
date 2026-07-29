@@ -25,7 +25,8 @@ import {
 } from "./rule-plugin-operation-binding.js";
 import type { RulePluginExecutor } from "./rule-plugin-executor.js";
 import type { ServerEnvelopeDocument } from "./server-envelope.js";
-import type { StageModuleRegistry } from "./stage-module-registry.js";
+import type { StageContractAuthority } from "./stage-contract-authority.js";
+import { isStageOutcomePreInvocationRejectionCode } from "./stage-outcome-pre-invocation-rejection.js";
 import type {
   RuntimeWorldBinding,
   RuntimeWorldBindingResolver,
@@ -42,7 +43,7 @@ export interface StageOutcomeCommandOrchestratorDependencies {
   readonly contracts: ContractValidator;
   readonly commands: CommandJournal;
   readonly worlds: RuntimeWorldBindingResolver;
-  readonly stageModules: StageModuleRegistry;
+  readonly stageContracts: StageContractAuthority;
   readonly rulePluginAbi: RulePluginAbiRegistry;
   readonly rulePlugins: RulePluginExecutor;
   readonly deterministicContexts: DeterministicContextAuthority;
@@ -62,7 +63,7 @@ class DefaultStageOutcomeCommandOrchestrator
   readonly #contracts: ContractValidator;
   readonly #commands: CommandJournal;
   readonly #worlds: RuntimeWorldBindingResolver;
-  readonly #stageModules: StageModuleRegistry;
+  readonly #stageContracts: StageContractAuthority;
   readonly #rulePluginAbi: RulePluginAbiRegistry;
   readonly #rulePlugins: RulePluginExecutor;
   readonly #deterministicContexts: DeterministicContextAuthority;
@@ -75,7 +76,7 @@ class DefaultStageOutcomeCommandOrchestrator
     this.#contracts = dependencies.contracts;
     this.#commands = dependencies.commands;
     this.#worlds = dependencies.worlds;
-    this.#stageModules = dependencies.stageModules;
+    this.#stageContracts = dependencies.stageContracts;
     this.#rulePluginAbi = dependencies.rulePluginAbi;
     this.#rulePlugins = dependencies.rulePlugins;
     this.#deterministicContexts = dependencies.deterministicContexts;
@@ -148,30 +149,45 @@ class DefaultStageOutcomeCommandOrchestrator
     }
 
     const requestInput = createStageOutcomeInput(stored);
-    const receipt = await this.#rulePlugins.executeRecoverable({
-      requestId: stored.stageOutcomeExecution.ruleRequestId,
-      modelInvocations: [],
-      candidateFactory: async () => {
-        const binding = await this.#worlds.resolveCurrent(
-          stored.session.worldId,
-        );
-        assertAcceptedWorldAndStageBasis(
-          binding,
-          stored,
-          this.#stageModules,
-        );
-        const invocation = resolveStageOutcomeBinding(
-          binding,
-          this.#rulePluginAbi,
-        );
-        return this.#createRulePluginRequest({
-          stored,
-          binding,
-          invocation,
-          requestInput,
-        });
-      },
-    });
+    let receipt: VerifiedRulePluginInvocationReceipt;
+    try {
+      receipt = await this.#rulePlugins.executeRecoverable({
+        requestId: stored.stageOutcomeExecution.ruleRequestId,
+        modelInvocations: [],
+        candidateFactory: async () => {
+          const binding = await this.#worlds.resolveCurrent(
+            stored.session.worldId,
+          );
+          assertAcceptedWorldAndStageBasis(
+            binding,
+            stored,
+            this.#stageContracts,
+          );
+          const invocation = resolveStageOutcomeBinding(
+            binding,
+            this.#rulePluginAbi,
+          );
+          return this.#createRulePluginRequest({
+            stored,
+            binding,
+            invocation,
+            requestInput,
+          });
+        },
+      });
+    } catch (error: unknown) {
+      if (
+        !(error instanceof EngineFault) ||
+        !isStageOutcomePreInvocationRejectionCode(error.code)
+      ) {
+        throw error;
+      }
+      return this.#finalizer.completeRejected({
+        sessionId: stored.session.sessionId,
+        commandId: stored.commandId,
+        code: error.code,
+      });
+    }
     this.#rulePlugins.assertExecutionRoot(
       receipt,
       stored.stageOutcomeExecution.ruleRequestId,
@@ -345,7 +361,7 @@ function resolveStageOutcomeBinding(
 function assertAcceptedWorldAndStageBasis(
   binding: RuntimeWorldBinding,
   stored: StoredReceivedCommand,
-  stageModules: StageModuleRegistry,
+  stageContracts: StageContractAuthority,
 ): void {
   const snapshot = binding.record.snapshot.value;
   const actualWorldId = expectString(
@@ -393,10 +409,19 @@ function assertAcceptedWorldAndStageBasis(
       expectString(stage, "stage_instance_id", "StageInstanceState") ===
       stageId,
   );
-  if (stages.length !== 1) {
+  if (stages.length === 0) {
+    throw new EngineFault(
+      "stage_outcome.orchestration.stage_unavailable",
+      "Stage outcome target is absent from the accepted world",
+      {
+        stage_instance_id: stageId,
+      },
+    );
+  }
+  if (stages.length > 1) {
     throw new EngineFault(
       "stage_outcome.orchestration.stage_match",
-      "Stage outcome must identify exactly one StageInstance in the accepted world",
+      "Accepted WorldState contains duplicate StageInstance identities",
       {
         stage_instance_id: stageId,
         matches: stages.length,
@@ -436,13 +461,14 @@ function assertAcceptedWorldAndStageBasis(
 
   assertPlayerControlsStageParticipant(worldState, stage, stored);
   assertRegisteredStageOutcomeType(
+    binding,
     stage,
     expectString(
       stored.message,
       "outcome_type",
       "StageOutcomeProposal",
     ),
-    stageModules,
+    stageContracts,
   );
 }
 
@@ -462,9 +488,9 @@ function assertPlayerControlsStageParticipant(
   const control = controls.length === 1 ? controls[0] : undefined;
   if (
     control === undefined ||
-    expectString(control, "controller_kind", "ControlBinding") !==
+    expectString(control, "binding_kind", "ControlBinding") !==
       "human" ||
-    expectString(control, "state", "ControlBinding") !== "active"
+    expectString(control, "status", "ControlBinding") !== "active"
   ) {
     throw new EngineFault(
       "stage_outcome.orchestration.control_invalid",
@@ -475,15 +501,9 @@ function assertPlayerControlsStageParticipant(
       },
     );
   }
-  const entity = expectJsonObject(
-    expectProperty(control, "entity", "ControlBinding"),
-    "ControlBinding.entity",
-  );
   if (
-    expectString(entity, "world_id", "EntityRef") !==
-      stored.session.worldId ||
-    expectString(entity, "entity_id", "EntityRef") !==
-      stored.session.playerEntityId
+    expectString(control, "entity_id", "ControlBinding") !==
+    stored.session.playerEntityId
   ) {
     throw new EngineFault(
       "stage_outcome.orchestration.control_subject_mismatch",
@@ -491,6 +511,33 @@ function assertPlayerControlsStageParticipant(
       {
         control_binding_id: stored.session.controlBindingId,
         player_entity_id: stored.session.playerEntityId,
+      },
+    );
+  }
+  const playerEntities = asObjectArray(
+    expectProperty(worldState, "entities", "WorldState"),
+    "WorldState.entities",
+  ).filter(
+    (entity) =>
+      expectString(entity, "entity_id", "EntityState") ===
+      stored.session.playerEntityId,
+  );
+  const playerEntity =
+    playerEntities.length === 1 ? playerEntities[0] : undefined;
+  if (
+    playerEntity === undefined ||
+    expectString(playerEntity, "state", "EntityState") !== "active"
+  ) {
+    throw new EngineFault(
+      "stage_outcome.orchestration.player_entity_invalid",
+      "Stage outcome requires the Session player's exact active EntityState",
+      {
+        player_entity_id: stored.session.playerEntityId,
+        matches: playerEntities.length,
+        entity_state:
+          playerEntity === undefined
+            ? null
+            : expectString(playerEntity, "state", "EntityState"),
       },
     );
   }
@@ -523,76 +570,46 @@ function assertPlayerControlsStageParticipant(
 }
 
 function assertRegisteredStageOutcomeType(
+  binding: RuntimeWorldBinding,
   stage: JsonObject,
   outcomeType: string,
-  registry: StageModuleRegistry,
+  stageContracts: StageContractAuthority,
 ): void {
   const lock = expectJsonObject(
     expectProperty(stage, "stage_module_lock", "StageInstanceState"),
     "StageInstanceState.stage_module_lock",
   );
-  const registered = registry.requireModuleForDependency({
-    package_id: expectString(lock, "module_id", "StageModuleLock"),
-    version: expectString(
-      lock,
-      "implementation_version",
-      "StageModuleLock",
+  const sceneId = expectString(stage, "scene_id", "StageInstanceState");
+  const contract = stageContracts.assertAllowed({
+    worldContentLock: binding.record.worldContentLock,
+    stageModuleLocks: binding.record.stageModuleLocks.map(
+      (candidate) => candidate.value,
     ),
-    integrity_sha256: expectString(
-      lock,
-      "implementation_digest",
-      "StageModuleLock",
+    stageModuleLock: lock,
+    sceneId,
+    completionRules: asObjectArray(
+      expectProperty(
+        stage,
+        "completion_rules",
+        "StageInstanceState",
+      ),
+      "StageInstanceState.completion_rules",
     ),
   });
-  if (!jsonEquals(registered.stageModuleLock.value, lock)) {
-    throw new EngineFault(
-      "stage_outcome.orchestration.module_lock_mismatch",
-      "StageInstance lock differs from the registered StageModule",
-      {
-        stage_instance_id: expectString(
-          stage,
-          "stage_instance_id",
-          "StageInstanceState",
-        ),
-      },
-    );
-  }
-  const sceneId = expectString(stage, "scene_id", "StageInstanceState");
-  registry.requireScene(registered, sceneId);
-  const manifest = registered.indexed.document.value;
-  const scenes = asObjectArray(
-    expectProperty(manifest, "scenes", "StageModuleManifest"),
-    "StageModuleManifest.scenes",
-  ).filter(
-    (scene) =>
-      expectString(scene, "scene_id", "StageModuleScene") === sceneId,
-  );
-  const scene = scenes.length === 1 ? scenes[0] : undefined;
-  if (scene === undefined) {
-    throw new EngineFault(
-      "stage_outcome.orchestration.scene_contract_missing",
-      "Registered StageModule did not resolve exactly one scene contract",
-      {
-        module_id: registered.indexed.moduleId,
-        scene_id: sceneId,
-        matches: scenes.length,
-      },
-    );
-  }
-  const outcomeTypes = expectProperty(
-    scene,
-    "outcome_types",
-    "StageModuleScene",
-  );
-  if (
-    !Array.isArray(outcomeTypes) ||
-    !outcomeTypes.includes(outcomeType)
-  ) {
+  try {
+    contract.scene.requireOutcome(outcomeType);
+  } catch (error: unknown) {
+    if (
+      !(error instanceof EngineFault) ||
+      error.code !== "stage_module.manifest.outcome_not_declared"
+    ) {
+      throw error;
+    }
     throw new EngineFault(
       "stage_outcome.orchestration.outcome_type_not_declared",
       "Stage outcome_type is not declared by the exact StageModule scene",
       {
-        module_id: registered.indexed.moduleId,
+        module_id: contract.module.indexed.moduleId,
         scene_id: sceneId,
         outcome_type: outcomeType,
       },

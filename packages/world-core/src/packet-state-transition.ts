@@ -5,6 +5,7 @@ import {
   expectProperty,
   expectString,
   jsonEquals,
+  visualBindingRuntimeIdentityKey,
   type JsonObject,
   type JsonValue,
 } from "@luoxia/contracts-runtime/portable";
@@ -866,11 +867,22 @@ const EFFECT_HANDLERS: { readonly [K in EffectOpName]: EffectHandler } = {
     assertUniqueEntityReferences(participants, "stage.participants");
     for (const participant of participants) {
       assertEntityReferenceWorld(participant, context.worldId);
-      assertActiveEntityId(
+      const participantEntityId = expectString(
+        participant,
+        "entity_id",
+        "EntityRef",
+      );
+      const participantEntity = requireUniqueEntity(
         context.world,
-        expectString(participant, "entity_id", "EntityRef"),
+        participantEntityId,
         "stage.participant",
       );
+      assertEqual(
+        "stage.participant.state",
+        "active",
+        expectString(participantEntity, "state", "EntityState"),
+      );
+      assertEntityExpectedRevision(participant, participantEntity);
     }
     context.world.stage_instances.push({
       stage_instance_id: stageInstanceId,
@@ -910,10 +922,14 @@ const EFFECT_HANDLERS: { readonly [K in EffectOpName]: EffectHandler } = {
       expectedRevision,
       expectInteger(current, "revision", "StageInstanceState"),
     );
+    const nextRevision = incrementStageRevision(
+      stageInstanceId,
+      expectedRevision,
+    );
     context.world.stage_instances[index] = {
       ...cloneJsonObject(current),
       state: cloneJson(expectProperty(op, "state", "StageUpdateOp")),
-      revision: expectedRevision + 1,
+      revision: nextRevision,
     };
   },
 
@@ -939,24 +955,14 @@ const EFFECT_HANDLERS: { readonly [K in EffectOpName]: EffectHandler } = {
       expectedRevision,
       expectInteger(current, "revision", "StageInstanceState"),
     );
+    const nextRevision = incrementStageRevision(
+      stageInstanceId,
+      expectedRevision,
+    );
     context.world.stage_instances[index] = {
-      ...cloneJsonObject(current),
+      stage_instance_id: stageInstanceId,
+      revision: nextRevision,
       status: "closed",
-      revision: expectedRevision + 1,
-      state: {
-        ...cloneJsonObject(
-          expectJsonObject(
-            expectProperty(current, "state", "StageInstanceState"),
-            "StageInstanceState.state",
-          ),
-        ),
-        close_outcome_type: expectString(
-          op,
-          "outcome_type",
-          "StageCloseOp",
-        ),
-        close_outcome: cloneJson(expectProperty(op, "outcome", "StageCloseOp")),
-      },
     };
   },
 
@@ -1093,12 +1099,9 @@ const EFFECT_HANDLERS: { readonly [K in EffectOpName]: EffectHandler } = {
       context.worldId,
       expectString(draft, "world_id", "VisualBindingDraft"),
     );
-    assertSubjectReferenceWorld(
-      expectJsonObject(
-        expectProperty(draft, "subject", "VisualBindingDraft"),
-        "VisualBindingDraft.subject",
-      ),
-      context.worldId,
+    const runtimeIdentityKey = visualBindingRuntimeIdentityKey(
+      draft,
+      "VisualBindingDraft",
     );
     const binding: Record<string, JsonValue> = {
       contract_version: "materialization.v1",
@@ -1131,14 +1134,10 @@ const EFFECT_HANDLERS: { readonly [K in EffectOpName]: EffectHandler } = {
       if (
         expectString(existing, "binding_id", "VisualBinding") !== bindingId &&
         expectString(existing, "state", "VisualBinding") === "active" &&
-        expectInteger(existing, "subject_revision", "VisualBinding") ===
-          binding.subject_revision &&
-        expectString(existing, "slot_id", "VisualBinding") ===
-          binding.slot_id &&
-        jsonEquals(
-          expectProperty(existing, "subject", "VisualBinding"),
-          binding.subject as JsonValue,
-        )
+        visualBindingRuntimeIdentityKey(
+          existing,
+          "VisualBinding",
+        ) === runtimeIdentityKey
       ) {
         context.world.visual_bindings[existingIndex] = {
           ...cloneJsonObject(existing),
@@ -1877,7 +1876,7 @@ function assertActiveEntityId(
   world: MutableWorld,
   entityId: string,
   field: string,
-): void {
+): JsonObject {
   const entity = findEntity(world, entityId);
   if (entity === undefined) {
     throw missing("entity", entityId);
@@ -1887,6 +1886,33 @@ function assertActiveEntityId(
     "active",
     expectString(entity, "state", "EntityState"),
   );
+  return entity;
+}
+
+function requireUniqueEntity(
+  world: MutableWorld,
+  entityId: string,
+  field: string,
+): JsonObject {
+  const matches = world.entities.filter(
+    (entry) =>
+      expectString(entry, "entity_id", "EntityState") === entityId,
+  );
+  if (matches.length === 0) {
+    throw missing("entity", entityId);
+  }
+  if (matches.length !== 1) {
+    throw fault(
+      "world.transition.entity_identity_ambiguous",
+      `${field} must resolve to exactly one EntityState`,
+      {
+        entity_id: entityId,
+        field,
+        matches: matches.length,
+      },
+    );
+  }
+  return matches[0] as JsonObject;
 }
 
 function assertDialogueParticipants(
@@ -2417,6 +2443,26 @@ function assertJsonEqual(
       { field },
     );
   }
+}
+
+function incrementStageRevision(
+  stageInstanceId: string,
+  revision: number,
+): number {
+  if (
+    !Number.isSafeInteger(revision) ||
+    revision >= Number.MAX_SAFE_INTEGER
+  ) {
+    throw fault(
+      "world.transition.stage_revision_exhausted",
+      "Stage revision cannot advance beyond the safe integer range",
+      {
+        stage_instance_id: stageInstanceId,
+        stage_revision: revision,
+      },
+    );
+  }
+  return revision + 1;
 }
 
 function missing(kind: string, id: string): EngineFault {

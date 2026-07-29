@@ -16,6 +16,7 @@ import {
   createRulePluginSemanticGate,
   type RulePluginContentUpgradeClock,
 } from "./rule-plugin-semantic-gate.js";
+import type { StageContractAuthority } from "./stage-contract-authority.js";
 
 export interface RulePluginGatewayDependencies {
   readonly contracts: ContractValidator;
@@ -26,6 +27,7 @@ export interface RulePluginGatewayDependencies {
   readonly contentUpgradeAuthorizationAuthority:
     ContentUpgradeAuthorizationAuthority;
   readonly contentUpgradeClock: RulePluginContentUpgradeClock;
+  readonly stageContracts: StageContractAuthority;
 }
 
 /**
@@ -47,6 +49,7 @@ export function createRulePluginGateway(
       contentUpgradeAuthorizations:
         dependencies.contentUpgradeAuthorizationAuthority,
       contentUpgradeClock: dependencies.contentUpgradeClock,
+      stageContracts: dependencies.stageContracts,
     }),
     dependencies.modelProvenance,
     dependencies.deterministicContextAuthority,

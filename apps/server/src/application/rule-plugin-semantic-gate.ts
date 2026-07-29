@@ -11,6 +11,7 @@ import {
   type JsonObject,
   type JsonValue,
   type ContractValidator,
+  type StageOutcomeTransitionKind,
 } from "@luoxia/contracts-runtime";
 import type {
   ContentUpgradeAuthorizationAuthority,
@@ -22,6 +23,7 @@ import type {
   RulePluginSemanticGate,
 } from "./rule-plugin-gateway.js";
 import type { VerifiedModelInvocationReceipt } from "./model-gateway.js";
+import type { StageContractAuthority } from "./stage-contract-authority.js";
 
 const OPERATION_KINDS = [
   "rule.evaluate",
@@ -55,6 +57,7 @@ interface OperationContext {
   readonly outputKind: string;
   readonly worldId: string;
   readonly world: JsonObject;
+  readonly stageContracts: StageContractAuthority;
 }
 
 interface EvidenceContext {
@@ -78,6 +81,7 @@ export interface RulePluginSemanticGateDependencies {
   readonly digest: JsonDigest;
   readonly contentUpgradeAuthorizations: ContentUpgradeAuthorizationAuthority;
   readonly contentUpgradeClock: RulePluginContentUpgradeClock;
+  readonly stageContracts: StageContractAuthority;
 }
 
 export function createRulePluginSemanticGate(
@@ -91,6 +95,7 @@ class DefaultRulePluginSemanticGate implements RulePluginSemanticGate {
   readonly #digest: JsonDigest;
   readonly #contentUpgradeAuthorizations: ContentUpgradeAuthorizationAuthority;
   readonly #contentUpgradeClock: RulePluginContentUpgradeClock;
+  readonly #stageContracts: StageContractAuthority;
 
   public constructor(dependencies: RulePluginSemanticGateDependencies) {
     this.#contracts = dependencies.contracts;
@@ -98,6 +103,7 @@ class DefaultRulePluginSemanticGate implements RulePluginSemanticGate {
     this.#contentUpgradeAuthorizations =
       dependencies.contentUpgradeAuthorizations;
     this.#contentUpgradeClock = dependencies.contentUpgradeClock;
+    this.#stageContracts = dependencies.stageContracts;
   }
 
   public async assertRequestEvidence(
@@ -227,6 +233,7 @@ class DefaultRulePluginSemanticGate implements RulePluginSemanticGate {
       outputKind: expectString(output, "output_kind", "RulePluginResponse.output"),
       worldId,
       world,
+      stageContracts: this.#stageContracts,
     });
   }
 }
@@ -1294,6 +1301,7 @@ function handleContentUpgradeTransform(context: OperationContext): void {
         sourceBundle,
         targetBundle,
       );
+      context.stageContracts.assertSaveOpenStagesAllowed(candidateSave);
       assertEqual(
         "content_upgrade.result_digest",
         context.digest.sha256(omitField(context.output, "result_digest")),
@@ -2056,6 +2064,16 @@ function handleStageOutcomeResolve(context: OperationContext): void {
           },
         );
       }
+      const outcomeType = expectString(
+        clientProposal,
+        "outcome_type",
+        "StageOutcomeProposal",
+      );
+      const transitionKind =
+        context.stageContracts.requireOutcomeTransition({
+          stageInstance: stage,
+          outcomeType,
+        });
       const ops = asObjectArray(
         expectProperty(proposal, "ops", "PacketProposal"),
         "PacketProposal.ops",
@@ -2065,15 +2083,23 @@ function handleStageOutcomeResolve(context: OperationContext): void {
         return opKind === "stage.update" || opKind === "stage.close";
       });
       const stageOp = stageOps.length === 1 ? stageOps[0] : undefined;
+      const expectedStageOp =
+        transitionKind === "stage.update"
+          ? "stage.update"
+          : "stage.close";
       if (
         stageOp === undefined ||
-        ops[ops.length - 1] !== stageOp
+        ops[ops.length - 1] !== stageOp ||
+        expectString(stageOp, "op", "EffectOp") !== expectedStageOp
       ) {
         throw fault(
           "rule_plugin.semantic.stage_outcome_transition_shape",
-          "Stage outcome packet must end with exactly one stage.update or stage.close",
+          "Stage outcome packet must end with the exact declared Stage transition",
           {
             operation_kind: context.operationKind,
+            outcome_type: outcomeType,
+            transition_kind: transitionKind,
+            expected_op: expectedStageOp,
             stage_operation_count: stageOps.length,
             op_count: ops.length,
           },
@@ -2091,7 +2117,7 @@ function handleStageOutcomeResolve(context: OperationContext): void {
         expectInteger(stageOp, "revision", "Stage outcome op"),
         context.operationKind,
       );
-      if (expectString(stageOp, "op", "EffectOp") === "stage.update") {
+      if (transitionKind === "stage.update") {
         assertEqual(
           "stage_outcome.evidence_digest",
           expectString(
@@ -2106,11 +2132,7 @@ function handleStageOutcomeResolve(context: OperationContext): void {
       }
       assertEqual(
         "stage_outcome.outcome_type",
-        expectString(
-          clientProposal,
-          "outcome_type",
-          "StageOutcomeProposal",
-        ),
+        outcomeType,
         expectString(stageOp, "outcome_type", "StageCloseOp"),
         context.operationKind,
       );
@@ -2124,10 +2146,109 @@ function handleStageOutcomeResolve(context: OperationContext): void {
         expectProperty(stageOp, "outcome", "StageCloseOp"),
         context.operationKind,
       );
+      assertStageOutcomeCompletionPreconditions({
+        proposal,
+        stage,
+        transitionKind,
+        outcomeType,
+        operationKind: context.operationKind,
+      });
       return;
     }
     default:
       throw unexpectedOutput(context);
+  }
+}
+
+function assertStageOutcomeCompletionPreconditions(input: {
+  readonly proposal: JsonObject;
+  readonly stage: JsonObject;
+  readonly transitionKind: Exclude<
+    StageOutcomeTransitionKind,
+    "stage.update"
+  >;
+  readonly outcomeType: string;
+  readonly operationKind: OperationKind;
+}): void {
+  const completionRules = asObjectArray(
+    expectProperty(
+      input.stage,
+      "completion_rules",
+      "StageInstanceState",
+    ),
+    "StageInstanceState.completion_rules",
+  );
+  const preconditions = asObjectArray(
+    expectProperty(
+      input.proposal,
+      "preconditions",
+      "PacketProposal",
+    ),
+    "PacketProposal.preconditions",
+  );
+  const matchingRules: JsonObject[] = [];
+  for (const precondition of preconditions) {
+    if (
+      expectString(
+        precondition,
+        "kind",
+        "PacketPrecondition",
+      ) !== "rule.holds"
+    ) {
+      continue;
+    }
+    const rule = expectJsonObject(
+      expectProperty(
+        precondition,
+        "rule",
+        "PacketPrecondition",
+      ),
+      "PacketPrecondition.rule",
+    );
+    if (
+      completionRules.some((completionRule) =>
+        jsonEquals(completionRule, rule),
+      )
+    ) {
+      matchingRules.push(rule);
+    }
+  }
+
+  if (input.transitionKind === "stage.close.non_completion") {
+    if (matchingRules.length !== 0) {
+      throw fault(
+        "rule_plugin.semantic.stage_outcome_non_completion_rule_forbidden",
+        "A non-completion Stage close cannot claim any instance completion rule",
+        {
+          operation_kind: input.operationKind,
+          outcome_type: input.outcomeType,
+          matching_completion_rule_count: matchingRules.length,
+        },
+      );
+    }
+    return;
+  }
+
+  if (
+    matchingRules.length !== completionRules.length ||
+    matchingRules.some((rule, index) => {
+      const expectedRule = completionRules[index];
+      return (
+        expectedRule === undefined ||
+        !jsonEquals(rule, expectedRule)
+      );
+    })
+  ) {
+    throw fault(
+      "rule_plugin.semantic.stage_outcome_completion_rules_mismatch",
+      "A completion Stage close must carry every instance completion rule exactly once and in order",
+      {
+        operation_kind: input.operationKind,
+        outcome_type: input.outcomeType,
+        expected_completion_rule_count: completionRules.length,
+        matching_completion_rule_count: matchingRules.length,
+      },
+    );
   }
 }
 

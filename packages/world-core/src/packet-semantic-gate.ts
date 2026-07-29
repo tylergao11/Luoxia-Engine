@@ -128,6 +128,7 @@ export interface StageOpenContractLookup {
     readonly stageModuleLocks: readonly JsonObject[];
     readonly stageModuleLock: JsonObject;
     readonly sceneId: string;
+    readonly completionRules: readonly JsonObject[];
   }): void;
 }
 
@@ -294,6 +295,10 @@ function assertStageOpenContracts(context: EvaluationContext): void {
         "StageOpenOp.stage_module_lock",
       ),
       sceneId: expectString(op, "scene_id", "StageOpenOp"),
+      completionRules: asObjectArray(
+        expectProperty(op, "completion_rules", "StageOpenOp"),
+        "StageOpenOp.completion_rules",
+      ),
     });
   }
 }

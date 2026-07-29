@@ -52,8 +52,22 @@ interface BindingCandidate {
   readonly slotId: string;
   readonly priority: number;
   readonly asset: JsonObject;
-  readonly instanceKey: string;
+  readonly instance: BindingInstance;
 }
+
+type BindingInstance =
+  | {
+      readonly kind: "world";
+      readonly worldId: string;
+      readonly subject: JsonObject;
+    }
+  | {
+      readonly kind: "entity";
+      readonly worldId: string;
+      readonly entityId: string;
+      readonly entity: JsonObject;
+      readonly subject: JsonObject;
+    };
 
 export function createStageOpenMessageProjector(
   dependencies: StageOpenMessageProjectorDependencies,
@@ -180,18 +194,20 @@ class DefaultStageOpenMessageProjector
       "scene_id",
       "StageInstanceState",
     );
-    this.#stageContracts.assertAllowed({
+    const contract = this.#stageContracts.assertAllowed({
       worldContentLock: input.worldContentLock,
       stageModuleLocks: input.stageModuleLocks,
       stageModuleLock,
       sceneId,
+      completionRules: objectArray(
+        expectProperty(
+          input.stage,
+          "completion_rules",
+          "StageInstanceState",
+        ),
+        "StageInstanceState.completion_rules",
+      ),
     });
-    const contract = this.#stageContracts.resolvePresentation({
-      worldContentLock: input.worldContentLock,
-      stageModuleLock,
-      sceneId,
-    });
-    const registered = contract.module;
     const scene = contract.scene;
     const participantIds = new Set(
       objectArray(
@@ -223,7 +239,7 @@ class DefaultStageOpenMessageProjector
           "entity_id",
           "EntityRef",
         );
-        requireActiveEntity(
+        requireEntity(
           input.entities,
           entityId,
           "Open Stage participant",
@@ -244,23 +260,6 @@ class DefaultStageOpenMessageProjector
     const candidates: BindingCandidate[] = [];
 
     for (const binding of contract.bindings) {
-      const slotId = expectString(binding, "slot_id", "PackBinding");
-      if (!scene.slotIds.includes(slotId)) {
-        throw new EngineFault(
-          "stage_open.projection.slot_not_declared",
-          "Stage PackBinding slot_id is not declared by the exact StageModule scene",
-          {
-            module_id: registered.indexed.moduleId,
-            scene_id: sceneId,
-            binding_id: expectString(
-              binding,
-              "binding_id",
-              "PackBinding",
-            ),
-            slot_id: slotId,
-          },
-        );
-      }
       candidates.push(
         ...this.#bindingCandidates({
           binding,
@@ -295,6 +294,7 @@ class DefaultStageOpenMessageProjector
       bindings: selected.map((candidate) =>
         Object.freeze({
           binding_id: candidate.bindingId,
+          subject: candidate.instance.subject,
           slot_id: candidate.slotId,
           asset: candidate.asset,
         }),
@@ -322,10 +322,7 @@ class DefaultStageOpenMessageProjector
       "subject_id",
       "PackBinding",
     );
-    const instances: {
-      readonly key: string;
-      readonly entity?: JsonObject;
-    }[] = [];
+    const instances: BindingInstance[] = [];
     switch (subjectKind) {
       case "world":
         if (
@@ -336,7 +333,16 @@ class DefaultStageOpenMessageProjector
             "WorldDefinition",
           )
         ) {
-          instances.push({ key: `world:${input.worldId}` });
+          instances.push(
+            Object.freeze({
+              kind: "world",
+              worldId: input.worldId,
+              subject: Object.freeze({
+                kind: "world",
+                world_id: input.worldId,
+              }),
+            }),
+          );
         }
         break;
       case "entity": {
@@ -347,20 +353,23 @@ class DefaultStageOpenMessageProjector
           localId: subjectId,
         });
         if (input.participantIds.has(entityId)) {
-          instances.push({
-            key: `entity:${entityId}`,
-            entity: requireActiveEntity(
-              input.entities,
+          instances.push(
+            createEntityBindingInstance({
+              worldId: input.worldId,
               entityId,
-              "Stage content entity",
-            ),
-          });
+              entity: requireEntity(
+                input.entities,
+                entityId,
+                "Stage content entity",
+              ),
+            }),
+          );
         }
         break;
       }
       case "definition":
         for (const entityId of input.participantIds) {
-          const entity = requireActiveEntity(
+          const entity = requireEntity(
             input.entities,
             entityId,
             "Stage participant",
@@ -375,10 +384,13 @@ class DefaultStageOpenMessageProjector
               subjectId,
             )
           ) {
-            instances.push({
-              key: `entity:${entityId}`,
-              entity,
-            });
+            instances.push(
+              createEntityBindingInstance({
+                worldId: input.worldId,
+                entityId,
+                entity,
+              }),
+            );
           }
         }
         break;
@@ -422,16 +434,42 @@ class DefaultStageOpenMessageProjector
           asset: resolveBindingAsset({
             binding: input.binding,
             worldId: input.worldId,
-            instanceEntity: instance.entity,
+            instanceEntity:
+              instance.kind === "entity" ? instance.entity : undefined,
             assets: input.assets,
             profiles: input.profiles,
             visualBindings: input.visualBindings,
           }),
-          instanceKey: instance.key,
+          instance,
         }),
       ),
     );
   }
+}
+
+function createEntityBindingInstance(input: {
+  readonly worldId: string;
+  readonly entityId: string;
+  readonly entity: JsonObject;
+}): BindingInstance {
+  return Object.freeze({
+    kind: "entity",
+    worldId: input.worldId,
+    entityId: input.entityId,
+    entity: input.entity,
+    subject: Object.freeze({
+      kind: "entity",
+      entity: Object.freeze({
+        world_id: input.worldId,
+        entity_id: input.entityId,
+        expected_revision: expectInteger(
+          input.entity,
+          "revision",
+          "EntityState",
+        ),
+      }),
+    }),
+  });
 }
 
 function readRequestedStageIds(
@@ -649,33 +687,115 @@ function requireAssetContent(
 function selectStageBindings(
   candidates: readonly BindingCandidate[],
 ): readonly BindingCandidate[] {
-  const selected = new Map<string, BindingCandidate>();
+  const worldSelections = new Map<
+    string,
+    Map<string, BindingCandidate>
+  >();
+  const entitySelections = new Map<
+    string,
+    Map<string, Map<string, BindingCandidate>>
+  >();
+
   for (const candidate of candidates) {
-    const current = selected.get(candidate.slotId);
-    if (current === undefined || candidate.priority > current.priority) {
-      selected.set(candidate.slotId, candidate);
+    if (candidate.instance.kind === "world") {
+      const slotSelections = getOrCreate(
+        worldSelections,
+        candidate.instance.worldId,
+        () => new Map<string, BindingCandidate>(),
+      );
+      selectSubjectSlotBinding(slotSelections, candidate);
       continue;
     }
-    if (candidate.priority === current.priority) {
-      throw new EngineFault(
-        "stage_open.projection.binding_priority_ambiguous",
-        "Stage PackBindings tie at the same slot priority",
-        {
-          slot_id: candidate.slotId,
-          priority: candidate.priority,
-          first_binding_id: current.bindingId,
-          first_instance_key: current.instanceKey,
-          second_binding_id: candidate.bindingId,
-          second_instance_key: candidate.instanceKey,
-        },
-      );
+
+    const entityWorldSelections = getOrCreate(
+      entitySelections,
+      candidate.instance.worldId,
+      () => new Map<string, Map<string, BindingCandidate>>(),
+    );
+    const slotSelections = getOrCreate(
+      entityWorldSelections,
+      candidate.instance.entityId,
+      () => new Map<string, BindingCandidate>(),
+    );
+    selectSubjectSlotBinding(slotSelections, candidate);
+  }
+
+  const selected: BindingCandidate[] = [];
+  for (const slotSelections of worldSelections.values()) {
+    selected.push(...slotSelections.values());
+  }
+  for (const entityWorldSelections of entitySelections.values()) {
+    for (const slotSelections of entityWorldSelections.values()) {
+      selected.push(...slotSelections.values());
     }
   }
-  return Object.freeze(
-    [...selected.values()].sort((left, right) =>
-      compareText(left.slotId, right.slotId),
-    ),
+  selected.sort(compareStageBindingCandidates);
+  return Object.freeze(selected);
+}
+
+function selectSubjectSlotBinding(
+  slotSelections: Map<string, BindingCandidate>,
+  candidate: BindingCandidate,
+): void {
+  const current = slotSelections.get(candidate.slotId);
+  if (current === undefined || candidate.priority > current.priority) {
+    slotSelections.set(candidate.slotId, candidate);
+    return;
+  }
+  if (candidate.priority === current.priority) {
+    throw new EngineFault(
+      "stage_open.projection.binding_priority_ambiguous",
+      "Stage PackBindings tie at the same runtime subject slot priority",
+      {
+        subject: candidate.instance.subject,
+        slot_id: candidate.slotId,
+        priority: candidate.priority,
+        first_binding_id: current.bindingId,
+        second_binding_id: candidate.bindingId,
+      },
+    );
+  }
+}
+
+function compareStageBindingCandidates(
+  left: BindingCandidate,
+  right: BindingCandidate,
+): number {
+  const slotOrder = compareText(left.slotId, right.slotId);
+  if (slotOrder !== 0) {
+    return slotOrder;
+  }
+  if (left.instance.kind !== right.instance.kind) {
+    return left.instance.kind === "world" ? -1 : 1;
+  }
+  const worldOrder = compareText(
+    left.instance.worldId,
+    right.instance.worldId,
   );
+  if (worldOrder !== 0) {
+    return worldOrder;
+  }
+  if (
+    left.instance.kind === "entity" &&
+    right.instance.kind === "entity"
+  ) {
+    return compareText(left.instance.entityId, right.instance.entityId);
+  }
+  return 0;
+}
+
+function getOrCreate<TKey, TValue>(
+  index: Map<TKey, TValue>,
+  key: TKey,
+  create: () => TValue,
+): TValue {
+  const current = index.get(key);
+  if (current !== undefined) {
+    return current;
+  }
+  const value = create();
+  index.set(key, value);
+  return value;
 }
 
 function staticDefinitionMatches(
@@ -701,14 +821,27 @@ function requireActiveEntity(
   entityId: string,
   source: string,
 ): JsonObject {
-  const entity = entities.get(entityId);
-  if (
-    entity === undefined ||
-    expectString(entity, "state", "EntityState") !== "active"
-  ) {
+  const entity = requireEntity(entities, entityId, source);
+  if (expectString(entity, "state", "EntityState") !== "active") {
     throw new EngineFault(
       "stage_open.projection.entity_unavailable",
       `${source} must reference an active EntityState`,
+      { entity_id: entityId, source },
+    );
+  }
+  return entity;
+}
+
+function requireEntity(
+  entities: ReadonlyMap<string, JsonObject>,
+  entityId: string,
+  source: string,
+): JsonObject {
+  const entity = entities.get(entityId);
+  if (entity === undefined) {
+    throw new EngineFault(
+      "stage_open.projection.entity_missing",
+      `${source} must reference an existing EntityState`,
       { entity_id: entityId, source },
     );
   }

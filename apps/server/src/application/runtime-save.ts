@@ -28,6 +28,7 @@ import type {
   StageModuleDependencyIdentity,
   StageModuleRegistry,
 } from "./stage-module-registry.js";
+import type { StageContractAuthority } from "./stage-contract-authority.js";
 import type {
   RuntimeSaveMigrationRepository,
   RuntimeSaveRepository,
@@ -95,6 +96,7 @@ export interface RuntimeSaveCompatibilityDependencies {
   readonly bundles: readonly RuntimeActivatedBundleDescriptor[];
   readonly rulePlugins: RulePluginAbiRegistry;
   readonly stageModules: StageModuleRegistry;
+  readonly stageContracts: StageContractAuthority;
 }
 
 export interface RuntimeSaveServiceDependencies {
@@ -131,6 +133,7 @@ class DefaultRuntimeSaveCompatibility implements RuntimeSaveCompatibility {
   readonly #bundlesByKey: ReadonlyMap<string, RuntimeActivatedBundleDescriptor>;
   readonly #rulePlugins: RulePluginAbiRegistry;
   readonly #stageModules: StageModuleRegistry;
+  readonly #stageContracts: StageContractAuthority;
 
   public constructor(dependencies: RuntimeSaveCompatibilityDependencies) {
     dependencies.contracts.assert(
@@ -187,6 +190,7 @@ class DefaultRuntimeSaveCompatibility implements RuntimeSaveCompatibility {
     this.#bundlesByKey = bundlesByKey;
     this.#rulePlugins = dependencies.rulePlugins;
     this.#stageModules = dependencies.stageModules;
+    this.#stageContracts = dependencies.stageContracts;
   }
 
   public buildInitialEnvelope(input: {
@@ -316,6 +320,7 @@ class DefaultRuntimeSaveCompatibility implements RuntimeSaveCompatibility {
       "StageModuleLock",
       "runtime.save.stage_module_locks_incompatible",
     );
+    this.#stageContracts.assertSaveOpenStagesAllowed(envelope);
   }
 
   #resolveLockProfile(

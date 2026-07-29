@@ -2,6 +2,7 @@ import type {
   ContentBundleDocument,
   ContentBundleSemanticGate,
 } from "./content-bundle.js";
+import type { ContractValidator } from "./contract-validator.js";
 import { EngineFault } from "./fault.js";
 import {
   expectInteger,
@@ -12,12 +13,7 @@ import {
   type JsonObject,
   type JsonValue,
 } from "./json.js";
-
-const IDENTIFIER_PATTERN = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/;
-const DECIMAL_STRING_PATTERN =
-  /^(?:0|-?(?:[1-9][0-9]*(?:\.[0-9]*[1-9])?|0\.[0-9]*[1-9]))$/;
-const LOCALIZED_LOCALE_PATTERN =
-  /^[a-z]{2,3}(?:-[A-Z][a-z]{3})?(?:-[A-Z]{2}|-[0-9]{3})?$/;
+import { CONTRACT_REF } from "./references.js";
 
 type TypeKind = "definition" | "component" | "relation";
 type DependencyKind =
@@ -82,6 +78,15 @@ type ValueType =
   | "world_time"
   | "duration";
 
+export interface ValidatedDecimalStringComparer {
+  compare(left: string, right: string): -1 | 0 | 1;
+}
+
+export interface ContentBundleSemanticGateDependencies {
+  readonly contracts: ContractValidator;
+  readonly decimalComparer: ValidatedDecimalStringComparer;
+}
+
 interface ExtensionFieldRecord {
   readonly field: JsonObject;
   readonly fieldId: string;
@@ -94,6 +99,8 @@ interface ExtensionFieldRecord {
   readonly reference: { readonly refKind: RefKind; readonly refTypeId: string | undefined } | undefined;
   readonly minimum: number | undefined;
   readonly maximum: number | undefined;
+  readonly decimalMinimum: string | undefined;
+  readonly decimalMaximum: string | undefined;
   readonly pattern: string | undefined;
   readonly translatable: boolean;
 }
@@ -122,6 +129,7 @@ interface MachineRecord {
 }
 
 interface BundleIndex {
+  readonly semanticDependencies: ContentBundleSemanticGateDependencies;
   readonly packId: string;
   readonly packVersion: string;
   readonly bundleDigest: string;
@@ -139,24 +147,39 @@ interface BundleIndex {
   readonly generationArchetypes: ReadonlySet<string>;
   readonly prompts: ReadonlyMap<string, PromptRecord>;
   readonly artProfiles: ReadonlySet<string>;
-  readonly materializationProfiles: ReadonlySet<string>;
+  readonly materializationProfiles: ReadonlyMap<string, JsonObject>;
   readonly assets: ReadonlySet<string>;
   readonly bindings: ReadonlySet<string>;
   readonly machines: ReadonlyMap<string, MachineRecord>;
+  readonly machineBindings: ReadonlySet<string>;
   readonly directorProfileWorlds: ReadonlyMap<string, string>;
 }
 
-export function createContentBundleSemanticGate(): ContentBundleSemanticGate {
-  return new DefaultContentBundleSemanticGate();
+export function createContentBundleSemanticGate(
+  dependencies: ContentBundleSemanticGateDependencies,
+): ContentBundleSemanticGate {
+  return new DefaultContentBundleSemanticGate(dependencies);
 }
 
 class DefaultContentBundleSemanticGate implements ContentBundleSemanticGate {
+  readonly #dependencies: ContentBundleSemanticGateDependencies;
+
+  public constructor(dependencies: ContentBundleSemanticGateDependencies) {
+    this.#dependencies = Object.freeze({
+      contracts: dependencies.contracts,
+      decimalComparer: dependencies.decimalComparer,
+    });
+  }
+
   public async assertValid(bundle: ContentBundleDocument): Promise<void> {
-    assertContentBundleSemantics(bundle);
+    assertContentBundleSemantics(bundle, this.#dependencies);
   }
 }
 
-function assertContentBundleSemantics(document: ContentBundleDocument): void {
+function assertContentBundleSemantics(
+  document: ContentBundleDocument,
+  dependencies: ContentBundleSemanticGateDependencies,
+): void {
   const root = document.value;
   const release = expectJsonObject(
     expectProperty(root, "release", "ContentBundle"),
@@ -167,7 +190,7 @@ function assertContentBundleSemantics(document: ContentBundleDocument): void {
     "ContentBundle.bundle",
   );
   const bundleDigest = expectString(release, "bundle_digest", "release");
-  const index = buildIndex(bundle, bundleDigest);
+  const index = buildIndex(bundle, bundleDigest, dependencies);
 
   assertManifest(bundle, index);
   assertWorlds(bundle, index);
@@ -178,7 +201,11 @@ function assertContentBundleSemantics(document: ContentBundleDocument): void {
   assertSimulation(bundle, index);
 }
 
-function buildIndex(bundle: JsonObject, bundleDigest: string): BundleIndex {
+function buildIndex(
+  bundle: JsonObject,
+  bundleDigest: string,
+  semanticDependencies: ContentBundleSemanticGateDependencies,
+): BundleIndex {
   const manifest = expectJsonObject(
     expectProperty(bundle, "manifest", "bundle"),
     "bundle.manifest",
@@ -223,6 +250,7 @@ function buildIndex(bundle: JsonObject, bundleDigest: string): BundleIndex {
       expectProperty(catalog, "extension_fields", "catalog"),
       "catalog.extension_fields",
     ),
+    semanticDependencies.decimalComparer,
   );
   const enumSets = buildEnumSetIndex(
     asObjectArray(expectProperty(catalog, "enum_sets", "catalog"), "catalog.enum_sets"),
@@ -294,13 +322,14 @@ function buildIndex(bundle: JsonObject, bundleDigest: string): BundleIndex {
     "art_profile_id",
     "presentation.art_profiles",
   );
-  const materializationProfiles = uniqueIdSet(
+  const materializationProfiles = uniqueIndex(
     asObjectArray(
       expectProperty(presentation, "materialization_profiles", "presentation"),
       "presentation.materialization_profiles",
     ),
     "materialization_profile_id",
     "presentation.materialization_profiles",
+    (profile) => profile,
   );
   const assets = uniqueIdSet(
     asObjectArray(
@@ -338,7 +367,7 @@ function buildIndex(bundle: JsonObject, bundleDigest: string): BundleIndex {
       "simulation.state_machines",
     ),
   );
-  uniqueIdSet(
+  const machineBindings = uniqueIdSet(
     asObjectArray(
       expectProperty(simulation, "initial_machine_bindings", "simulation"),
       "simulation.initial_machine_bindings",
@@ -368,6 +397,7 @@ function buildIndex(bundle: JsonObject, bundleDigest: string): BundleIndex {
   assertComponentIdUniqueness(definitionsArray, catalog);
 
   return Object.freeze({
+    semanticDependencies,
     packId,
     packVersion,
     bundleDigest,
@@ -389,6 +419,7 @@ function buildIndex(bundle: JsonObject, bundleDigest: string): BundleIndex {
     assets,
     bindings,
     machines,
+    machineBindings,
     directorProfileWorlds,
   });
 }
@@ -476,6 +507,7 @@ function buildTypeIndex(items: readonly JsonObject[]): ReadonlyMap<string, TypeR
 
 function buildExtensionFieldIndex(
   items: readonly JsonObject[],
+  decimalComparer: ValidatedDecimalStringComparer,
 ): readonly ExtensionFieldRecord[] {
   const seen = new Set<string>();
   const records: ExtensionFieldRecord[] = [];
@@ -489,6 +521,11 @@ function buildExtensionFieldIndex(
       );
     }
     seen.add(fieldId);
+    const valueType = expectEnum(
+      item,
+      "value_type",
+      `catalog.extension_fields[${index}]`,
+    ) as ValueType;
 
     let reference:
       | { readonly refKind: RefKind; readonly refTypeId: string | undefined }
@@ -504,27 +541,31 @@ function buildExtensionFieldIndex(
       });
     }
 
-    records.push(
-      Object.freeze({
-        field: item,
-        fieldId,
-        ownerKind: expectEnum(item, "owner_kind", `catalog.extension_fields[${index}]`) as OwnerKind,
-        ownerTypeId: optionalString(item, "owner_type_id"),
-        valueType: expectEnum(item, "value_type", `catalog.extension_fields[${index}]`) as ValueType,
-        cardinality: expectEnum(
-          item,
-          "cardinality",
-          `catalog.extension_fields[${index}]`,
-        ) as "one" | "many",
-        required: expectBoolean(item, "required", `catalog.extension_fields[${index}]`),
-        enumSetId: optionalString(item, "enum_set_id"),
-        reference,
-        minimum: optionalNumber(item, "minimum"),
-        maximum: optionalNumber(item, "maximum"),
-        pattern: optionalString(item, "pattern"),
-        translatable: expectBoolean(item, "translatable", `catalog.extension_fields[${index}]`),
-      }),
-    );
+    const field = Object.freeze({
+      field: item,
+      fieldId,
+      ownerKind: expectEnum(item, "owner_kind", `catalog.extension_fields[${index}]`) as OwnerKind,
+      ownerTypeId: optionalString(item, "owner_type_id"),
+      valueType,
+      cardinality: expectEnum(
+        item,
+        "cardinality",
+        `catalog.extension_fields[${index}]`,
+      ) as "one" | "many",
+      required: expectBoolean(item, "required", `catalog.extension_fields[${index}]`),
+      enumSetId: optionalString(item, "enum_set_id"),
+      reference,
+      minimum: valueType === "decimal" ? undefined : optionalNumber(item, "minimum"),
+      maximum: valueType === "decimal" ? undefined : optionalNumber(item, "maximum"),
+      decimalMinimum:
+        valueType === "decimal" ? optionalString(item, "minimum") : undefined,
+      decimalMaximum:
+        valueType === "decimal" ? optionalString(item, "maximum") : undefined,
+      pattern: optionalString(item, "pattern"),
+      translatable: expectBoolean(item, "translatable", `catalog.extension_fields[${index}]`),
+    });
+    assertFieldBoundsDefinition(field, decimalComparer);
+    records.push(field);
   }
   return records;
 }
@@ -1474,12 +1515,45 @@ function assertPresentation(bundle: JsonObject, index: BundleIndex): void {
       );
     }
     if (binding.materialization_profile_id !== undefined) {
+      const materializationProfileId = expectString(
+        binding,
+        "materialization_profile_id",
+        path,
+      );
       requireId(
         index.materializationProfiles,
-        expectString(binding, "materialization_profile_id", path),
+        materializationProfileId,
         `${path}.materialization_profile_id`,
         "materialization_profile",
       );
+      const materializationProfile =
+        index.materializationProfiles.get(materializationProfileId);
+      if (materializationProfile === undefined) {
+        throw unresolved(
+          materializationProfileId,
+          `${path}.materialization_profile_id`,
+          "materialization_profile",
+        );
+      }
+      if (
+        binding.stage !== undefined &&
+        subjectKind === "world" &&
+        expectString(
+          materializationProfile,
+          "generation_policy",
+          "MaterializationProfile",
+        ) === "on_demand"
+      ) {
+        throw semanticFault(
+          "content_bundle.semantic.stage_world_materialization_unsupported",
+          "Stage world PackBinding cannot use an on_demand MaterializationProfile because MaterializationRequest has no world subject contract",
+          {
+            path,
+            subject_kind: subjectKind,
+            materialization_profile_id: materializationProfileId,
+          },
+        );
+      }
     }
     if (binding.art_profile_id !== undefined) {
       requireId(
@@ -1632,6 +1706,7 @@ function assertContentUpgrades(bundle: JsonObject, index: BundleIndex): void {
       ),
       path,
       migrationId,
+      index,
     );
     assertPluginOperationRef(
       expectJsonObject(expectProperty(upgrade, "transformer", path), `${path}.transformer`),
@@ -1646,6 +1721,7 @@ function assertContentUpgradeMappings(
   mappings: readonly JsonObject[],
   path: string,
   migrationId: string,
+  index: BundleIndex,
 ): void {
   const sourceKeys = new Set<string>();
   const targetKeys = new Set<string>();
@@ -1658,6 +1734,13 @@ function assertContentUpgradeMappings(
     );
     const sourceId = expectString(mapping, "source_id", mappingPath);
     const targetId = expectString(mapping, "target_id", mappingPath);
+    assertContentUpgradeMappingTarget(
+      index,
+      catalogKind,
+      targetId,
+      mappingPath,
+      migrationId,
+    );
     const sourceKey = `${catalogKind}\u0000${sourceId}`;
     const targetKey = `${catalogKind}\u0000${targetId}`;
     if (sourceKeys.has(sourceKey)) {
@@ -1686,6 +1769,77 @@ function assertContentUpgradeMappings(
     }
     sourceKeys.add(sourceKey);
     targetKeys.add(targetKey);
+  }
+}
+
+function assertContentUpgradeMappingTarget(
+  index: BundleIndex,
+  catalogKind: string,
+  targetId: string,
+  path: string,
+  migrationId: string,
+): void {
+  let exists: boolean;
+  switch (catalogKind) {
+    case "type":
+      exists = index.types.has(targetId);
+      break;
+    case "definition":
+      exists = index.definitions.has(targetId);
+      break;
+    case "entity":
+      exists = index.entities.has(targetId);
+      break;
+    case "relation":
+      exists = index.relations.has(targetId);
+      break;
+    case "capability":
+      exists = index.capabilities.has(targetId);
+      break;
+    case "world_law":
+      exists = index.worldLaws.has(targetId);
+      break;
+    case "generation_archetype":
+      exists = index.generationArchetypes.has(targetId);
+      break;
+    case "prompt":
+      exists = index.prompts.has(targetId);
+      break;
+    case "art_profile":
+      exists = index.artProfiles.has(targetId);
+      break;
+    case "materialization_profile":
+      exists = index.materializationProfiles.has(targetId);
+      break;
+    case "asset":
+      exists = index.assets.has(targetId);
+      break;
+    case "binding":
+      exists = index.bindings.has(targetId);
+      break;
+    case "state_machine_binding":
+      exists = index.machineBindings.has(targetId);
+      break;
+    default: {
+      throw semanticFault(
+        "content_bundle.semantic.content_upgrade_mapping_catalog_kind",
+        `Unsupported ContentUpgrade catalog_kind ${catalogKind}`,
+        { path, migration_id: migrationId, catalog_kind: catalogKind },
+      );
+    }
+  }
+
+  if (!exists) {
+    throw semanticFault(
+      "content_bundle.semantic.content_upgrade_mapping_target_unknown",
+      "ContentUpgrade declared_mapping target_id must exist in the target ContentBundle catalog kind",
+      {
+        path,
+        migration_id: migrationId,
+        catalog_kind: catalogKind,
+        target_id: targetId,
+      },
+    );
   }
 }
 
@@ -2134,13 +2288,6 @@ function assertFieldValues(
           { path: valuePath, field_id: fieldId, locale },
         );
       }
-      if (!LOCALIZED_LOCALE_PATTERN.test(locale)) {
-        throw semanticFault(
-          "content_bundle.semantic.field_locale",
-          `Field ${fieldId} locale is invalid`,
-          { path: valuePath, field_id: fieldId, locale },
-        );
-      }
     }
 
     const rawValue = expectProperty(valueObject, "value", valuePath);
@@ -2213,18 +2360,23 @@ function assertFieldValueShape(
       return;
     }
     case "decimal": {
-      if (
-        typeof value !== "string" ||
-        value.length > 128 ||
-        !DECIMAL_STRING_PATTERN.test(value)
-      ) {
+      if (typeof value !== "string") {
         throw fieldTypeFault(field, path, "decimal string");
       }
-      const numeric = Number(value);
-      if (!Number.isFinite(numeric)) {
-        throw fieldTypeFault(field, path, "finite decimal");
-      }
-      assertNumericBounds(field, numeric, path);
+      assertFieldContractValue(
+        index.semanticDependencies.contracts,
+        CONTRACT_REF.decimalString,
+        value,
+        field,
+        path,
+        "DecimalString",
+      );
+      assertDecimalBounds(
+        field,
+        value,
+        path,
+        index.semanticDependencies.decimalComparer,
+      );
       return;
     }
     case "boolean": {
@@ -2234,9 +2386,17 @@ function assertFieldValueShape(
       return;
     }
     case "id_ref": {
-      if (typeof value !== "string" || !IDENTIFIER_PATTERN.test(value)) {
+      if (typeof value !== "string") {
         throw fieldTypeFault(field, path, "identifier");
       }
+      assertFieldContractValue(
+        index.semanticDependencies.contracts,
+        CONTRACT_REF.identifier,
+        value,
+        field,
+        path,
+        "Identifier",
+      );
       if (field.reference === undefined) {
         throw semanticFault(
           "content_bundle.semantic.field_reference_required",
@@ -2354,6 +2514,93 @@ function assertTypeParentAcyclic(types: ReadonlyMap<string, TypeRecord>): void {
       current = types.get(current)?.parentTypeId;
     }
   }
+}
+
+function assertFieldContractValue(
+  contracts: ContractValidator,
+  schemaRef: string,
+  value: JsonValue,
+  field: ExtensionFieldRecord,
+  path: string,
+  expected: string,
+): void {
+  try {
+    contracts.assert(schemaRef, value);
+  } catch (error: unknown) {
+    if (
+      error instanceof EngineFault &&
+      error.code === "contract.value.invalid"
+    ) {
+      throw fieldTypeFault(field, path, expected);
+    }
+    throw error;
+  }
+}
+
+function assertDecimalBounds(
+  field: ExtensionFieldRecord,
+  value: string,
+  path: string,
+  comparer: ValidatedDecimalStringComparer,
+): void {
+  if (
+    field.decimalMinimum !== undefined &&
+    comparer.compare(value, field.decimalMinimum) < 0
+  ) {
+    throw semanticFault(
+      "content_bundle.semantic.field_bounds",
+      `Field ${field.fieldId} is below minimum`,
+      {
+        path,
+        field_id: field.fieldId,
+        value,
+        minimum: field.decimalMinimum,
+      },
+    );
+  }
+  if (
+    field.decimalMaximum !== undefined &&
+    comparer.compare(value, field.decimalMaximum) > 0
+  ) {
+    throw semanticFault(
+      "content_bundle.semantic.field_bounds",
+      `Field ${field.fieldId} is above maximum`,
+      {
+        path,
+        field_id: field.fieldId,
+        value,
+        maximum: field.decimalMaximum,
+      },
+    );
+  }
+}
+
+function assertFieldBoundsDefinition(
+  field: ExtensionFieldRecord,
+  comparer: ValidatedDecimalStringComparer,
+): void {
+  const numericBoundsReversed =
+    field.minimum !== undefined &&
+    field.maximum !== undefined &&
+    field.minimum > field.maximum;
+  const decimalBoundsReversed =
+    field.decimalMinimum !== undefined &&
+    field.decimalMaximum !== undefined &&
+    comparer.compare(field.decimalMinimum, field.decimalMaximum) > 0;
+  if (!numericBoundsReversed && !decimalBoundsReversed) {
+    return;
+  }
+
+  throw semanticFault(
+    "content_bundle.semantic.field_bounds",
+    `Field ${field.fieldId} minimum must not exceed maximum`,
+    {
+      path: `extension_field ${field.fieldId}`,
+      field_id: field.fieldId,
+      minimum: field.decimalMinimum ?? field.minimum ?? null,
+      maximum: field.decimalMaximum ?? field.maximum ?? null,
+    },
+  );
 }
 
 function assertNumericBounds(

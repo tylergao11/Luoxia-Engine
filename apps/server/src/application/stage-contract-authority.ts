@@ -1,10 +1,16 @@
 import {
+  CONTRACT_REF,
   EngineFault,
   expectJsonObject,
+  expectProperty,
   expectString,
   jsonEquals,
+  type ContractValidator,
   type IndexedStageModuleScene,
   type JsonObject,
+  type JsonValue,
+  type SaveEnvelopeDocument,
+  type StageOutcomeTransitionKind,
 } from "@luoxia/contracts-runtime";
 import type {
   ContentRuntimeCatalog,
@@ -30,21 +36,24 @@ export interface StagePresentationContract {
  * Server-only StageOpen presentation projector.
  */
 export interface StageContractAuthority {
+  assertSaveOpenStagesAllowed(saveEnvelope: SaveEnvelopeDocument): void;
+
+  requireOutcomeTransition(input: {
+    readonly stageInstance: JsonObject;
+    readonly outcomeType: string;
+  }): StageOutcomeTransitionKind;
+
   assertAllowed(input: {
     readonly worldContentLock: WorldContentLockDocument;
     readonly stageModuleLocks: readonly JsonObject[];
     readonly stageModuleLock: JsonObject;
     readonly sceneId: string;
-  }): void;
-
-  resolvePresentation(input: {
-    readonly worldContentLock: WorldContentLockDocument;
-    readonly stageModuleLock: JsonObject;
-    readonly sceneId: string;
+    readonly completionRules: readonly JsonObject[];
   }): StagePresentationContract;
 }
 
 export interface StageContractAuthorityDependencies {
+  readonly contracts: ContractValidator;
   readonly catalog: ContentRuntimeCatalog;
   readonly stageModules: StageModuleRegistry;
 }
@@ -56,12 +65,125 @@ export function createStageContractAuthority(
 }
 
 class DefaultStageContractAuthority implements StageContractAuthority {
+  readonly #contracts: ContractValidator;
   readonly #catalog: ContentRuntimeCatalog;
   readonly #stageModules: StageModuleRegistry;
 
   public constructor(dependencies: StageContractAuthorityDependencies) {
+    this.#contracts = dependencies.contracts;
     this.#catalog = dependencies.catalog;
     this.#stageModules = dependencies.stageModules;
+  }
+
+  public assertSaveOpenStagesAllowed(
+    saveEnvelope: SaveEnvelopeDocument,
+  ): void {
+    const worldContentLock = this.#contracts.assertObject(
+      CONTRACT_REF.worldContentLock,
+      expectProperty(
+        saveEnvelope.value,
+        "world_content_lock",
+        "SaveEnvelope",
+      ),
+    );
+    const stageModuleLocks = objectArray(
+      expectProperty(
+        saveEnvelope.value,
+        "stage_module_locks",
+        "SaveEnvelope",
+      ),
+      "SaveEnvelope.stage_module_locks",
+    );
+    const worldState = expectJsonObject(
+      expectProperty(
+        saveEnvelope.value,
+        "world_state",
+        "SaveEnvelope",
+      ),
+      "SaveEnvelope.world_state",
+    );
+    for (const stage of objectArray(
+      expectProperty(
+        worldState,
+        "stage_instances",
+        "WorldState",
+      ),
+      "WorldState.stage_instances",
+    )) {
+      const stageInstanceId = expectString(
+        stage,
+        "stage_instance_id",
+        "StageInstanceState",
+      );
+      const status = expectString(
+        stage,
+        "status",
+        "StageInstanceState",
+      );
+      if (status === "closed") {
+        continue;
+      }
+      if (status !== "open") {
+        throw new EngineFault(
+          "stage_contract.stage_status_invalid",
+          "SaveEnvelope StageInstance has an unsupported status",
+          {
+            stage_instance_id: stageInstanceId,
+            stage_status: status,
+          },
+        );
+      }
+      this.assertAllowed({
+        worldContentLock,
+        stageModuleLocks,
+        stageModuleLock: expectJsonObject(
+          expectProperty(
+            stage,
+            "stage_module_lock",
+            "StageInstanceState",
+          ),
+          "StageInstanceState.stage_module_lock",
+        ),
+        sceneId: expectString(
+          stage,
+          "scene_id",
+          "StageInstanceState",
+        ),
+        completionRules: objectArray(
+          expectProperty(
+            stage,
+            "completion_rules",
+            "StageInstanceState",
+          ),
+          "StageInstanceState.completion_rules",
+        ),
+      });
+    }
+  }
+
+  public requireOutcomeTransition(input: {
+    readonly stageInstance: JsonObject;
+    readonly outcomeType: string;
+  }): StageOutcomeTransitionKind {
+    const registered = this.#stageModules.requireModuleForLock(
+      expectJsonObject(
+        expectProperty(
+          input.stageInstance,
+          "stage_module_lock",
+          "StageInstanceState",
+        ),
+        "StageInstanceState.stage_module_lock",
+      ),
+    );
+    const scene = this.#stageModules.requireScene(
+      registered,
+      expectString(
+        input.stageInstance,
+        "scene_id",
+        "StageInstanceState",
+      ),
+    );
+    return scene.requireOutcome(input.outcomeType).transitionKind;
   }
 
   public assertAllowed(input: {
@@ -69,7 +191,8 @@ class DefaultStageContractAuthority implements StageContractAuthority {
     readonly stageModuleLocks: readonly JsonObject[];
     readonly stageModuleLock: JsonObject;
     readonly sceneId: string;
-  }): void {
+    readonly completionRules: readonly JsonObject[];
+  }): StagePresentationContract {
     const matchingLocks = input.stageModuleLocks.filter((candidate) =>
       jsonEquals(candidate, input.stageModuleLock),
     );
@@ -88,10 +211,52 @@ class DefaultStageContractAuthority implements StageContractAuthority {
         },
       );
     }
-    this.resolvePresentation(input);
+    const presentation = this.#resolvePresentation(input);
+    this.#assertCompletionRules(
+      input.completionRules,
+      presentation.content,
+    );
+    return presentation;
   }
 
-  public resolvePresentation(input: {
+  #assertCompletionRules(
+    completionRules: readonly JsonObject[],
+    content: WorldContentBinding,
+  ): void {
+    for (const [index, rule] of completionRules.entries()) {
+      const bundleId = expectString(rule, "bundle_id", "RuleRef");
+      const bundleDigest = expectString(
+        rule,
+        "bundle_digest",
+        "RuleRef",
+      );
+      const ruleId = expectString(rule, "rule_id", "RuleRef");
+      if (
+        bundleId !== content.packId ||
+        bundleDigest !== content.bundleDigest ||
+        this.#catalog.resolveRuleEvaluationBinding({
+          bundle_id: bundleId,
+          bundle_digest: bundleDigest,
+          rule_id: ruleId,
+        }) === undefined
+      ) {
+        throw new EngineFault(
+          "stage_contract.completion_rule_unresolved",
+          "Stage completion RuleRef must resolve in the current locked root ContentBundle",
+          {
+            completion_rule_index: index,
+            expected_bundle_id: content.packId,
+            expected_bundle_digest: content.bundleDigest,
+            actual_bundle_id: bundleId,
+            actual_bundle_digest: bundleDigest,
+            rule_id: ruleId,
+          },
+        );
+      }
+    }
+  }
+
+  #resolvePresentation(input: {
     readonly worldContentLock: WorldContentLockDocument;
     readonly stageModuleLock: JsonObject;
     readonly sceneId: string;
@@ -215,4 +380,20 @@ class DefaultStageContractAuthority implements StageContractAuthority {
       }) === input.registered
     );
   }
+}
+
+function objectArray(
+  value: JsonValue,
+  path: string,
+): readonly JsonObject[] {
+  if (!Array.isArray(value)) {
+    throw new EngineFault(
+      "stage_contract.array_expected",
+      `${path} must be an array`,
+      { path },
+    );
+  }
+  return value.map((entry, index) =>
+    expectJsonObject(entry as JsonValue, `${path}[${index}]`),
+  );
 }

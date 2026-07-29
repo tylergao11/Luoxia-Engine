@@ -589,12 +589,8 @@
         "default_value": {
           "$ref": "common.v1.schema.json#/$defs/JsonValue"
         },
-        "minimum": {
-          "type": "number"
-        },
-        "maximum": {
-          "type": "number"
-        },
+        "minimum": {},
+        "maximum": {},
         "pattern": {
           "type": "string",
           "maxLength": 1000
@@ -617,7 +613,41 @@
           "type": "integer",
           "minimum": 0
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "value_type": {
+                "const": "decimal"
+              }
+            },
+            "required": [
+              "value_type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "minimum": {
+                "$ref": "world-runtime.v1.schema.json#/$defs/DecimalString"
+              },
+              "maximum": {
+                "$ref": "world-runtime.v1.schema.json#/$defs/DecimalString"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "minimum": {
+                "type": "number"
+              },
+              "maximum": {
+                "type": "number"
+              }
+            }
+          }
+        }
+      ]
     },
     "EnumSet": {
       "type": "object",

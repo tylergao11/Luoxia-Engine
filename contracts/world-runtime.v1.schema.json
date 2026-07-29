@@ -1064,6 +1064,7 @@
         "participants": {
           "type": "array",
           "minItems": 1,
+          "uniqueItems": true,
           "items": {
             "$ref": "common.v1.schema.json#/$defs/EntityRef"
           }
@@ -1074,6 +1075,8 @@
         "completion_rules": {
           "type": "array",
           "minItems": 1,
+          "uniqueItems": true,
+          "description": "AND qualification predicates for outcomes mapped to stage.close.completion by the exact StageModule scene outcomes contract. The selected stage_outcome.resolve operation must carry them as rule.holds preconditions; they are not a global close gate or a player_day.end gate, and non-completion outcomes may close without them.",
           "items": {
             "$ref": "common.v1.schema.json#/$defs/RuleRef"
           }
@@ -2138,54 +2141,81 @@
       }
     },
     "StageInstanceState": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "stage_instance_id",
-        "revision",
-        "stage_module_lock",
-        "scene_id",
-        "participants",
-        "state",
-        "status",
-        "completion_rules"
-      ],
-      "properties": {
-        "stage_instance_id": {
-          "$ref": "common.v1.schema.json#/$defs/Uuid"
-        },
-        "revision": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "stage_module_lock": {
-          "$ref": "common.v1.schema.json#/$defs/StageModuleLock"
-        },
-        "scene_id": {
-          "$ref": "common.v1.schema.json#/$defs/Identifier"
-        },
-        "participants": {
-          "type": "array",
-          "items": {
-            "$ref": "common.v1.schema.json#/$defs/EntityRef"
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "stage_instance_id",
+            "revision",
+            "stage_module_lock",
+            "scene_id",
+            "participants",
+            "state",
+            "status",
+            "completion_rules"
+          ],
+          "properties": {
+            "stage_instance_id": {
+              "$ref": "common.v1.schema.json#/$defs/Uuid"
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "stage_module_lock": {
+              "$ref": "common.v1.schema.json#/$defs/StageModuleLock"
+            },
+            "scene_id": {
+              "$ref": "common.v1.schema.json#/$defs/Identifier"
+            },
+            "participants": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "common.v1.schema.json#/$defs/EntityRef"
+              }
+            },
+            "state": {
+              "$ref": "common.v1.schema.json#/$defs/JsonObject"
+            },
+            "status": {
+              "const": "open"
+            },
+            "completion_rules": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "description": "The authoritative per-instance AND list used only when the exact StageModule scene outcomes contract maps a proposal to stage.close.completion. The selected stage_outcome.resolve operation must obey that mapping; World Core does not infer outcome names or use this list as a global interaction gate.",
+              "items": {
+                "$ref": "common.v1.schema.json#/$defs/RuleRef"
+              }
+            }
           }
         },
-        "state": {
-          "$ref": "common.v1.schema.json#/$defs/JsonObject"
-        },
-        "status": {
-          "enum": [
-            "open",
-            "closed"
-          ]
-        },
-        "completion_rules": {
-          "type": "array",
-          "items": {
-            "$ref": "common.v1.schema.json#/$defs/RuleRef"
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "stage_instance_id",
+            "revision",
+            "status"
+          ],
+          "properties": {
+            "stage_instance_id": {
+              "$ref": "common.v1.schema.json#/$defs/Uuid"
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "status": {
+              "const": "closed"
+            }
           }
         }
-      }
+      ]
     },
     "WorldState": {
       "type": "object",

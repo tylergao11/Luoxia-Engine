@@ -1,4 +1,5 @@
 import {
+  assertSaveEnvelopeRelationships,
   CONTRACT_REF,
   EngineFault,
   expectInteger,
@@ -17,6 +18,7 @@ import type {
   CommandFinalizer,
   EventCardCompletionBranch,
 } from "../../application/command-finalizer.js";
+import { isStageOutcomePreInvocationRejectionCode } from "../../application/stage-outcome-pre-invocation-rejection.js";
 import type { EngineSessionRecord } from "../../application/engine-session.js";
 import type {
   ServerEnvelopeDocument,
@@ -106,7 +108,6 @@ interface ValidatedFinalizationCommand {
   readonly eventCardId: string | undefined;
   readonly eventCardPacketId: string | undefined;
   readonly eventCardBranch: EventCardCompletionBranch | undefined;
-  readonly eventCardOpenedStageIds: readonly string[];
   readonly navigationRuleRequestId: string | undefined;
   readonly navigationDestination: JsonObject | undefined;
   readonly stageOutcomeRuleRequestId: string | undefined;
@@ -139,28 +140,20 @@ interface CommittedEventHistoryRow {
   readonly event_document: unknown;
 }
 
-interface NavigationCompletionRow {
+interface TerminalRulePluginInvocationRow {
+  readonly terminal_request_id: string;
   readonly operation_kind: string;
   readonly invocation_status: string;
   readonly request_document: unknown;
+  readonly response_document: unknown | null;
   readonly proposal_id: string | null;
   readonly revision_after_text: string | null;
   readonly event_document: unknown | null;
 }
 
-interface NavigationRejectionRow {
-  readonly operation_kind: string;
-  readonly invocation_status: string;
-  readonly response_document: unknown | null;
-  readonly proposal_id: string | null;
-}
-
-interface StageOutcomeCompletionRow extends NavigationCompletionRow {
-  readonly terminal_request_id: string;
-}
-
-interface StageOutcomeRejectionRow extends NavigationRejectionRow {
-  readonly terminal_request_id: string;
+interface StageOutcomeRejectionBoundaryRow {
+  readonly root_invocation_exists: boolean;
+  readonly later_committed_event_exists: boolean;
 }
 
 interface DialogueCloseCompletionRow {
@@ -202,6 +195,10 @@ interface DialogueProposalHistoryRow {
   readonly operation_kind: string | null;
   readonly invocation_status: string | null;
   readonly packet_proposal_id: string | null;
+}
+
+interface DayCycleExecutionIdentityRow {
+  readonly execution_id: string;
 }
 
 export function createPostgresCommandFinalizer(
@@ -493,6 +490,13 @@ class PostgresCommandFinalizer
               finalWorldContentLock: sessionContext.worldContentLock.value,
             });
           }
+          const stageOpenProjectionIds =
+            await readCommandStageOpenProjectionIds({
+              client,
+              contracts: this.#contracts,
+              command,
+              finalWorldRevision: input.finalWorldRevision,
+            });
 
           if (
             command.acceptedSession.viewRevision ===
@@ -538,6 +542,7 @@ class PostgresCommandFinalizer
             stageModuleLocks: sessionContext.stageModuleLocks.map(
               (lock) => lock.value,
             ),
+            stageOpenProjectionIds,
             result: result.value,
           });
           const envelopes = this.#envelopes.createBatch({
@@ -626,7 +631,7 @@ class PostgresCommandFinalizer
             });
           }
           if (command.commandKind === "stage.outcome_proposal") {
-            await assertStageOutcomeRejectionHistory({
+            await assertStageOutcomeRejectionBoundary({
               client,
               contracts: this.#contracts,
               command,
@@ -697,12 +702,22 @@ function createAcceptedMessages(input: {
   readonly worldState: JsonObject;
   readonly worldContentLock: LockedEngineSessionContext["worldContentLock"];
   readonly stageModuleLocks: readonly JsonObject[];
+  readonly stageOpenProjectionIds: readonly string[];
   readonly result: JsonObject;
 }): readonly JsonObject[] {
   const viewMessage = Object.freeze({
     type: "session.view",
     view: input.view.value,
   });
+  const stageMessages = input.stageOpens.project({
+    worldId: input.command.acceptedSession.worldId,
+    worldContentLock: input.worldContentLock,
+    stageModuleLocks: input.stageModuleLocks,
+    worldState: input.worldState,
+    playerEntityId: input.command.acceptedSession.playerEntityId,
+    stageInstanceIds: input.stageOpenProjectionIds,
+  });
+  const openedStages = stageMessages.map((message) => message.value);
   if (
     input.command.commandKind === "dialogue.start" ||
     input.command.commandKind === "dialogue.continue"
@@ -714,24 +729,26 @@ function createAcceptedMessages(input: {
         requireDialogueResponseTurnId(input.command),
       ),
       viewMessage,
+      ...openedStages,
       input.result,
     ]);
   }
   if (input.command.commandKind === "player_day.end") {
-    return Object.freeze([viewMessage, input.result]);
+    return Object.freeze([viewMessage, ...openedStages, input.result]);
   }
   if (input.command.commandKind === "map.move") {
-    return Object.freeze([viewMessage, input.result]);
+    return Object.freeze([viewMessage, ...openedStages, input.result]);
   }
   if (input.command.commandKind === "dialogue.close") {
-    return Object.freeze([viewMessage, input.result]);
+    return Object.freeze([viewMessage, ...openedStages, input.result]);
   }
   if (input.command.commandKind === "content_upgrade.accept") {
-    return Object.freeze([viewMessage, input.result]);
+    return Object.freeze([viewMessage, ...openedStages, input.result]);
   }
   if (input.command.commandKind === "stage.outcome_proposal") {
     return Object.freeze([
       viewMessage,
+      ...openedStages,
       createStageOutcomeMessage(
         input.worldState,
         requireStageInstanceId(input.stageInstanceId),
@@ -742,7 +759,7 @@ function createAcceptedMessages(input: {
 
   const completion = requireEventCardCompletion(input.eventCard);
   if (completion.branch === "invalidate") {
-    return Object.freeze([viewMessage, input.result]);
+    return Object.freeze([viewMessage, ...openedStages, input.result]);
   }
   const presentation = createEventCardPresentationFrame({
     contracts: input.contracts,
@@ -751,17 +768,9 @@ function createAcceptedMessages(input: {
     worldState: input.worldState,
     eventCardId: completion.eventCardId,
   });
-  const stageMessages = input.stageOpens.project({
-    worldId: input.command.acceptedSession.worldId,
-    worldContentLock: input.worldContentLock,
-    stageModuleLocks: input.stageModuleLocks,
-    worldState: input.worldState,
-    playerEntityId: input.command.acceptedSession.playerEntityId,
-    stageInstanceIds: input.command.eventCardOpenedStageIds,
-  });
   return Object.freeze([
     viewMessage,
-    ...stageMessages.map((message) => message.value),
+    ...openedStages,
     presentation,
     input.result,
   ]);
@@ -1374,15 +1383,11 @@ function assertAcceptedSessionState(
   }
 }
 
-async function assertDialogueCompletionHistory(input: {
+async function readDialogueProposalHistoryRows(input: {
   readonly client: PoolClient;
   readonly contracts: ContractValidator;
   readonly command: ValidatedFinalizationCommand;
-  readonly finalWorldRevision: number;
-  readonly responseTurnId: string;
-}): Promise<void> {
-  const acceptedRevision =
-    input.command.acceptedSession.worldRevision;
+}): Promise<readonly DialogueProposalHistoryRow[]> {
   const proposalQuery =
     await input.client.query<DialogueProposalHistoryRow>(
       `SELECT proposal.proposal_kind,
@@ -1407,11 +1412,23 @@ async function assertDialogueCompletionHistory(input: {
                  proposal.proposal_ordinal`,
       [input.command.sessionId, input.command.commandId],
     );
-  const proposalRows = validateDialogueProposalHistoryRows(
+  return validateDialogueProposalHistoryRows(
     input.contracts,
     input.command,
     proposalQuery.rows,
   );
+}
+
+async function assertDialogueCompletionHistory(input: {
+  readonly client: PoolClient;
+  readonly contracts: ContractValidator;
+  readonly command: ValidatedFinalizationCommand;
+  readonly finalWorldRevision: number;
+  readonly responseTurnId: string;
+}): Promise<void> {
+  const acceptedRevision =
+    input.command.acceptedSession.worldRevision;
+  const proposalRows = await readDialogueProposalHistoryRows(input);
   const acceptedProposals = proposalRows.filter(
     (row) => row.packet_proposal_id !== null,
   );
@@ -2369,87 +2386,63 @@ function dialogueContainsPlayer(
   });
 }
 
-async function assertNavigationCompletionHistory(input: {
+async function readTerminalRulePluginInvocation(input: {
   readonly client: PoolClient;
-  readonly contracts: ContractValidator;
-  readonly command: ValidatedFinalizationCommand;
-  readonly finalWorldRevision: number;
-}): Promise<void> {
-  const requestId = input.command.navigationRuleRequestId;
-  const destination = input.command.navigationDestination;
-  if (requestId === undefined || destination === undefined) {
-    throw new EngineFault(
-      "command.finalizer.navigation_identity_missing",
-      "Navigation completion requires its persisted request and destination identities",
-      {
-        session_id: input.command.sessionId,
-        command_id: input.command.commandId,
-      },
+  readonly rootRequestId: string;
+  readonly multipleRowsMessage: string;
+  readonly details: JsonObject;
+}): Promise<TerminalRulePluginInvocationRow | undefined> {
+  const query =
+    await input.client.query<TerminalRulePluginInvocationRow>(
+      `WITH RECURSIVE invocation_chain AS (
+         SELECT invocation.*,
+                ARRAY[invocation.request_id] AS request_path
+           FROM luoxia_engine.rule_plugin_invocations AS invocation
+          WHERE invocation.request_id = $1::uuid
+         UNION ALL
+         SELECT child.*,
+                array_append(parent.request_path, child.request_id)
+           FROM luoxia_engine.rule_plugin_invocations AS child
+           JOIN invocation_chain AS parent
+             ON child.parent_request_id = parent.request_id
+          WHERE NOT child.request_id = ANY(parent.request_path)
+       )
+       SELECT invocation.request_id::text AS terminal_request_id,
+              invocation.operation_kind,
+              invocation.invocation_status,
+              invocation.request_document,
+              invocation.response_document,
+              invocation.proposal_id::text AS proposal_id,
+              committed.revision_after::text AS revision_after_text,
+              committed.event_document
+         FROM invocation_chain AS invocation
+         LEFT JOIN luoxia_engine.committed_events AS committed
+           ON committed.packet_id = invocation.proposal_id
+        WHERE NOT EXISTS (
+          SELECT 1
+            FROM luoxia_engine.rule_plugin_invocations AS child
+           WHERE child.parent_request_id = invocation.request_id
+        )`,
+      [input.rootRequestId],
     );
-  }
-  const query = await input.client.query<StageOutcomeCompletionRow>(
-    `WITH RECURSIVE invocation_chain AS (
-       SELECT invocation.*,
-              0 AS choice_depth
-         FROM luoxia_engine.rule_plugin_invocations AS invocation
-        WHERE invocation.request_id = $1::uuid
-       UNION ALL
-       SELECT child.*,
-              parent.choice_depth + 1
-         FROM luoxia_engine.rule_plugin_invocations AS child
-         JOIN invocation_chain AS parent
-           ON child.parent_request_id = parent.request_id
-        WHERE parent.choice_depth < 64
-     )
-     SELECT invocation.request_id::text AS terminal_request_id,
-            invocation.operation_kind,
-            invocation.invocation_status,
-            invocation.request_document,
-            invocation.proposal_id::text AS proposal_id,
-            committed.revision_after::text AS revision_after_text,
-            committed.event_document
-       FROM invocation_chain AS invocation
-       LEFT JOIN luoxia_engine.committed_events AS committed
-         ON committed.packet_id = invocation.proposal_id
-      WHERE NOT EXISTS (
-        SELECT 1
-          FROM luoxia_engine.rule_plugin_invocations AS child
-         WHERE child.parent_request_id = invocation.request_id
-      )`,
-    [requestId],
-  );
-  const row = requireAtMostOne(
+  return requireAtMostOne(
     query.rows,
     "command.finalizer.database_corrupt",
-    "Navigation RulePlugin request lookup returned more than one row",
-    {
-      session_id: input.command.sessionId,
-      command_id: input.command.commandId,
-      request_id: requestId,
-    },
+    input.multipleRowsMessage,
+    input.details,
   );
-  if (
-    row === undefined ||
-    row.operation_kind !== "navigation.resolve" ||
-    row.invocation_status !== "resolved" ||
-    row.proposal_id === null ||
-    row.revision_after_text === null ||
-    row.event_document === null
-  ) {
-    throw new EngineFault(
-      "command.finalizer.navigation_history_incomplete",
-      "Accepted navigation command requires one resolved proposal and its committed packet",
-      {
-        session_id: input.command.sessionId,
-        command_id: input.command.commandId,
-        request_id: requestId,
-      },
-    );
-  }
+}
 
+function assertNavigationTerminalRequestIdentity(input: {
+  readonly contracts: ContractValidator;
+  readonly command: ValidatedFinalizationCommand;
+  readonly rootRequestId: string;
+  readonly terminal: TerminalRulePluginInvocationRow;
+  readonly destination: JsonObject;
+}): void {
   const request = input.contracts.assertObject(
     CONTRACT_REF.rulePluginRequest,
-    row.request_document,
+    input.terminal.request_document,
   ).value;
   const readonlyWorld = expectJsonObject(
     expectProperty(request, "readonly_world", "RulePluginRequest"),
@@ -2477,7 +2470,7 @@ async function assertNavigationCompletionHistory(input: {
   );
   if (
     expectString(request, "request_id", "RulePluginRequest") !==
-      row.terminal_request_id ||
+      input.terminal.terminal_request_id ||
     expectString(request, "operation_kind", "RulePluginRequest") !==
       "navigation.resolve" ||
     expectInteger(request, "basis_revision", "RulePluginRequest") !==
@@ -2491,9 +2484,11 @@ async function assertNavigationCompletionHistory(input: {
     ) !== input.command.acceptedSession.worldRevision ||
     expectString(control, "binding_id", "ControlBindingRef") !==
       input.command.acceptedSession.controlBindingId ||
+    expectString(actor, "world_id", "EntityRef") !==
+      input.command.acceptedSession.worldId ||
     expectString(actor, "entity_id", "EntityRef") !==
       input.command.acceptedSession.playerEntityId ||
-    !jsonEquals(requestDestination, destination)
+    !jsonEquals(requestDestination, input.destination)
   ) {
     throw new EngineFault(
       "command.finalizer.navigation_request_mismatch",
@@ -2501,11 +2496,69 @@ async function assertNavigationCompletionHistory(input: {
       {
         session_id: input.command.sessionId,
         command_id: input.command.commandId,
-        root_request_id: requestId,
-        terminal_request_id: row.terminal_request_id,
+        root_request_id: input.rootRequestId,
+        terminal_request_id:
+          input.terminal.terminal_request_id,
       },
     );
   }
+}
+
+async function assertNavigationCompletionHistory(input: {
+  readonly client: PoolClient;
+  readonly contracts: ContractValidator;
+  readonly command: ValidatedFinalizationCommand;
+  readonly finalWorldRevision: number;
+}): Promise<void> {
+  const requestId = input.command.navigationRuleRequestId;
+  const destination = input.command.navigationDestination;
+  if (requestId === undefined || destination === undefined) {
+    throw new EngineFault(
+      "command.finalizer.navigation_identity_missing",
+      "Navigation completion requires its persisted request and destination identities",
+      {
+        session_id: input.command.sessionId,
+        command_id: input.command.commandId,
+      },
+    );
+  }
+  const row = await readTerminalRulePluginInvocation({
+    client: input.client,
+    rootRequestId: requestId,
+    multipleRowsMessage:
+      "Navigation RulePlugin request lookup returned more than one terminal row",
+    details: {
+      session_id: input.command.sessionId,
+      command_id: input.command.commandId,
+      request_id: requestId,
+    },
+  });
+  if (
+    row === undefined ||
+    row.operation_kind !== "navigation.resolve" ||
+    row.invocation_status !== "resolved" ||
+    row.proposal_id === null ||
+    row.revision_after_text === null ||
+    row.event_document === null
+  ) {
+    throw new EngineFault(
+      "command.finalizer.navigation_history_incomplete",
+      "Accepted navigation command requires one resolved proposal and its committed packet",
+      {
+        session_id: input.command.sessionId,
+        command_id: input.command.commandId,
+        request_id: requestId,
+      },
+    );
+  }
+
+  assertNavigationTerminalRequestIdentity({
+    contracts: input.contracts,
+    command: input.command,
+    rootRequestId: requestId,
+    terminal: row,
+    destination,
+  });
 
   const revisionAfter = parseSafeUnsignedInteger(
     row.revision_after_text,
@@ -2598,53 +2651,28 @@ async function assertNavigationRejectionHistory(input: {
   readonly code: string;
 }): Promise<void> {
   const requestId = input.command.navigationRuleRequestId;
-  if (requestId === undefined) {
+  const destination = input.command.navigationDestination;
+  if (requestId === undefined || destination === undefined) {
     throw new EngineFault(
       "command.finalizer.navigation_identity_missing",
-      "Navigation rejection requires its persisted RulePlugin request identity",
+      "Navigation rejection requires its persisted request and destination identities",
       {
         session_id: input.command.sessionId,
         command_id: input.command.commandId,
       },
     );
   }
-  const query = await input.client.query<StageOutcomeRejectionRow>(
-    `WITH RECURSIVE invocation_chain AS (
-       SELECT invocation.*,
-              0 AS choice_depth
-         FROM luoxia_engine.rule_plugin_invocations AS invocation
-        WHERE invocation.request_id = $1::uuid
-       UNION ALL
-       SELECT child.*,
-              parent.choice_depth + 1
-         FROM luoxia_engine.rule_plugin_invocations AS child
-         JOIN invocation_chain AS parent
-           ON child.parent_request_id = parent.request_id
-        WHERE parent.choice_depth < 64
-     )
-     SELECT invocation.request_id::text AS terminal_request_id,
-            invocation.operation_kind,
-            invocation.invocation_status,
-            invocation.response_document,
-            invocation.proposal_id::text AS proposal_id
-       FROM invocation_chain AS invocation
-      WHERE NOT EXISTS (
-        SELECT 1
-          FROM luoxia_engine.rule_plugin_invocations AS child
-         WHERE child.parent_request_id = invocation.request_id
-      )`,
-    [requestId],
-  );
-  const row = requireAtMostOne(
-    query.rows,
-    "command.finalizer.database_corrupt",
-    "Navigation RulePlugin rejection lookup returned more than one row",
-    {
+  const row = await readTerminalRulePluginInvocation({
+    client: input.client,
+    rootRequestId: requestId,
+    multipleRowsMessage:
+      "Navigation RulePlugin rejection lookup returned more than one terminal row",
+    details: {
       session_id: input.command.sessionId,
       command_id: input.command.commandId,
       request_id: requestId,
     },
-  );
+  });
   if (
     row === undefined ||
     row.operation_kind !== "navigation.resolve" ||
@@ -2662,6 +2690,13 @@ async function assertNavigationRejectionHistory(input: {
       },
     );
   }
+  assertNavigationTerminalRequestIdentity({
+    contracts: input.contracts,
+    command: input.command,
+    rootRequestId: requestId,
+    terminal: row,
+    destination,
+  });
   const response = input.contracts.assertObject(
     CONTRACT_REF.rulePluginResponse,
     row.response_document,
@@ -2812,6 +2847,101 @@ function assertDialogueResponseHistoryOp(
   }
 }
 
+function assertStageOutcomeTerminalRequestIdentity(input: {
+  readonly contracts: ContractValidator;
+  readonly command: ValidatedFinalizationCommand;
+  readonly rootRequestId: string;
+  readonly terminal: TerminalRulePluginInvocationRow;
+  readonly stageInstanceId: string;
+  readonly stageRevision: number;
+  readonly outcomeType: string;
+  readonly outcome: JsonObject;
+  readonly evidenceDigest: string;
+}): void {
+  const request = input.contracts.assertObject(
+    CONTRACT_REF.rulePluginRequest,
+    input.terminal.request_document,
+  ).value;
+  const readonlyWorld = expectJsonObject(
+    expectProperty(request, "readonly_world", "RulePluginRequest"),
+    "RulePluginRequest.readonly_world",
+  );
+  const requestInput = expectJsonObject(
+    expectProperty(request, "input", "RulePluginRequest"),
+    "RulePluginRequest.input",
+  );
+  const control = expectJsonObject(
+    expectProperty(
+      requestInput,
+      "control",
+      "StageOutcomeResolveInput",
+    ),
+    "StageOutcomeResolveInput.control",
+  );
+  const clientProposal = expectJsonObject(
+    expectProperty(
+      requestInput,
+      "proposal",
+      "StageOutcomeResolveInput",
+    ),
+    "StageOutcomeResolveInput.proposal",
+  );
+  if (
+    expectString(request, "request_id", "RulePluginRequest") !==
+      input.terminal.terminal_request_id ||
+    expectString(request, "operation_kind", "RulePluginRequest") !==
+      "stage_outcome.resolve" ||
+    expectInteger(request, "basis_revision", "RulePluginRequest") !==
+      input.command.acceptedSession.worldRevision ||
+    expectString(readonlyWorld, "world_id", "WorldSnapshot") !==
+      input.command.acceptedSession.worldId ||
+    expectInteger(readonlyWorld, "world_revision", "WorldSnapshot") !==
+      input.command.acceptedSession.worldRevision ||
+    expectString(control, "binding_id", "ControlBindingRef") !==
+      input.command.acceptedSession.controlBindingId ||
+    expectString(
+      clientProposal,
+      "stage_instance_id",
+      "StageOutcomeProposal",
+    ) !== input.stageInstanceId ||
+    expectInteger(
+      clientProposal,
+      "stage_revision",
+      "StageOutcomeProposal",
+    ) !== input.stageRevision ||
+    expectString(
+      clientProposal,
+      "outcome_type",
+      "StageOutcomeProposal",
+    ) !== input.outcomeType ||
+    expectString(
+      clientProposal,
+      "evidence_digest",
+      "StageOutcomeProposal",
+    ) !== input.evidenceDigest ||
+    !jsonEquals(
+      expectProperty(
+        clientProposal,
+        "outcome",
+        "StageOutcomeProposal",
+      ),
+      input.outcome,
+    )
+  ) {
+    throw new EngineFault(
+      "command.finalizer.stage_outcome_request_mismatch",
+      "Stage outcome RulePlugin request differs from its accepted Session command",
+      {
+        session_id: input.command.sessionId,
+        command_id: input.command.commandId,
+        root_request_id: input.rootRequestId,
+        terminal_request_id:
+          input.terminal.terminal_request_id,
+      },
+    );
+  }
+}
+
 async function assertStageOutcomeCompletionHistory(input: {
   readonly client: PoolClient;
   readonly contracts: ContractValidator;
@@ -2843,29 +2973,17 @@ async function assertStageOutcomeCompletionHistory(input: {
       },
     );
   }
-  const query = await input.client.query<NavigationCompletionRow>(
-    `SELECT invocation.operation_kind,
-            invocation.invocation_status,
-            invocation.request_document,
-            invocation.proposal_id::text AS proposal_id,
-            committed.revision_after::text AS revision_after_text,
-            committed.event_document
-       FROM luoxia_engine.rule_plugin_invocations AS invocation
-       LEFT JOIN luoxia_engine.committed_events AS committed
-         ON committed.packet_id = invocation.proposal_id
-      WHERE invocation.request_id = $1::uuid`,
-    [requestId],
-  );
-  const row = requireAtMostOne(
-    query.rows,
-    "command.finalizer.database_corrupt",
-    "Stage outcome RulePlugin request lookup returned more than one row",
-    {
+  const row = await readTerminalRulePluginInvocation({
+    client: input.client,
+    rootRequestId: requestId,
+    multipleRowsMessage:
+      "Stage outcome RulePlugin request lookup returned more than one terminal row",
+    details: {
       session_id: input.command.sessionId,
       command_id: input.command.commandId,
       request_id: requestId,
     },
-  );
+  });
   if (
     row === undefined ||
     row.operation_kind !== "stage_outcome.resolve" ||
@@ -2885,86 +3003,17 @@ async function assertStageOutcomeCompletionHistory(input: {
     );
   }
 
-  const request = input.contracts.assertObject(
-    CONTRACT_REF.rulePluginRequest,
-    row.request_document,
-  ).value;
-  const readonlyWorld = expectJsonObject(
-    expectProperty(request, "readonly_world", "RulePluginRequest"),
-    "RulePluginRequest.readonly_world",
-  );
-  const requestInput = expectJsonObject(
-    expectProperty(request, "input", "RulePluginRequest"),
-    "RulePluginRequest.input",
-  );
-  const control = expectJsonObject(
-    expectProperty(
-      requestInput,
-      "control",
-      "StageOutcomeResolveInput",
-    ),
-    "StageOutcomeResolveInput.control",
-  );
-  const clientProposal = expectJsonObject(
-    expectProperty(
-      requestInput,
-      "proposal",
-      "StageOutcomeResolveInput",
-    ),
-    "StageOutcomeResolveInput.proposal",
-  );
-  if (
-    expectString(request, "request_id", "RulePluginRequest") !==
-      requestId ||
-    expectString(request, "operation_kind", "RulePluginRequest") !==
-      "stage_outcome.resolve" ||
-    expectInteger(request, "basis_revision", "RulePluginRequest") !==
-      input.command.acceptedSession.worldRevision ||
-    expectString(readonlyWorld, "world_id", "WorldSnapshot") !==
-      input.command.acceptedSession.worldId ||
-    expectInteger(readonlyWorld, "world_revision", "WorldSnapshot") !==
-      input.command.acceptedSession.worldRevision ||
-    expectString(control, "binding_id", "ControlBindingRef") !==
-      input.command.acceptedSession.controlBindingId ||
-    expectString(
-      clientProposal,
-      "stage_instance_id",
-      "StageOutcomeProposal",
-    ) !== input.stageInstanceId ||
-    expectInteger(
-      clientProposal,
-      "stage_revision",
-      "StageOutcomeProposal",
-    ) !== stageRevision ||
-    expectString(
-      clientProposal,
-      "outcome_type",
-      "StageOutcomeProposal",
-    ) !== outcomeType ||
-    expectString(
-      clientProposal,
-      "evidence_digest",
-      "StageOutcomeProposal",
-    ) !== evidenceDigest ||
-    !jsonEquals(
-      expectProperty(
-        clientProposal,
-        "outcome",
-        "StageOutcomeProposal",
-      ),
-      outcome,
-    )
-  ) {
-    throw new EngineFault(
-      "command.finalizer.stage_outcome_request_mismatch",
-      "Stage outcome RulePlugin request differs from its accepted Session command",
-      {
-        session_id: input.command.sessionId,
-        command_id: input.command.commandId,
-        request_id: requestId,
-      },
-    );
-  }
+  assertStageOutcomeTerminalRequestIdentity({
+    contracts: input.contracts,
+    command: input.command,
+    rootRequestId: requestId,
+    terminal: row,
+    stageInstanceId: input.stageInstanceId,
+    stageRevision,
+    outcomeType,
+    outcome,
+    evidenceDigest,
+  });
 
   const revisionAfter = parseSafeUnsignedInteger(
     row.revision_after_text,
@@ -3079,10 +3128,6 @@ async function assertStageOutcomeCompletionHistory(input: {
     }
     return;
   }
-  const finalState = expectJsonObject(
-    expectProperty(finalStage, "state", "StageInstanceState"),
-    "StageInstanceState.state",
-  );
   if (
     opKind !== "stage.close" ||
     expectString(finalStage, "status", "StageInstanceState") !== "closed" ||
@@ -3090,19 +3135,6 @@ async function assertStageOutcomeCompletionHistory(input: {
       outcomeType ||
     !jsonEquals(
       expectProperty(stageOp, "outcome", "StageCloseOp"),
-      outcome,
-    ) ||
-    expectString(
-      finalState,
-      "close_outcome_type",
-      "StageInstanceState.state",
-    ) !== outcomeType ||
-    !jsonEquals(
-      expectProperty(
-        finalState,
-        "close_outcome",
-        "StageInstanceState.state",
-      ),
       outcome,
     )
   ) {
@@ -3114,7 +3146,7 @@ async function assertStageOutcomeCompletionHistory(input: {
   }
 }
 
-async function assertStageOutcomeRejectionHistory(input: {
+async function assertStageOutcomeRejectionBoundary(input: {
   readonly client: PoolClient;
   readonly contracts: ContractValidator;
   readonly command: ValidatedFinalizationCommand;
@@ -3124,32 +3156,124 @@ async function assertStageOutcomeRejectionHistory(input: {
   if (requestId === undefined) {
     throw new EngineFault(
       "command.finalizer.stage_outcome_identity_missing",
-      "Stage outcome rejection requires its persisted RulePlugin request identity",
+      "Stage outcome rejection requires its persisted RulePlugin root request identity",
       {
         session_id: input.command.sessionId,
         command_id: input.command.commandId,
       },
     );
   }
-  const query = await input.client.query<NavigationRejectionRow>(
-    `SELECT operation_kind,
-            invocation_status,
-            response_document,
-            proposal_id::text AS proposal_id
-       FROM luoxia_engine.rule_plugin_invocations
-      WHERE request_id = $1::uuid`,
-    [requestId],
+  const query = await input.client.query<StageOutcomeRejectionBoundaryRow>(
+    `SELECT EXISTS (
+       SELECT 1
+         FROM luoxia_engine.rule_plugin_invocations AS invocation
+        WHERE invocation.request_id = $1::uuid
+     ) AS root_invocation_exists,
+     EXISTS (
+       SELECT 1
+         FROM luoxia_engine.committed_events AS committed
+        WHERE committed.world_id = $2::uuid
+          AND committed.revision_after > $3::bigint
+     ) AS later_committed_event_exists`,
+    [
+      requestId,
+      input.command.acceptedSession.worldId,
+      input.command.acceptedSession.worldRevision.toString(),
+    ],
   );
-  const row = requireAtMostOne(
+  const boundary = requireAtMostOne(
     query.rows,
     "command.finalizer.database_corrupt",
-    "Stage outcome RulePlugin rejection lookup returned more than one row",
+    "Stage outcome rejection boundary lookup returned more than one row",
     {
       session_id: input.command.sessionId,
       command_id: input.command.commandId,
       request_id: requestId,
     },
   );
+  if (boundary === undefined) {
+    throw new EngineFault(
+      "command.finalizer.database_corrupt",
+      "Stage outcome rejection boundary lookup returned no row",
+      {
+        session_id: input.command.sessionId,
+        command_id: input.command.commandId,
+        request_id: requestId,
+      },
+    );
+  }
+  if (boundary.later_committed_event_exists) {
+    throw new EngineFault(
+      "command.finalizer.stage_outcome_rejection_after_event",
+      "Stage outcome command cannot be rejected after its accepted world basis has a later CommittedEvent",
+      {
+        session_id: input.command.sessionId,
+        command_id: input.command.commandId,
+        world_id: input.command.acceptedSession.worldId,
+        accepted_world_revision:
+          input.command.acceptedSession.worldRevision,
+      },
+    );
+  }
+  if (boundary.root_invocation_exists) {
+    await assertStageOutcomeRejectionHistory(input);
+    return;
+  }
+  if (!isStageOutcomePreInvocationRejectionCode(input.code)) {
+    throw new EngineFault(
+      "command.finalizer.stage_outcome_rejection_history_incomplete",
+      "Stage outcome rejection without a RulePlugin root invocation requires an approved pre-invocation rejection code",
+      {
+        session_id: input.command.sessionId,
+        command_id: input.command.commandId,
+        request_id: requestId,
+        rejection_code: input.code,
+      },
+    );
+  }
+}
+
+async function assertStageOutcomeRejectionHistory(input: {
+  readonly client: PoolClient;
+  readonly contracts: ContractValidator;
+  readonly command: ValidatedFinalizationCommand;
+  readonly code: string;
+}): Promise<void> {
+  const requestId = input.command.stageOutcomeRuleRequestId;
+  const stageInstanceId = input.command.stageOutcomeId;
+  const stageRevision = input.command.stageOutcomeRevision;
+  const outcomeType = input.command.stageOutcomeType;
+  const outcome = input.command.stageOutcome;
+  const evidenceDigest = input.command.stageOutcomeEvidenceDigest;
+  if (
+    requestId === undefined ||
+    stageInstanceId === undefined ||
+    stageRevision === undefined ||
+    outcomeType === undefined ||
+    outcome === undefined ||
+    evidenceDigest === undefined
+  ) {
+    throw new EngineFault(
+      "command.finalizer.stage_outcome_identity_missing",
+      "Stage outcome rejection requires its persisted request and proposal identities",
+      {
+        session_id: input.command.sessionId,
+        command_id: input.command.commandId,
+        stage_instance_id: stageInstanceId ?? null,
+      },
+    );
+  }
+  const row = await readTerminalRulePluginInvocation({
+    client: input.client,
+    rootRequestId: requestId,
+    multipleRowsMessage:
+      "Stage outcome RulePlugin rejection lookup returned more than one terminal row",
+    details: {
+      session_id: input.command.sessionId,
+      command_id: input.command.commandId,
+      request_id: requestId,
+    },
+  });
   if (
     row === undefined ||
     row.operation_kind !== "stage_outcome.resolve" ||
@@ -3167,6 +3291,17 @@ async function assertStageOutcomeRejectionHistory(input: {
       },
     );
   }
+  assertStageOutcomeTerminalRequestIdentity({
+    contracts: input.contracts,
+    command: input.command,
+    rootRequestId: requestId,
+    terminal: row,
+    stageInstanceId,
+    stageRevision,
+    outcomeType,
+    outcome,
+    evidenceDigest,
+  });
   const response = input.contracts.assertObject(
     CONTRACT_REF.rulePluginResponse,
     row.response_document,
@@ -3177,7 +3312,7 @@ async function assertStageOutcomeRejectionHistory(input: {
   );
   if (
     expectString(response, "request_id", "RulePluginResponse") !==
-      requestId ||
+      row.terminal_request_id ||
     expectString(
       response,
       "operation_kind",
@@ -3196,7 +3331,8 @@ async function assertStageOutcomeRejectionHistory(input: {
       {
         session_id: input.command.sessionId,
         command_id: input.command.commandId,
-        request_id: requestId,
+        root_request_id: requestId,
+        terminal_request_id: row.terminal_request_id,
         rejection_code: input.code,
       },
     );
@@ -4049,7 +4185,6 @@ function validateFinalizationCommandRow(
     eventCardId: eventCard.eventCardId,
     eventCardPacketId: eventCard.packetId,
     eventCardBranch: eventCard.branch,
-    eventCardOpenedStageIds: eventCard.openedStageInstanceIds,
     navigationRuleRequestId:
       row.navigation_rule_request_id === null
         ? undefined
@@ -4254,7 +4389,6 @@ function readEventCardCommitIdentity(
   readonly eventCardId: string | undefined;
   readonly packetId: string | undefined;
   readonly branch: EventCardCompletionBranch | undefined;
-  readonly openedStageInstanceIds: readonly string[];
 } {
   if (commandKind !== "event_card.trigger") {
     if (row.event_card_committed_event_document !== null) {
@@ -4272,7 +4406,6 @@ function readEventCardCommitIdentity(
       eventCardId: undefined,
       packetId: undefined,
       branch: undefined,
-      openedStageInstanceIds: Object.freeze([]),
     });
   }
 
@@ -4294,7 +4427,6 @@ function readEventCardCommitIdentity(
       eventCardId,
       packetId,
       branch: undefined,
-      openedStageInstanceIds: Object.freeze([]),
     });
   }
 
@@ -4398,31 +4530,10 @@ function readEventCardCommitIdentity(
       },
     );
   }
-  const openedStageInstanceIds =
-    branch === "trigger"
-      ? Object.freeze(
-          ops
-            .slice(0, -1)
-            .filter(
-              (op) =>
-                expectString(op, "op", "EventOutcomeOp") ===
-                  "stage.open" &&
-                stageOpenIncludesPlayer(
-                  op,
-                  acceptedSession.worldId,
-                  acceptedSession.playerEntityId,
-                ),
-            )
-            .map((op) =>
-              expectString(op, "stage_instance_id", "StageOpenOp"),
-            ),
-        )
-      : Object.freeze([]);
   return Object.freeze({
     eventCardId,
     packetId,
     branch,
-    openedStageInstanceIds,
   });
 }
 
@@ -4431,14 +4542,315 @@ function stageOpenIncludesPlayer(
   worldId: string,
   playerEntityId: string,
 ): boolean {
+  return participantsIncludePlayer(
+    op,
+    "StageOpenOp",
+    worldId,
+    playerEntityId,
+  );
+}
+
+function participantsIncludePlayer(
+  record: JsonObject,
+  scope: string,
+  worldId: string,
+  playerEntityId: string,
+): boolean {
   return asObjectArray(
-    expectProperty(op, "participants", "StageOpenOp"),
-    "StageOpenOp.participants",
+    expectProperty(record, "participants", scope),
+    `${scope}.participants`,
   ).some(
     (participant) =>
       expectString(participant, "world_id", "EntityRef") === worldId &&
       expectString(participant, "entity_id", "EntityRef") ===
         playerEntityId,
+  );
+}
+
+async function readCommandStageOpenProjectionIds(input: {
+  readonly client: PoolClient;
+  readonly contracts: ContractValidator;
+  readonly command: ValidatedFinalizationCommand;
+  readonly finalWorldRevision: number;
+}): Promise<readonly string[]> {
+  const acceptedRevision = input.command.acceptedSession.worldRevision;
+  if (input.finalWorldRevision < acceptedRevision) {
+    throw new EngineFault(
+      "command.finalizer.committed_event_range_invalid",
+      "Command final world revision cannot precede its accepted revision",
+      {
+        session_id: input.command.sessionId,
+        command_id: input.command.commandId,
+        accepted_world_revision: acceptedRevision,
+        final_world_revision: input.finalWorldRevision,
+      },
+    );
+  }
+  const expectedCount = input.finalWorldRevision - acceptedRevision;
+  const query = await input.client.query<CommittedEventHistoryRow>(
+    `SELECT revision_after::text AS revision_after_text,
+            event_document
+       FROM luoxia_engine.committed_events
+      WHERE world_id = $1::uuid
+        AND revision_after > $2::bigint
+        AND revision_after <= $3::bigint
+      ORDER BY revision_after`,
+    [
+      input.command.acceptedSession.worldId,
+      acceptedRevision.toString(),
+      input.finalWorldRevision.toString(),
+    ],
+  );
+  if (query.rows.length !== expectedCount) {
+    throw new EngineFault(
+      "command.finalizer.committed_event_range_incomplete",
+      "Command completion requires one contiguous CommittedEvent per world revision",
+      {
+        session_id: input.command.sessionId,
+        command_id: input.command.commandId,
+        accepted_world_revision: acceptedRevision,
+        final_world_revision: input.finalWorldRevision,
+        expected_count: expectedCount,
+        actual_count: query.rows.length,
+      },
+    );
+  }
+
+  const openedStageIds = new Set<string>();
+  let contentUpgradeProjectionIds:
+    | readonly string[]
+    | undefined;
+  for (const [index, row] of query.rows.entries()) {
+    const expectedRevisionAfter = acceptedRevision + index + 1;
+    const revisionAfter = parseSafeUnsignedInteger(
+      row.revision_after_text,
+      "command.finalizer.database_corrupt",
+      "CommittedEvent revision",
+      {
+        session_id: input.command.sessionId,
+        command_id: input.command.commandId,
+        revision_after: row.revision_after_text,
+      },
+    );
+    const event = input.contracts.assertObject(
+      CONTRACT_REF.committedEvent,
+      row.event_document,
+    ).value;
+    const packet = expectJsonObject(
+      expectProperty(event, "packet", "CommittedEvent"),
+      "CommittedEvent.packet",
+    );
+    if (
+      revisionAfter !== expectedRevisionAfter ||
+      expectString(event, "world_id", "CommittedEvent") !==
+        input.command.acceptedSession.worldId ||
+      expectInteger(event, "revision_before", "CommittedEvent") !==
+        expectedRevisionAfter - 1 ||
+      expectInteger(event, "revision_after", "CommittedEvent") !==
+        expectedRevisionAfter ||
+      expectString(packet, "world_id", "ContentPacket") !==
+        input.command.acceptedSession.worldId ||
+      expectInteger(packet, "basis_revision", "ContentPacket") !==
+        expectedRevisionAfter - 1
+    ) {
+      throw new EngineFault(
+        "command.finalizer.committed_event_range_mismatch",
+        "CommittedEvent history is not contiguous with the accepted command boundary",
+        {
+          session_id: input.command.sessionId,
+          command_id: input.command.commandId,
+          expected_revision_after: expectedRevisionAfter,
+          actual_revision_after: revisionAfter,
+        },
+      );
+    }
+    const ops = asObjectArray(
+      expectProperty(packet, "ops", "ContentPacket"),
+      "ContentPacket.ops",
+    );
+    if (input.command.commandKind === "content_upgrade.accept") {
+      if (
+        expectedCount !== 1 ||
+        contentUpgradeProjectionIds !== undefined
+      ) {
+        throw new EngineFault(
+          "command.finalizer.content_upgrade_event_range_invalid",
+          "Content Upgrade completion must own exactly one committed event",
+          {
+            session_id: input.command.sessionId,
+            command_id: input.command.commandId,
+            expected_event_count: 1,
+            actual_event_count: expectedCount,
+          },
+        );
+      }
+      contentUpgradeProjectionIds =
+        readContentUpgradeStageOpenProjectionIds({
+          contracts: input.contracts,
+          command: input.command,
+          packet,
+          ops,
+          eventRevision: expectedRevisionAfter,
+        });
+      continue;
+    }
+    for (const op of ops) {
+      const opKind = expectString(op, "op", "EffectOp");
+      if (
+        opKind === "stage.open" &&
+        stageOpenIncludesPlayer(
+          op,
+          input.command.acceptedSession.worldId,
+          input.command.acceptedSession.playerEntityId,
+        )
+      ) {
+        openedStageIds.add(
+          expectString(op, "stage_instance_id", "StageOpenOp"),
+        );
+        continue;
+      }
+      if (opKind === "stage.close") {
+        openedStageIds.delete(
+          expectString(op, "stage_instance_id", "StageCloseOp"),
+        );
+      }
+    }
+  }
+  if (input.command.commandKind === "content_upgrade.accept") {
+    if (contentUpgradeProjectionIds === undefined) {
+      throw new EngineFault(
+        "command.finalizer.content_upgrade_event_missing",
+        "Content Upgrade completion has no authoritative candidate SaveEnvelope event",
+        {
+          session_id: input.command.sessionId,
+          command_id: input.command.commandId,
+        },
+      );
+    }
+    return contentUpgradeProjectionIds;
+  }
+  return sortedStageInstanceIds(openedStageIds);
+}
+
+function readContentUpgradeStageOpenProjectionIds(input: {
+  readonly contracts: ContractValidator;
+  readonly command: ValidatedFinalizationCommand;
+  readonly packet: JsonObject;
+  readonly ops: readonly JsonObject[];
+  readonly eventRevision: number;
+}): readonly string[] {
+  const upgradeCommandId = input.command.contentUpgradeCommandId;
+  const migrationId = input.command.contentUpgradeMigrationId;
+  const op = input.ops.length === 1 ? input.ops[0] : undefined;
+  if (
+    upgradeCommandId === undefined ||
+    migrationId === undefined ||
+    op === undefined ||
+    expectString(op, "op", "ContentUpgradeApplyOp") !==
+      "content_upgrade.apply"
+  ) {
+    throw new EngineFault(
+      "command.finalizer.content_upgrade_projection_identity_invalid",
+      "Content Upgrade StageOpen projection requires one exact content_upgrade.apply operation",
+      {
+        session_id: input.command.sessionId,
+        command_id: input.command.commandId,
+        upgrade_command_id: upgradeCommandId ?? null,
+        migration_id: migrationId ?? null,
+        operation_count: input.ops.length,
+      },
+    );
+  }
+  const source = expectJsonObject(
+    expectProperty(input.packet, "source", "ContentPacket"),
+    "ContentPacket.source",
+  );
+  const candidateSaveDocument = input.contracts.assertObject(
+    CONTRACT_REF.saveEnvelope,
+    expectProperty(op, "candidate_save", "ContentUpgradeApplyOp"),
+  );
+  assertSaveEnvelopeRelationships(
+    input.contracts,
+    candidateSaveDocument,
+  );
+  const candidateSave = candidateSaveDocument.value;
+  const candidateWorldState = expectJsonObject(
+    expectProperty(candidateSave, "world_state", "SaveEnvelope"),
+    "SaveEnvelope.world_state",
+  );
+  if (
+    expectString(input.packet, "packet_id", "ContentPacket") !==
+      upgradeCommandId ||
+    expectString(input.packet, "cause_id", "ContentPacket") !==
+      migrationId ||
+    expectString(source, "source_kind", "PacketSource") !==
+      "content_upgrade" ||
+    expectString(
+      source,
+      "upgrade_command_id",
+      "PacketSource",
+    ) !== upgradeCommandId ||
+    expectString(source, "migration_id", "PacketSource") !==
+      migrationId ||
+    expectString(candidateSave, "world_id", "SaveEnvelope") !==
+      input.command.acceptedSession.worldId ||
+    expectInteger(
+      candidateSave,
+      "world_revision",
+      "SaveEnvelope",
+    ) !== input.eventRevision
+  ) {
+    throw new EngineFault(
+      "command.finalizer.content_upgrade_projection_identity_mismatch",
+      "Content Upgrade candidate SaveEnvelope differs from its committed event identity",
+      {
+        session_id: input.command.sessionId,
+        command_id: input.command.commandId,
+        upgrade_command_id: upgradeCommandId,
+        migration_id: migrationId,
+        event_revision: input.eventRevision,
+      },
+    );
+  }
+
+  const openPlayerStageIds = new Set<string>();
+  for (const stage of asObjectArray(
+    expectProperty(
+      candidateWorldState,
+      "stage_instances",
+      "WorldState",
+    ),
+    "WorldState.stage_instances",
+  )) {
+    if (
+      expectString(stage, "status", "StageInstanceState") ===
+        "open" &&
+      participantsIncludePlayer(
+        stage,
+        "StageInstanceState",
+        input.command.acceptedSession.worldId,
+        input.command.acceptedSession.playerEntityId,
+      )
+    ) {
+      openPlayerStageIds.add(
+        expectString(
+          stage,
+          "stage_instance_id",
+          "StageInstanceState",
+        ),
+      );
+    }
+  }
+  return sortedStageInstanceIds(openPlayerStageIds);
+}
+
+function sortedStageInstanceIds(
+  stageInstanceIds: ReadonlySet<string>,
+): readonly string[] {
+  return Object.freeze(
+    [...stageInstanceIds].sort((left, right) =>
+      left < right ? -1 : left > right ? 1 : 0,
+    ),
   );
 }
 
@@ -4474,6 +4886,304 @@ function invalidEventCardCommittedBranch(
       op_count: opCount,
     },
   );
+}
+
+async function readCompletedFinalWorldRevision(
+  client: PoolClient,
+  contracts: ContractValidator,
+  command: ValidatedFinalizationCommand,
+): Promise<number> {
+  const acceptedRevision = command.acceptedSession.worldRevision;
+  if (
+    command.commandKind === "dialogue.start" ||
+    command.commandKind === "dialogue.continue"
+  ) {
+    const proposalRows = await readDialogueProposalHistoryRows({
+      client,
+      contracts,
+      command,
+    });
+    return checkedFinalWorldRevision(
+      command,
+      acceptedRevision +
+        DIALOGUE_PACKET_COUNT +
+        proposalRows.filter(
+          (row) => row.packet_proposal_id !== null,
+        ).length,
+    );
+  }
+  if (command.commandKind === "player_day.end") {
+    return readCompletedPlayerDayFinalWorldRevision({
+      client,
+      contracts,
+      command,
+    });
+  }
+  return checkedFinalWorldRevision(command, acceptedRevision + 1);
+}
+
+function checkedFinalWorldRevision(
+  command: ValidatedFinalizationCommand,
+  revision: number,
+): number {
+  if (
+    !Number.isSafeInteger(revision) ||
+    revision < command.acceptedSession.worldRevision
+  ) {
+    throw new EngineFault(
+      "command.finalizer.completed_world_revision_invalid",
+      "Completed command world revision cannot be reconstructed safely",
+      {
+        session_id: command.sessionId,
+        command_id: command.commandId,
+        accepted_world_revision:
+          command.acceptedSession.worldRevision,
+        reconstructed_world_revision: revision,
+      },
+    );
+  }
+  return revision;
+}
+
+async function readCompletedPlayerDayFinalWorldRevision(input: {
+  readonly client: PoolClient;
+  readonly contracts: ContractValidator;
+  readonly command: ValidatedFinalizationCommand;
+}): Promise<number> {
+  const fromDay = input.command.playerDayFromDay;
+  if (
+    fromDay === undefined ||
+    fromDay >= Number.MAX_SAFE_INTEGER
+  ) {
+    throw new EngineFault(
+      "command.finalizer.database_corrupt",
+      "Completed player-day command is missing a valid source day",
+      {
+        session_id: input.command.sessionId,
+        command_id: input.command.commandId,
+        from_day: fromDay ?? null,
+      },
+    );
+  }
+  const settledDay = fromDay + 1;
+  const identityQuery =
+    await input.client.query<DayCycleExecutionIdentityRow>(
+      `SELECT execution_id::text AS execution_id
+         FROM luoxia_engine.day_cycle_execution_identities
+        WHERE world_id = $1::uuid
+          AND day = $2::bigint
+          AND execution_kind = 'transition.director_to_player'
+          AND subject_id IS NULL`,
+      [
+        input.command.acceptedSession.worldId,
+        settledDay.toString(),
+      ],
+    );
+  const identity = requireAtMostOne(
+    identityQuery.rows,
+    "command.finalizer.database_corrupt",
+    "Player-day terminal transition identity is not unique",
+    {
+      session_id: input.command.sessionId,
+      command_id: input.command.commandId,
+      world_id: input.command.acceptedSession.worldId,
+      day: settledDay,
+    },
+  );
+  if (identity === undefined) {
+    throw new EngineFault(
+      "command.finalizer.player_day_history_incomplete",
+      "Completed player-day command has no terminal transition identity",
+      {
+        session_id: input.command.sessionId,
+        command_id: input.command.commandId,
+        world_id: input.command.acceptedSession.worldId,
+        day: settledDay,
+      },
+    );
+  }
+  const rootRequestId = assertUuid(
+    input.contracts,
+    identity.execution_id,
+  );
+  const terminal = await readTerminalRulePluginInvocation({
+    client: input.client,
+    rootRequestId,
+    multipleRowsMessage:
+      "Player-day terminal transition returned more than one terminal RulePlugin invocation",
+    details: {
+      session_id: input.command.sessionId,
+      command_id: input.command.commandId,
+      root_request_id: rootRequestId,
+    },
+  });
+  if (
+    terminal === undefined ||
+    terminal.operation_kind !== "day_cycle.advance" ||
+    terminal.invocation_status !== "resolved" ||
+    terminal.proposal_id === null ||
+    terminal.revision_after_text === null ||
+    terminal.event_document === null
+  ) {
+    throw new EngineFault(
+      "command.finalizer.player_day_history_incomplete",
+      "Completed player-day command has no committed terminal transition",
+      {
+        session_id: input.command.sessionId,
+        command_id: input.command.commandId,
+        root_request_id: rootRequestId,
+      },
+    );
+  }
+
+  const request = input.contracts.assertObject(
+    CONTRACT_REF.rulePluginRequest,
+    terminal.request_document,
+  ).value;
+  const requestInput = expectJsonObject(
+    expectProperty(request, "input", "RulePluginRequest"),
+    "RulePluginRequest.input",
+  );
+  const control = expectJsonObject(
+    expectProperty(
+      requestInput,
+      "control",
+      "DayCycleAdvanceInput",
+    ),
+    "DayCycleAdvanceInput.control",
+  );
+  const readonlyWorld = expectJsonObject(
+    expectProperty(
+      request,
+      "readonly_world",
+      "RulePluginRequest",
+    ),
+    "RulePluginRequest.readonly_world",
+  );
+  const event = input.contracts.assertObject(
+    CONTRACT_REF.committedEvent,
+    terminal.event_document,
+  ).value;
+  const packet = expectJsonObject(
+    expectProperty(event, "packet", "CommittedEvent"),
+    "CommittedEvent.packet",
+  );
+  const source = expectJsonObject(
+    expectProperty(packet, "source", "ContentPacket"),
+    "ContentPacket.source",
+  );
+  const transitions = asObjectArray(
+    expectProperty(packet, "ops", "ContentPacket"),
+    "ContentPacket.ops",
+  ).filter(
+    (op) =>
+      expectString(op, "op", "EffectOp") ===
+      "day_cycle.transition",
+  );
+  const transition =
+    transitions.length === 1 ? transitions[0] : undefined;
+  const revisionAfter = parseSafeUnsignedInteger(
+    terminal.revision_after_text,
+    "command.finalizer.database_corrupt",
+    "Player-day terminal committed event revision",
+    {
+      session_id: input.command.sessionId,
+      command_id: input.command.commandId,
+      revision_after: terminal.revision_after_text,
+    },
+  );
+  const revisionBefore = revisionAfter - 1;
+  if (
+    revisionAfter <= input.command.acceptedSession.worldRevision ||
+    expectString(request, "request_id", "RulePluginRequest") !==
+      terminal.terminal_request_id ||
+    expectString(
+      request,
+      "operation_kind",
+      "RulePluginRequest",
+    ) !== "day_cycle.advance" ||
+    expectInteger(request, "basis_revision", "RulePluginRequest") !==
+      revisionBefore ||
+    expectString(readonlyWorld, "world_id", "WorldSnapshot") !==
+      input.command.acceptedSession.worldId ||
+    expectInteger(
+      readonlyWorld,
+      "world_revision",
+      "WorldSnapshot",
+    ) !== revisionBefore ||
+    expectInteger(
+      requestInput,
+      "from_day",
+      "DayCycleAdvanceInput",
+    ) !== settledDay ||
+    expectString(
+      requestInput,
+      "from_phase",
+      "DayCycleAdvanceInput",
+    ) !== "director_settlement" ||
+    expectInteger(
+      requestInput,
+      "to_day",
+      "DayCycleAdvanceInput",
+    ) !== settledDay ||
+    expectString(
+      requestInput,
+      "to_phase",
+      "DayCycleAdvanceInput",
+    ) !== "player" ||
+    expectString(control, "binding_id", "ControlBindingRef") !==
+      input.command.acceptedSession.controlBindingId ||
+    expectString(event, "world_id", "CommittedEvent") !==
+      input.command.acceptedSession.worldId ||
+    expectInteger(event, "revision_before", "CommittedEvent") !==
+      revisionBefore ||
+    expectInteger(event, "revision_after", "CommittedEvent") !==
+      revisionAfter ||
+    expectString(packet, "packet_id", "ContentPacket") !==
+      terminal.proposal_id ||
+    expectString(packet, "world_id", "ContentPacket") !==
+      input.command.acceptedSession.worldId ||
+    expectInteger(packet, "basis_revision", "ContentPacket") !==
+      revisionBefore ||
+    expectString(source, "source_kind", "PacketSource") !==
+      "rule_plugin" ||
+    expectString(source, "proposal_id", "PacketSource") !==
+      terminal.proposal_id ||
+    transition === undefined ||
+    expectInteger(
+      transition,
+      "from_day",
+      "DayCycleTransitionOp",
+    ) !== settledDay ||
+    expectString(
+      transition,
+      "from_phase",
+      "DayCycleTransitionOp",
+    ) !== "director_settlement" ||
+    expectInteger(
+      transition,
+      "to_day",
+      "DayCycleTransitionOp",
+    ) !== settledDay ||
+    expectString(
+      transition,
+      "to_phase",
+      "DayCycleTransitionOp",
+    ) !== "player"
+  ) {
+    throw new EngineFault(
+      "command.finalizer.player_day_history_mismatch",
+      "Player-day terminal transition differs from its persisted command boundary",
+      {
+        session_id: input.command.sessionId,
+        command_id: input.command.commandId,
+        root_request_id: rootRequestId,
+        terminal_request_id: terminal.terminal_request_id,
+        revision_after: revisionAfter,
+      },
+    );
+  }
+  return checkedFinalWorldRevision(input.command, revisionAfter);
 }
 
 async function readCompletedEnvelopes(
@@ -4523,6 +5233,20 @@ async function readCompletedEnvelopes(
       },
     );
   }
+  const stageOpenProjectionIds =
+    actualStatus === "accepted"
+      ? await readCommandStageOpenProjectionIds({
+          client,
+          contracts,
+          command,
+          finalWorldRevision:
+            await readCompletedFinalWorldRevision(
+              client,
+              contracts,
+              command,
+            ),
+        })
+      : Object.freeze([]);
   const query = await client.query<ServerEnvelopeRow>(
     `SELECT response_ordinal::text AS response_ordinal_text,
             server_sequence::text AS server_sequence_text,
@@ -4538,6 +5262,7 @@ async function readCompletedEnvelopes(
   const expectedTypes = expectedCompletedMessageTypes(
     command,
     actualStatus,
+    stageOpenProjectionIds,
   );
   if (query.rows.length !== expectedTypes.length) {
     throw new EngineFault(
@@ -4620,6 +5345,49 @@ async function readCompletedEnvelopes(
     previousSequence = sequence;
     return envelope;
   });
+  const persistedStageOpenProjectionIds = envelopes.flatMap(
+    (envelope) => {
+      const message = expectJsonObject(
+        expectProperty(
+          envelope.value,
+          "message",
+          "ServerEnvelope",
+        ),
+        "ServerEnvelope.message",
+      );
+      return expectString(message, "type", "ServerMessage") ===
+        "stage.open"
+        ? [
+            expectString(
+              message,
+              "stage_instance_id",
+              "StageOpen",
+            ),
+          ]
+        : [];
+    },
+  );
+  if (
+    persistedStageOpenProjectionIds.length !==
+      stageOpenProjectionIds.length ||
+    persistedStageOpenProjectionIds.some(
+      (stageInstanceId, index) =>
+        stageInstanceId !== stageOpenProjectionIds[index],
+    )
+  ) {
+    throw new EngineFault(
+      "command.finalizer.database_corrupt",
+      "Persisted StageOpen outbox differs from committed command history",
+      {
+        session_id: command.sessionId,
+        command_id: command.commandId,
+        expected_stage_instance_ids:
+          stageOpenProjectionIds,
+        actual_stage_instance_ids:
+          persistedStageOpenProjectionIds,
+      },
+    );
+  }
   const resultMessage = expectJsonObject(
     expectProperty(
       (envelopes[envelopes.length - 1] as ServerEnvelopeDocument).value,
@@ -4644,27 +5412,36 @@ async function readCompletedEnvelopes(
 function expectedCompletedMessageTypes(
   command: ValidatedFinalizationCommand,
   status: "accepted" | "rejected",
+  stageOpenProjectionIds: readonly string[],
 ): readonly string[] {
   if (status === "rejected") {
     return ["session.view", "command.result"];
   }
+  const stageOpenTypes = stageOpenProjectionIds.map(
+    () => "stage.open",
+  );
   if (
     command.commandKind === "dialogue.start" ||
     command.commandKind === "dialogue.continue"
   ) {
-    return ["dialogue.reply", "session.view", "command.result"];
+    return [
+      "dialogue.reply",
+      "session.view",
+      ...stageOpenTypes,
+      "command.result",
+    ];
   }
   if (command.commandKind === "player_day.end") {
-    return ["session.view", "command.result"];
+    return ["session.view", ...stageOpenTypes, "command.result"];
   }
   if (command.commandKind === "map.move") {
-    return ["session.view", "command.result"];
+    return ["session.view", ...stageOpenTypes, "command.result"];
   }
   if (command.commandKind === "dialogue.close") {
-    return ["session.view", "command.result"];
+    return ["session.view", ...stageOpenTypes, "command.result"];
   }
   if (command.commandKind === "content_upgrade.accept") {
-    return ["session.view", "command.result"];
+    return ["session.view", ...stageOpenTypes, "command.result"];
   }
   if (command.commandKind === "stage.outcome_proposal") {
     if (command.stageOutcomeId === undefined) {
@@ -4677,18 +5454,23 @@ function expectedCompletedMessageTypes(
         },
       );
     }
-    return ["session.view", "stage.outcome", "command.result"];
+    return [
+      "session.view",
+      ...stageOpenTypes,
+      "stage.outcome",
+      "command.result",
+    ];
   }
   if (command.eventCardBranch === "trigger") {
     return [
       "session.view",
-      ...command.eventCardOpenedStageIds.map(() => "stage.open"),
+      ...stageOpenTypes,
       "presentation.frame",
       "command.result",
     ];
   }
   if (command.eventCardBranch === "invalidate") {
-    return ["session.view", "command.result"];
+    return ["session.view", ...stageOpenTypes, "command.result"];
   }
   throw new EngineFault(
     "command.finalizer.database_corrupt",

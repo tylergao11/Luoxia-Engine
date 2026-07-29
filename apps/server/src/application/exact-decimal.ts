@@ -1,4 +1,7 @@
-import { EngineFault } from "@luoxia/contracts-runtime";
+import {
+  EngineFault,
+  type ValidatedDecimalStringComparer,
+} from "@luoxia/contracts-runtime";
 
 /**
  * Internal exact decimal: coefficient × 10^(-scale).
@@ -170,6 +173,22 @@ export class ExactDecimal {
     const delta = targetScale - this.#scale;
     return this.#coefficient * pow10(delta);
   }
+}
+
+export function createExactDecimalStringComparer(): ValidatedDecimalStringComparer {
+  return Object.freeze({
+    compare(left: string, right: string): -1 | 0 | 1 {
+      return ExactDecimal.fromValidatedDecimalString(
+        left,
+        "ContentBundle decimal value",
+      ).compare(
+        ExactDecimal.fromValidatedDecimalString(
+          right,
+          "ContentBundle decimal bound",
+        ),
+      );
+    },
+  });
 }
 
 function isDigit(code: number): boolean {

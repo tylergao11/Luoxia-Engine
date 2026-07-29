@@ -731,12 +731,58 @@
       "additionalProperties": false,
       "required": [
         "binding_id",
+        "subject",
         "slot_id",
         "asset"
       ],
       "properties": {
         "binding_id": {
           "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "subject": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "world_id"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "world"
+                },
+                "world_id": {
+                  "$ref": "common.v1.schema.json#/$defs/Uuid"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "entity"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "entity"
+                },
+                "entity": {
+                  "allOf": [
+                    {
+                      "$ref": "common.v1.schema.json#/$defs/EntityRef"
+                    },
+                    {
+                      "required": [
+                        "expected_revision"
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          ]
         },
         "slot_id": {
           "$ref": "common.v1.schema.json#/$defs/Identifier"
@@ -778,6 +824,13 @@
           "$ref": "common.v1.schema.json#/$defs/JsonObject"
         }
       }
+    },
+    "StageOutcomeTransitionKind": {
+      "enum": [
+        "stage.update",
+        "stage.close.completion",
+        "stage.close.non_completion"
+      ]
     },
     "StageModuleManifest": {
       "type": "object",
@@ -838,7 +891,7 @@
               "scene_id",
               "slot_ids",
               "input_types",
-              "outcome_types"
+              "outcomes"
             ],
             "properties": {
               "scene_id": {
@@ -858,11 +911,22 @@
                   "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
                 }
               },
-              "outcome_types": {
-                "type": "array",
-                "uniqueItems": true,
-                "items": {
+              "outcomes": {
+                "type": "object",
+                "minProperties": 1,
+                "propertyNames": {
                   "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+                },
+                "additionalProperties": {
+                  "$ref": "#/$defs/StageOutcomeTransitionKind"
+                },
+                "not": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "not": {
+                      "const": "stage.close.completion"
+                    }
+                  }
                 }
               }
             }

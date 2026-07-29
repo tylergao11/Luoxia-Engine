@@ -29,6 +29,7 @@ import {
   type AssetProviderRegistry,
   type RegisteredAssetProvider,
 } from "./asset-provider-registry.js";
+import { createExactDecimalStringComparer } from "./exact-decimal.js";
 import type { ModelProvider } from "./model-gateway.js";
 import type { RulePluginDependencyIdentity } from "./rule-plugin-abi.js";
 import type { RulePluginModuleV1 } from "./rule-plugin-abi.js";
@@ -216,7 +217,10 @@ export async function createRuntimeContentActivation(
   const loader = new ContentBundleLoader(
     input.contracts,
     input.digest,
-    createContentBundleSemanticGate(),
+    createContentBundleSemanticGate({
+      contracts: input.contracts,
+      decimalComparer: createExactDecimalStringComparer(),
+    }),
   );
 
   const records: LoadedBundleRecord[] = [];
