@@ -11,6 +11,9 @@
     },
     {
       "$ref": "#/$defs/RulePluginResponse"
+    },
+    {
+      "$ref": "#/$defs/ChoiceResolutionEvidence"
     }
   ],
   "$defs": {
@@ -176,8 +179,13 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "issuer",
         "upgrade_command_id",
+        "world_id",
+        "migration_id",
         "requested_by_actor_id",
+        "source_world_revision",
+        "source_save_digest",
         "source_bundle_digest",
         "target_bundle_digest",
         "decision",
@@ -188,11 +196,27 @@
         "authorization_digest"
       ],
       "properties": {
+        "issuer": {
+          "const": "world_core"
+        },
         "upgrade_command_id": {
           "$ref": "common.v1.schema.json#/$defs/Uuid"
         },
+        "world_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "migration_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
         "requested_by_actor_id": {
           "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "source_world_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "source_save_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
         },
         "source_bundle_digest": {
           "$ref": "common.v1.schema.json#/$defs/Sha256"
@@ -215,11 +239,13 @@
           "format": "date-time"
         },
         "authorization_token": {
+          "description": "Versioned MAC issued by World Core over authorization_digest using the deployment-owned Content Upgrade keyring.",
           "type": "string",
           "minLength": 32,
           "maxLength": 512
         },
         "authorization_digest": {
+          "description": "Lowercase SHA-256 of the RFC 8785 canonical UTF-8 bytes of this UpgradeAuthorization object with authorization_token and authorization_digest omitted.",
           "$ref": "common.v1.schema.json#/$defs/Sha256"
         }
       }
@@ -228,6 +254,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "migration_id",
         "source_bundle",
         "target_bundle",
         "source_save",
@@ -235,6 +262,9 @@
         "authorization"
       ],
       "properties": {
+        "migration_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
         "source_bundle": {
           "$ref": "common.v1.schema.json#/$defs/PackLock"
         },
@@ -246,38 +276,9 @@
         },
         "declared_mapping": {
           "type": "array",
+          "uniqueItems": true,
           "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "catalog_kind",
-              "source_id",
-              "target_id"
-            ],
-            "properties": {
-              "catalog_kind": {
-                "enum": [
-                  "type",
-                  "definition",
-                  "entity",
-                  "relation",
-                  "capability",
-                  "world_law",
-                  "generation_archetype",
-                  "prompt",
-                  "art_profile",
-                  "materialization_profile",
-                  "asset",
-                  "binding"
-                ]
-              },
-              "source_id": {
-                "$ref": "common.v1.schema.json#/$defs/Identifier"
-              },
-              "target_id": {
-                "$ref": "common.v1.schema.json#/$defs/Identifier"
-              }
-            }
+            "$ref": "content-bundle.v1.schema.json#/$defs/ContentUpgradeIdMapping"
           }
         },
         "authorization": {
@@ -656,6 +657,7 @@
         "options": {
           "type": "array",
           "minItems": 2,
+          "maxItems": 256,
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -669,13 +671,67 @@
               },
               "weight": {
                 "type": "integer",
-                "minimum": 1
+                "minimum": 1,
+                "maximum": 2147483647
               },
               "payload": {
                 "$ref": "common.v1.schema.json#/$defs/JsonObject"
               }
             }
           }
+        }
+      }
+    },
+    "ChoiceResolutionEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "record_type",
+        "algorithm",
+        "parent_request_id",
+        "continuation_request_id",
+        "choice_spec_digest",
+        "choice_id",
+        "option_id",
+        "entropy_reveal",
+        "entropy_commitment",
+        "deterministic_context"
+      ],
+      "properties": {
+        "contract_version": {
+          "const": "rule-plugin.v1"
+        },
+        "record_type": {
+          "const": "rule_plugin.choice_resolution"
+        },
+        "algorithm": {
+          "const": "sha256_rejection_v1"
+        },
+        "parent_request_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "continuation_request_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "choice_spec_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "choice_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "option_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "entropy_reveal": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "entropy_commitment": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "deterministic_context": {
+          "$ref": "common.v1.schema.json#/$defs/DeterministicContext"
         }
       }
     },
@@ -748,6 +804,7 @@
       "additionalProperties": false,
       "required": [
         "output_kind",
+        "migration_id",
         "source_bundle_digest",
         "target_bundle_digest",
         "upgrade_command_id",
@@ -759,6 +816,9 @@
       "properties": {
         "output_kind": {
           "const": "content_upgrade.candidate"
+        },
+        "migration_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
         },
         "source_bundle_digest": {
           "$ref": "common.v1.schema.json#/$defs/Sha256"
@@ -2197,9 +2257,6 @@
       "oneOf": [
         {
           "$ref": "#/$defs/RejectOutput"
-        },
-        {
-          "$ref": "#/$defs/ChoiceSpec"
         },
         {
           "$ref": "#/$defs/ValidationOutput"

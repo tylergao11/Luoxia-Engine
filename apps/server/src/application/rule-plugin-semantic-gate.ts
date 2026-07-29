@@ -1,5 +1,7 @@
 import {
+  CONTRACT_REF,
   EngineFault,
+  assertSaveEnvelopeRelationships,
   expectInteger,
   expectJsonObject,
   expectProperty,
@@ -8,7 +10,11 @@ import {
   type JsonDigest,
   type JsonObject,
   type JsonValue,
+  type ContractValidator,
 } from "@luoxia/contracts-runtime";
+import type {
+  ContentUpgradeAuthorizationAuthority,
+} from "@luoxia/world-core";
 
 import type {
   RulePluginRequestDocument,
@@ -39,6 +45,7 @@ const OPERATION_KINDS = [
 type OperationKind = (typeof OPERATION_KINDS)[number];
 
 interface OperationContext {
+  readonly contracts: ContractValidator;
   readonly request: RulePluginRequestDocument;
   readonly response: RulePluginResponseDocument;
   readonly digest: JsonDigest;
@@ -62,17 +69,35 @@ interface EvidenceContext {
 
 type OperationHandler = (context: OperationContext) => void;
 
+export interface RulePluginContentUpgradeClock {
+  now(): string;
+}
+
+export interface RulePluginSemanticGateDependencies {
+  readonly contracts: ContractValidator;
+  readonly digest: JsonDigest;
+  readonly contentUpgradeAuthorizations: ContentUpgradeAuthorizationAuthority;
+  readonly contentUpgradeClock: RulePluginContentUpgradeClock;
+}
+
 export function createRulePluginSemanticGate(
-  digest: JsonDigest,
+  dependencies: RulePluginSemanticGateDependencies,
 ): RulePluginSemanticGate {
-  return new DefaultRulePluginSemanticGate(digest);
+  return new DefaultRulePluginSemanticGate(dependencies);
 }
 
 class DefaultRulePluginSemanticGate implements RulePluginSemanticGate {
+  readonly #contracts: ContractValidator;
   readonly #digest: JsonDigest;
+  readonly #contentUpgradeAuthorizations: ContentUpgradeAuthorizationAuthority;
+  readonly #contentUpgradeClock: RulePluginContentUpgradeClock;
 
-  public constructor(digest: JsonDigest) {
-    this.#digest = digest;
+  public constructor(dependencies: RulePluginSemanticGateDependencies) {
+    this.#contracts = dependencies.contracts;
+    this.#digest = dependencies.digest;
+    this.#contentUpgradeAuthorizations =
+      dependencies.contentUpgradeAuthorizations;
+    this.#contentUpgradeClock = dependencies.contentUpgradeClock;
   }
 
   public async assertRequestEvidence(
@@ -121,14 +146,26 @@ class DefaultRulePluginSemanticGate implements RulePluginSemanticGate {
         },
       );
     }
+    const input = expectJsonObject(
+      expectProperty(request.value, "input", "RulePluginRequest"),
+      "RulePluginRequest.input",
+    );
+    if (operationKind === "content_upgrade.transform") {
+      assertContentUpgradeRequest({
+        contracts: this.#contracts,
+        digest: this.#digest,
+        authorizations: this.#contentUpgradeAuthorizations,
+        currentTime: this.#contentUpgradeClock.now(),
+        request: request.value,
+        input,
+        readonlyWorld: worldSnapshot,
+      });
+    }
     assertModelEvidenceForOperation({
       request,
       digest: this.#digest,
       operationKind,
-      input: expectJsonObject(
-        expectProperty(request.value, "input", "RulePluginRequest"),
-        "RulePluginRequest.input",
-      ),
+      input,
       worldId,
       basisRevision,
       modelInvocations,
@@ -180,6 +217,7 @@ class DefaultRulePluginSemanticGate implements RulePluginSemanticGate {
     );
 
     handler({
+      contracts: this.#contracts,
       request,
       response,
       digest: this.#digest,
@@ -218,9 +256,6 @@ function handleRuleEvaluate(context: OperationContext): void {
   switch (context.outputKind) {
     case "reject":
       return;
-    case "choice.required":
-      assertChoiceSpec(context.output);
-      return;
     case "validation":
       assertValidationOutput(context.output);
       return;
@@ -234,7 +269,7 @@ function handleCapabilityResolve(context: OperationContext): void {
     case "reject":
       return;
     case "choice.required":
-      assertChoiceSpec(context.output);
+      assertChoiceSpec(context);
       return;
     case "packet.proposal": {
       const proposal = assertPacketProposalProvenance(context);
@@ -984,6 +1019,188 @@ function handleWorldExtensionResolve(context: OperationContext): void {
   }
 }
 
+function assertContentUpgradeRequest(input: {
+  readonly contracts: ContractValidator;
+  readonly digest: JsonDigest;
+  readonly authorizations: ContentUpgradeAuthorizationAuthority;
+  readonly currentTime: string;
+  readonly request: JsonObject;
+  readonly input: JsonObject;
+  readonly readonlyWorld: JsonObject;
+}): void {
+  const migrationId = expectString(
+    input.input,
+    "migration_id",
+    "ContentUpgradeInput",
+  );
+  const sourceBundle = expectJsonObject(
+    expectProperty(input.input, "source_bundle", "ContentUpgradeInput"),
+    "ContentUpgradeInput.source_bundle",
+  );
+  const targetBundle = expectJsonObject(
+    expectProperty(input.input, "target_bundle", "ContentUpgradeInput"),
+    "ContentUpgradeInput.target_bundle",
+  );
+  const sourceSaveCandidate = expectProperty(
+    input.input,
+    "source_save",
+    "ContentUpgradeInput",
+  );
+  const sourceSave = input.contracts.assertObject(
+    CONTRACT_REF.saveEnvelope,
+    sourceSaveCandidate,
+  );
+  assertSaveEnvelopeRelationships(input.contracts, sourceSave);
+  const authorization = input.authorizations.assertAuthentic(
+    expectProperty(
+      input.input,
+      "authorization",
+      "ContentUpgradeInput",
+    ),
+    input.currentTime,
+  ).value;
+  const sourceSaveValue = sourceSave.value;
+  const sourceWorldId = expectString(
+    sourceSaveValue,
+    "world_id",
+    "SaveEnvelope",
+  );
+  const sourceWorldRevision = expectInteger(
+    sourceSaveValue,
+    "world_revision",
+    "SaveEnvelope",
+  );
+  const requestBasisRevision = expectInteger(
+    input.request,
+    "basis_revision",
+    "RulePluginRequest",
+  );
+
+  assertEqual(
+    "content_upgrade.request.world_id",
+    expectString(input.readonlyWorld, "world_id", "WorldSnapshot"),
+    sourceWorldId,
+    "content_upgrade.transform",
+  );
+  assertEqual(
+    "content_upgrade.request.world_revision",
+    expectInteger(input.readonlyWorld, "world_revision", "WorldSnapshot"),
+    sourceWorldRevision,
+    "content_upgrade.transform",
+  );
+  assertEqual(
+    "content_upgrade.request.basis_revision",
+    requestBasisRevision,
+    sourceWorldRevision,
+    "content_upgrade.transform",
+  );
+  if (
+    !jsonEquals(
+      expectProperty(input.readonlyWorld, "world_state", "WorldSnapshot"),
+      expectProperty(sourceSaveValue, "world_state", "SaveEnvelope"),
+    )
+  ) {
+    throw fault(
+      "rule_plugin.semantic.content_upgrade_source_snapshot_mismatch",
+      "ContentUpgradeInput.source_save must contain the exact RulePlugin readonly_world snapshot",
+      { operation_kind: "content_upgrade.transform", world_id: sourceWorldId },
+    );
+  }
+
+  const sourceContentLock = expectJsonObject(
+    expectProperty(
+      sourceSaveValue,
+      "world_content_lock",
+      "SaveEnvelope",
+    ),
+    "SaveEnvelope.world_content_lock",
+  );
+  const sourceRootBundle = expectJsonObject(
+    expectProperty(
+      sourceContentLock,
+      "root_bundle_lock",
+      "WorldContentLock",
+    ),
+    "WorldContentLock.root_bundle_lock",
+  );
+  if (!jsonEquals(sourceRootBundle, sourceBundle)) {
+    throw fault(
+      "rule_plugin.semantic.content_upgrade_source_lock_mismatch",
+      "ContentUpgradeInput.source_bundle must equal source_save WorldContentLock root bundle",
+      { operation_kind: "content_upgrade.transform", world_id: sourceWorldId },
+    );
+  }
+  assertEqual(
+    "content_upgrade.request.pack_id",
+    expectString(sourceBundle, "pack_id", "PackLock"),
+    expectString(targetBundle, "pack_id", "PackLock"),
+    "content_upgrade.transform",
+  );
+  if (
+    expectString(sourceBundle, "bundle_digest", "PackLock") ===
+    expectString(targetBundle, "bundle_digest", "PackLock")
+  ) {
+    throw fault(
+      "rule_plugin.semantic.content_upgrade_digest_unchanged",
+      "Content Upgrade source and target bundle digests must differ",
+      { operation_kind: "content_upgrade.transform", migration_id: migrationId },
+    );
+  }
+
+  const expectedSourceSaveDigest = input.digest.sha256(sourceSaveValue);
+  for (const pair of [
+    [
+      "content_upgrade.authorization.world_id",
+      sourceWorldId,
+      expectString(authorization, "world_id", "UpgradeAuthorization"),
+    ],
+    [
+      "content_upgrade.authorization.migration_id",
+      migrationId,
+      expectString(authorization, "migration_id", "UpgradeAuthorization"),
+    ],
+    [
+      "content_upgrade.authorization.source_save_digest",
+      expectedSourceSaveDigest,
+      expectString(
+        authorization,
+        "source_save_digest",
+        "UpgradeAuthorization",
+      ),
+    ],
+    [
+      "content_upgrade.authorization.source_bundle_digest",
+      expectString(sourceBundle, "bundle_digest", "PackLock"),
+      expectString(
+        authorization,
+        "source_bundle_digest",
+        "UpgradeAuthorization",
+      ),
+    ],
+    [
+      "content_upgrade.authorization.target_bundle_digest",
+      expectString(targetBundle, "bundle_digest", "PackLock"),
+      expectString(
+        authorization,
+        "target_bundle_digest",
+        "UpgradeAuthorization",
+      ),
+    ],
+  ] as const) {
+    assertEqual(pair[0], pair[1], pair[2], "content_upgrade.transform");
+  }
+  assertEqual(
+    "content_upgrade.authorization.source_world_revision",
+    sourceWorldRevision,
+    expectInteger(
+      authorization,
+      "source_world_revision",
+      "UpgradeAuthorization",
+    ),
+    "content_upgrade.transform",
+  );
+}
+
 function handleContentUpgradeTransform(context: OperationContext): void {
   switch (context.outputKind) {
     case "reject":
@@ -1001,11 +1218,41 @@ function handleContentUpgradeTransform(context: OperationContext): void {
         expectProperty(context.input, "authorization", "ContentUpgradeInput"),
         "ContentUpgradeInput.authorization",
       );
+      const migrationId = expectString(
+        context.input,
+        "migration_id",
+        "ContentUpgradeInput",
+      );
+      const sourceSave = context.contracts.assertObject(
+        CONTRACT_REF.saveEnvelope,
+        expectProperty(context.input, "source_save", "ContentUpgradeInput"),
+      );
+      const candidateSave = context.contracts.assertObject(
+        CONTRACT_REF.saveEnvelope,
+        expectProperty(
+          context.output,
+          "candidate_save",
+          "ContentUpgradeOutput",
+        ),
+      );
+      assertSaveEnvelopeRelationships(context.contracts, candidateSave);
 
       assertEqual(
         "content_upgrade.source_bundle_digest",
         expectString(sourceBundle, "bundle_digest", "PackLock"),
         expectString(context.output, "source_bundle_digest", "ContentUpgradeOutput"),
+        context.operationKind,
+      );
+      assertEqual(
+        "content_upgrade.migration_id",
+        migrationId,
+        expectString(context.output, "migration_id", "ContentUpgradeOutput"),
+        context.operationKind,
+      );
+      assertEqual(
+        "content_upgrade.authorization.migration_id",
+        migrationId,
+        expectString(authorization, "migration_id", "UpgradeAuthorization"),
         context.operationKind,
       );
       assertEqual(
@@ -1038,6 +1285,15 @@ function handleContentUpgradeTransform(context: OperationContext): void {
         expectString(context.output, "authorization_digest", "ContentUpgradeOutput"),
         context.operationKind,
       );
+      assertContentUpgradeCandidateRelationships(
+        context,
+        sourceSave.value,
+        candidateSave.value,
+        authorization,
+        migrationId,
+        sourceBundle,
+        targetBundle,
+      );
       assertEqual(
         "content_upgrade.result_digest",
         context.digest.sha256(omitField(context.output, "result_digest")),
@@ -1049,6 +1305,254 @@ function handleContentUpgradeTransform(context: OperationContext): void {
     default:
       throw unexpectedOutput(context);
   }
+}
+
+function assertContentUpgradeCandidateRelationships(
+  context: OperationContext,
+  sourceSave: JsonObject,
+  candidateSave: JsonObject,
+  authorization: JsonObject,
+  migrationId: string,
+  sourceBundle: JsonObject,
+  targetBundle: JsonObject,
+): void {
+  const sourceWorldId = expectString(
+    sourceSave,
+    "world_id",
+    "SaveEnvelope",
+  );
+  const sourceRevision = expectInteger(
+    sourceSave,
+    "world_revision",
+    "SaveEnvelope",
+  );
+  if (sourceRevision >= Number.MAX_SAFE_INTEGER) {
+    throw fault(
+      "rule_plugin.semantic.content_upgrade_revision_exhausted",
+      "Content Upgrade cannot advance a world beyond the safe revision range",
+      { world_id: sourceWorldId, world_revision: sourceRevision },
+    );
+  }
+  const candidateRevision = sourceRevision + 1;
+  for (const pair of [
+    [
+      "content_upgrade.candidate.world_id",
+      sourceWorldId,
+      expectString(candidateSave, "world_id", "SaveEnvelope"),
+    ],
+    [
+      "content_upgrade.candidate.save_schema_version",
+      expectString(sourceSave, "save_schema_version", "SaveEnvelope"),
+      expectString(candidateSave, "save_schema_version", "SaveEnvelope"),
+    ],
+    [
+      "content_upgrade.candidate.engine_contract_version",
+      expectString(sourceSave, "engine_contract_version", "SaveEnvelope"),
+      expectString(candidateSave, "engine_contract_version", "SaveEnvelope"),
+    ],
+  ] as const) {
+    assertEqual(pair[0], pair[1], pair[2], context.operationKind);
+  }
+  assertEqual(
+    "content_upgrade.candidate.world_revision",
+    candidateRevision,
+    expectInteger(candidateSave, "world_revision", "SaveEnvelope"),
+    context.operationKind,
+  );
+  assertEqual(
+    "content_upgrade.candidate.event_cursor",
+    candidateRevision,
+    expectInteger(candidateSave, "event_cursor", "SaveEnvelope"),
+    context.operationKind,
+  );
+
+  const sourceContentLock = expectJsonObject(
+    expectProperty(sourceSave, "world_content_lock", "SaveEnvelope"),
+    "SaveEnvelope.world_content_lock",
+  );
+  const candidateContentLock = expectJsonObject(
+    expectProperty(candidateSave, "world_content_lock", "SaveEnvelope"),
+    "SaveEnvelope.world_content_lock",
+  );
+  const candidateRootBundle = expectJsonObject(
+    expectProperty(
+      candidateContentLock,
+      "root_bundle_lock",
+      "WorldContentLock",
+    ),
+    "WorldContentLock.root_bundle_lock",
+  );
+  if (!jsonEquals(candidateRootBundle, targetBundle)) {
+    throw fault(
+      "rule_plugin.semantic.content_upgrade_target_lock_mismatch",
+      "ContentUpgradeOutput candidate_save must use the exact requested target PackLock",
+      { operation_kind: context.operationKind, migration_id: migrationId },
+    );
+  }
+  assertEqual(
+    "content_upgrade.candidate.world_definition_id",
+    expectString(
+      sourceContentLock,
+      "world_definition_id",
+      "WorldContentLock",
+    ),
+    expectString(
+      candidateContentLock,
+      "world_definition_id",
+      "WorldContentLock",
+    ),
+    context.operationKind,
+  );
+
+  const sourceHistory = asObjectArray(
+    expectProperty(sourceSave, "migration_history", "SaveEnvelope"),
+    "SaveEnvelope.migration_history",
+  );
+  const candidateHistory = asObjectArray(
+    expectProperty(candidateSave, "migration_history", "SaveEnvelope"),
+    "SaveEnvelope.migration_history",
+  );
+  if (
+    candidateHistory.length !== sourceHistory.length + 1 ||
+    !sourceHistory.every((entry, index) =>
+      jsonEquals(entry, candidateHistory[index] as JsonObject),
+    )
+  ) {
+    throw fault(
+      "rule_plugin.semantic.content_upgrade_history_not_append_only",
+      "Content Upgrade candidate must append exactly one migration history entry",
+      {
+        operation_kind: context.operationKind,
+        source_history_length: sourceHistory.length,
+        candidate_history_length: candidateHistory.length,
+      },
+    );
+  }
+  const historyEntry = candidateHistory.at(-1) as JsonObject;
+  const pluginLock = expectJsonObject(
+    expectProperty(context.request.value, "plugin_lock", "RulePluginRequest"),
+    "RulePluginRequest.plugin_lock",
+  );
+  const deterministicContext = expectJsonObject(
+    expectProperty(
+      context.request.value,
+      "deterministic_context",
+      "RulePluginRequest",
+    ),
+    "RulePluginRequest.deterministic_context",
+  );
+  for (const pair of [
+    [
+      "content_upgrade.history.migration_kind",
+      "content_upgrade",
+      expectString(historyEntry, "migration_kind", "MigrationHistoryEntry"),
+    ],
+    [
+      "content_upgrade.history.source",
+      expectString(sourceBundle, "bundle_digest", "PackLock"),
+      expectString(historyEntry, "source", "MigrationHistoryEntry"),
+    ],
+    [
+      "content_upgrade.history.target",
+      expectString(targetBundle, "bundle_digest", "PackLock"),
+      expectString(historyEntry, "target", "MigrationHistoryEntry"),
+    ],
+    [
+      "content_upgrade.history.implementation_digest",
+      expectString(pluginLock, "implementation_digest", "PluginLock"),
+      expectString(
+        historyEntry,
+        "implementation_digest",
+        "MigrationHistoryEntry",
+      ),
+    ],
+    [
+      "content_upgrade.history.executed_at",
+      expectString(authorization, "issued_at", "UpgradeAuthorization"),
+      expectString(historyEntry, "executed_at", "MigrationHistoryEntry"),
+    ],
+    [
+      "content_upgrade.history.upgrade_command_id",
+      expectString(
+        authorization,
+        "upgrade_command_id",
+        "UpgradeAuthorization",
+      ),
+      expectString(
+        historyEntry,
+        "upgrade_command_id",
+        "MigrationHistoryEntry",
+      ),
+    ],
+    [
+      "content_upgrade.history.migration_id",
+      migrationId,
+      expectString(historyEntry, "migration_id", "MigrationHistoryEntry"),
+    ],
+    [
+      "content_upgrade.history.source_save_digest",
+      expectString(
+        authorization,
+        "source_save_digest",
+        "UpgradeAuthorization",
+      ),
+      expectString(
+        historyEntry,
+        "source_save_digest",
+        "MigrationHistoryEntry",
+      ),
+    ],
+    [
+      "content_upgrade.history.authorization_digest",
+      expectString(
+        authorization,
+        "authorization_digest",
+        "UpgradeAuthorization",
+      ),
+      expectString(
+        historyEntry,
+        "authorization_digest",
+        "MigrationHistoryEntry",
+      ),
+    ],
+    [
+      "content_upgrade.history.deterministic_context_digest",
+      expectString(
+        deterministicContext,
+        "context_digest",
+        "DeterministicContext",
+      ),
+      expectString(
+        historyEntry,
+        "deterministic_context_digest",
+        "MigrationHistoryEntry",
+      ),
+    ],
+  ] as const) {
+    assertEqual(pair[0], pair[1], pair[2], context.operationKind);
+  }
+  assertEqual(
+    "content_upgrade.history.result_digest",
+    context.digest.sha256(
+      contentUpgradeCandidateDigestBody(candidateSave, candidateHistory),
+    ),
+    expectString(historyEntry, "result_digest", "MigrationHistoryEntry"),
+    context.operationKind,
+  );
+}
+
+function contentUpgradeCandidateDigestBody(
+  candidateSave: JsonObject,
+  history: readonly JsonObject[],
+): JsonObject {
+  return Object.freeze({
+    ...candidateSave,
+    migration_history: history.map((entry, index) =>
+      index === history.length - 1
+        ? omitField(entry, "result_digest")
+        : entry,
+    ),
+  });
 }
 
 function handleDayCycleAdvance(context: OperationContext): void {
@@ -1388,7 +1892,7 @@ function handleWorldAutomaticEventResolve(context: OperationContext): void {
     case "reject":
       return;
     case "choice.required":
-      assertChoiceSpec(context.output);
+      assertChoiceSpec(context);
       return;
     case "packet.proposal":
       assertPacketProposalProvenance(context);
@@ -1404,7 +1908,7 @@ function handleCharacterAutomaticEventResolve(context: OperationContext): void {
     case "reject":
       return;
     case "choice.required":
-      assertChoiceSpec(context.output);
+      assertChoiceSpec(context);
       return;
     case "packet.proposal": {
       assertPacketProposalProvenance(context);
@@ -1512,7 +2016,7 @@ function handleStageOutcomeResolve(context: OperationContext): void {
     case "reject":
       return;
     case "choice.required":
-      assertChoiceSpec(context.output);
+      assertChoiceSpec(context);
       return;
     case "packet.proposal": {
       const proposal = assertPacketProposalProvenance(context);
@@ -3151,9 +3655,9 @@ function assertValidationOutput(output: JsonObject): void {
   }
 }
 
-function assertChoiceSpec(output: JsonObject): void {
+function assertChoiceSpec(context: OperationContext): void {
   const options = asObjectArray(
-    expectProperty(output, "options", "ChoiceSpec"),
+    expectProperty(context.output, "options", "ChoiceSpec"),
     "ChoiceSpec.options",
   );
   if (options.length < 2) {
@@ -3161,6 +3665,55 @@ function assertChoiceSpec(output: JsonObject): void {
       "rule_plugin.semantic.choice_options",
       "ChoiceSpec requires at least two options",
       { option_count: options.length },
+    );
+  }
+  const choiceId = expectString(
+    context.output,
+    "choice_id",
+    "ChoiceSpec",
+  );
+  const optionIds = new Set<string>();
+  for (const option of options) {
+    const optionId = expectString(option, "option_id", "ChoiceOption");
+    if (optionIds.has(optionId)) {
+      throw fault(
+        "rule_plugin.semantic.choice_option_duplicate",
+        "ChoiceSpec option_id values must be unique",
+        { choice_id: choiceId, option_id: optionId },
+      );
+    }
+    optionIds.add(optionId);
+  }
+  const deterministicContext = expectJsonObject(
+    expectProperty(
+      context.request.value,
+      "deterministic_context",
+      "RulePluginRequest",
+    ),
+    "RulePluginRequest.deterministic_context",
+  );
+  const priorChoices = asObjectArray(
+    expectProperty(
+      deterministicContext,
+      "random_choices",
+      "DeterministicContext",
+    ),
+    "DeterministicContext.random_choices",
+  );
+  if (
+    priorChoices.some(
+      (entry) =>
+        expectString(
+          entry,
+          "choice_id",
+          "DeterministicContext.random_choices[]",
+        ) === choiceId,
+    )
+  ) {
+    throw fault(
+      "rule_plugin.semantic.choice_identity_reused",
+      "RulePlugin cannot request a choice_id already resolved in its DeterministicContext",
+      { choice_id: choiceId },
     );
   }
 }

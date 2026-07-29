@@ -1468,6 +1468,40 @@
         }
       ]
     },
+    "ContentUpgradeIdMapping": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "catalog_kind",
+        "source_id",
+        "target_id"
+      ],
+      "properties": {
+        "catalog_kind": {
+          "enum": [
+            "type",
+            "definition",
+            "entity",
+            "relation",
+            "capability",
+            "world_law",
+            "generation_archetype",
+            "prompt",
+            "art_profile",
+            "materialization_profile",
+            "asset",
+            "binding",
+            "state_machine_binding"
+          ]
+        },
+        "source_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "target_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        }
+      }
+    },
     "ContentUpgrade": {
       "type": "object",
       "additionalProperties": false,
@@ -1477,6 +1511,7 @@
         "from_bundle_digest",
         "to_pack_version",
         "transformer",
+        "declared_mapping",
         "description",
         "requires_player_consent"
       ],
@@ -1495,6 +1530,13 @@
         },
         "transformer": {
           "$ref": "#/$defs/PluginOperationRef"
+        },
+        "declared_mapping": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/ContentUpgradeIdMapping"
+          }
         },
         "description": {
           "$ref": "common.v1.schema.json#/$defs/LocalizedText"

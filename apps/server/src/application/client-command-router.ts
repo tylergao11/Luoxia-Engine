@@ -8,6 +8,7 @@ import {
 } from "@luoxia/contracts-runtime";
 
 import type { DialogueCommandOrchestrator } from "./dialogue-command-orchestrator.js";
+import type { ContentUpgradeOrchestrator } from "./content-upgrade-orchestrator.js";
 import type { DialogueCloseCommandOrchestrator } from "./dialogue-close-command-orchestrator.js";
 import type { EventCardCommandOrchestrator } from "./event-card-command-orchestrator.js";
 import type { MapMoveCommandOrchestrator } from "./map-move-command-orchestrator.js";
@@ -30,6 +31,7 @@ export interface ClientCommandRouterDependencies {
   readonly mapMoves: MapMoveCommandOrchestrator;
   readonly playerDays: PlayerDayCommandOrchestrator;
   readonly stageOutcomes: StageOutcomeCommandOrchestrator;
+  readonly contentUpgrades: ContentUpgradeOrchestrator;
   readonly sessionSynchronization: SessionSynchronizationService;
 }
 
@@ -72,6 +74,8 @@ export function createClientCommandRouter(
           return dependencies.playerDays.execute(envelope.value);
         case "stage.outcome_proposal":
           return dependencies.stageOutcomes.execute(envelope.value);
+        case "content_upgrade.accept":
+          return dependencies.contentUpgrades.execute(envelope.value);
         default:
           throw new EngineFault(
             "client_command.router.unsupported",

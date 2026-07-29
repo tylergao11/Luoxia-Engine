@@ -70,6 +70,7 @@ const EFFECT_OPS = [
   "event_card.invalidate",
   "event_card.expire",
   "event_budget.open",
+  "content_upgrade.apply",
 ] as const;
 
 type EffectOpName = (typeof EFFECT_OPS)[number];
@@ -81,6 +82,7 @@ interface TransitionContext {
   readonly dependencies: PacketStateTransitionDependencies;
   readonly domainEventCandidates: JsonObject[];
   readonly materializationRequestCandidates: JsonObject[];
+  contentUpgradeSaveCandidate?: JsonObject;
   world: MutableWorld;
 }
 
@@ -211,11 +213,34 @@ class DefaultPacketStateTransition implements PacketStateTransition {
       materializationRequestCandidates: Object.freeze(
         context.materializationRequestCandidates,
       ),
+      contentUpgradeSaveCandidate:
+        context.contentUpgradeSaveCandidate === undefined
+          ? undefined
+          : cloneJsonObject(context.contentUpgradeSaveCandidate),
     });
   }
 }
 
 const EFFECT_HANDLERS: { readonly [K in EffectOpName]: EffectHandler } = {
+  "content_upgrade.apply": (op, context) => {
+    if (context.contentUpgradeSaveCandidate !== undefined) {
+      throw fault(
+        "world.transition.content_upgrade_duplicate",
+        "A packet cannot apply more than one Content Upgrade candidate",
+        {},
+      );
+    }
+    const candidateSave = expectJsonObject(
+      expectProperty(op, "candidate_save", "ContentUpgradeApplyOp"),
+      "ContentUpgradeApplyOp.candidate_save",
+    );
+    const candidateWorldState = expectJsonObject(
+      expectProperty(candidateSave, "world_state", "SaveEnvelope"),
+      "SaveEnvelope.world_state",
+    );
+    context.contentUpgradeSaveCandidate = cloneJsonObject(candidateSave);
+    context.world = cloneWorld(candidateWorldState);
+  },
   "definition.register": (op, context) => {
     const definitionId = expectString(op, "definition_id", "DefinitionRegisterOp");
     if (findDefinition(context.world, definitionId) !== undefined) {
@@ -1017,6 +1042,7 @@ const EFFECT_HANDLERS: { readonly [K in EffectOpName]: EffectHandler } = {
       expectProperty(op, "request", "MaterializationRequestOp"),
       "MaterializationRequestOp.request",
     );
+    assertMaterializationSubjectCurrent(draft, context.world);
     const requestId = expectString(
       draft,
       "request_id",
@@ -1087,21 +1113,38 @@ const EFFECT_HANDLERS: { readonly [K in EffectOpName]: EffectHandler } = {
       ),
       slot_id: expectString(draft, "slot_id", "VisualBindingDraft"),
       asset: cloneJson(expectProperty(draft, "asset", "VisualBindingDraft")),
+      source_request_id: expectString(
+        draft,
+        "source_request_id",
+        "VisualBindingDraft",
+      ),
+      acceptance_id: expectString(
+        draft,
+        "acceptance_id",
+        "VisualBindingDraft",
+      ),
       scope: "session",
       created_by_event_id: context.committedEventId,
       state: "active",
     };
-    if (draft.source_request_id !== undefined) {
-      binding.source_request_id = expectString(
-        draft,
-        "source_request_id",
-        "VisualBindingDraft",
-      );
-      binding.acceptance_id = expectString(
-        draft,
-        "acceptance_id",
-        "VisualBindingDraft",
-      );
+    for (const [existingIndex, existing] of context.world.visual_bindings.entries()) {
+      if (
+        expectString(existing, "binding_id", "VisualBinding") !== bindingId &&
+        expectString(existing, "state", "VisualBinding") === "active" &&
+        expectInteger(existing, "subject_revision", "VisualBinding") ===
+          binding.subject_revision &&
+        expectString(existing, "slot_id", "VisualBinding") ===
+          binding.slot_id &&
+        jsonEquals(
+          expectProperty(existing, "subject", "VisualBinding"),
+          binding.subject as JsonValue,
+        )
+      ) {
+        context.world.visual_bindings[existingIndex] = {
+          ...cloneJsonObject(existing),
+          state: "retired",
+        };
+      }
     }
     const index = context.world.visual_bindings.findIndex(
       (entry) =>
@@ -2055,6 +2098,111 @@ function findDefinition(
   );
 }
 
+function assertMaterializationSubjectCurrent(
+  request: JsonObject,
+  world: MutableWorld,
+): void {
+  const subjectRevision = expectInteger(
+    request,
+    "subject_revision",
+    "MaterializationRequestDraft",
+  );
+  const subject = expectJsonObject(
+    expectProperty(request, "subject", "MaterializationRequestDraft"),
+    "MaterializationRequestDraft.subject",
+  );
+  const kind = expectString(subject, "kind", "SubjectRef");
+  if (kind === "entity") {
+    const ref = expectJsonObject(
+      expectProperty(subject, "entity", "SubjectRef"),
+      "SubjectRef.entity",
+    );
+    if (
+      ref.expected_revision !== undefined &&
+      expectInteger(ref, "expected_revision", "EntityRef") !== subjectRevision
+    ) {
+      throw fault(
+        "world.transition.materialization_subject_revision",
+        "MaterializationRequest subject_revision must match EntityRef.expected_revision",
+        {},
+      );
+    }
+    const entityId = expectString(ref, "entity_id", "EntityRef");
+    const entity = findEntity(world, entityId);
+    if (
+      entity === undefined ||
+      expectInteger(entity, "revision", "EntityState") !== subjectRevision ||
+      expectString(entity, "state", "EntityState") !== "active"
+    ) {
+      throw fault(
+        "world.transition.materialization_subject_stale",
+        "MaterializationRequest must target the current revision of an active Entity",
+        {
+          entity_id: entityId,
+          subject_revision: subjectRevision,
+        },
+      );
+    }
+    return;
+  }
+  if (kind === "definition") {
+    const ref = expectJsonObject(
+      expectProperty(subject, "definition", "SubjectRef"),
+      "SubjectRef.definition",
+    );
+    if (expectString(ref, "kind", "DefinitionRef") !== "dynamic") {
+      throw fault(
+        "world.transition.materialization_subject_immutable",
+        "On-demand materialization can target only Entity or DynamicDefinition subjects",
+        {},
+      );
+    }
+    const definitionId = expectString(
+      ref,
+      "definition_id",
+      "DynamicDefinitionRef",
+    );
+    if (
+      expectInteger(ref, "revision", "DynamicDefinitionRef") !==
+        subjectRevision
+    ) {
+      throw fault(
+        "world.transition.materialization_subject_revision",
+        "MaterializationRequest subject_revision must match DynamicDefinitionRef.revision",
+        {
+          definition_id: definitionId,
+          subject_revision: subjectRevision,
+        },
+      );
+    }
+    const definition = findDefinition(world, definitionId);
+    if (
+      definition === undefined ||
+      expectInteger(
+        definition,
+        "revision",
+        "DynamicDefinitionState",
+      ) !== subjectRevision ||
+      expectString(definition, "state", "DynamicDefinitionState") !== "active"
+    ) {
+      throw fault(
+        "world.transition.materialization_subject_stale",
+        "MaterializationRequest must target the current revision of an active DynamicDefinition",
+        {
+          definition_id: definitionId,
+          subject_revision: subjectRevision,
+        },
+      );
+    }
+    return;
+  }
+  throw fault(
+    "world.transition.materialization_subject_kind",
+    "MaterializationRequest contains an unsupported subject kind",
+    { subject_kind: kind },
+  );
+}
+
 function findDefinitionIndex(world: MutableWorld, definitionId: string): number {
   return world.dynamic_definitions.findIndex(
     (entry) =>
@@ -2319,5 +2467,6 @@ const _exhaustive: { readonly [K in EffectOpName]: true } = {
   "event_card.invalidate": true,
   "event_card.expire": true,
   "event_budget.open": true,
+  "content_upgrade.apply": true,
 };
 void _exhaustive;

@@ -19,6 +19,43 @@ export interface RuntimeRulePluginInvocationBinding {
   readonly pluginLock: JsonObject;
 }
 
+export function resolveContentRulePluginInvocationBinding(input: {
+  readonly binding: ContentRulePluginOperationBinding;
+  readonly abi: RulePluginAbiRegistry;
+}): RuntimeRulePluginInvocationBinding {
+  const dependency: RulePluginDependencyIdentity = Object.freeze({
+    package_id: expectString(
+      input.binding.dependency,
+      "package_id",
+      "DependencyLock",
+    ),
+    version: expectString(
+      input.binding.dependency,
+      "version",
+      "DependencyLock",
+    ),
+    integrity_sha256: expectString(
+      input.binding.dependency,
+      "integrity_sha256",
+      "DependencyLock",
+    ),
+  });
+  const operationId = expectString(
+    input.binding.operation,
+    "operation_id",
+    "PluginOperationRef",
+  );
+  const registered = input.abi.requireOperationForDependency({
+    dependency,
+    operationId,
+    operationKind: input.binding.operationKind,
+  });
+  return Object.freeze({
+    operationId,
+    pluginLock: registered.pluginLock,
+  });
+}
+
 /**
  * Resolve one exact content owner to the activation-owned RulePlugin ABI.
  * `sourcePredicate` is required when an operation kind has more than one
@@ -52,36 +89,8 @@ export function resolveRulePluginInvocationBinding(input: {
     );
   }
 
-  const selected = matches[0] as ContentRulePluginOperationBinding;
-  const dependency: RulePluginDependencyIdentity = Object.freeze({
-    package_id: expectString(
-      selected.dependency,
-      "package_id",
-      "DependencyLock",
-    ),
-    version: expectString(
-      selected.dependency,
-      "version",
-      "DependencyLock",
-    ),
-    integrity_sha256: expectString(
-      selected.dependency,
-      "integrity_sha256",
-      "DependencyLock",
-    ),
-  });
-  const operationId = expectString(
-    selected.operation,
-    "operation_id",
-    "PluginOperationRef",
-  );
-  const registered = input.abi.requireOperationForDependency({
-    dependency,
-    operationId,
-    operationKind: input.operationKind,
-  });
-  return Object.freeze({
-    operationId,
-    pluginLock: registered.pluginLock,
+  return resolveContentRulePluginInvocationBinding({
+    binding: matches[0] as ContentRulePluginOperationBinding,
+    abi: input.abi,
   });
 }

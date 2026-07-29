@@ -14,6 +14,14 @@ export type StageModuleManifestDocument = ValidatedJsonObject<
   typeof CONTRACT_REF.stageModuleManifest
 >;
 
+export interface IndexedStageModuleScene {
+  readonly document: JsonObject;
+  readonly sceneId: string;
+  readonly slotIds: readonly string[];
+  readonly inputTypes: readonly string[];
+  readonly outcomeTypes: readonly string[];
+}
+
 /**
  * Frozen single-manifest semantic index derived only from
  * contracts/client-bridge StageModuleManifest via Schema validation.
@@ -26,8 +34,10 @@ export interface IndexedStageModuleManifest {
   readonly implementationVersion: string;
   readonly implementationDigest: string;
   readonly sceneIds: readonly string[];
+  readonly scenes: readonly IndexedStageModuleScene[];
   readonly dependsOnModuleIds: readonly string[];
   hasScene(sceneId: string): boolean;
+  requireScene(sceneId: string): IndexedStageModuleScene;
 }
 
 /**
@@ -63,6 +73,7 @@ export function indexStageModuleManifest(
   );
   const sceneIdList: string[] = [];
   const sceneIdSet = new Set<string>();
+  const indexedScenes: IndexedStageModuleScene[] = [];
   for (const [sceneIndex, scene] of scenes.entries()) {
     const sceneId = expectString(
       scene,
@@ -82,10 +93,29 @@ export function indexStageModuleManifest(
     }
     sceneIdSet.add(sceneId);
     sceneIdList.push(sceneId);
+    indexedScenes.push(
+      Object.freeze({
+        document: scene,
+        sceneId,
+        slotIds: readStringArray(
+          expectProperty(scene, "slot_ids", "StageModuleScene"),
+          `StageModuleManifest.scenes[${sceneIndex}].slot_ids`,
+        ),
+        inputTypes: readStringArray(
+          expectProperty(scene, "input_types", "StageModuleScene"),
+          `StageModuleManifest.scenes[${sceneIndex}].input_types`,
+        ),
+        outcomeTypes: readStringArray(
+          expectProperty(scene, "outcome_types", "StageModuleScene"),
+          `StageModuleManifest.scenes[${sceneIndex}].outcome_types`,
+        ),
+      }),
+    );
   }
 
   const dependsOnModuleIds = readDependsOnModuleIds(value, moduleId);
   const sceneIds = Object.freeze([...sceneIdList]);
+  const frozenScenes = Object.freeze([...indexedScenes]);
 
   const indexed: IndexedStageModuleManifest = {
     document,
@@ -94,9 +124,24 @@ export function indexStageModuleManifest(
     implementationVersion,
     implementationDigest,
     sceneIds,
+    scenes: frozenScenes,
     dependsOnModuleIds,
     hasScene(sceneId: string): boolean {
       return sceneIdSet.has(sceneId);
+    },
+    requireScene(sceneId: string): IndexedStageModuleScene {
+      const scene = frozenScenes.find((candidate) => candidate.sceneId === sceneId);
+      if (scene === undefined) {
+        throw new EngineFault(
+          "stage_module.manifest.scene_not_declared",
+          "scene_id is not declared on the StageModule manifest",
+          {
+            module_id: moduleId,
+            scene_id: sceneId,
+          },
+        );
+      }
+      return scene;
     },
   };
 
@@ -146,5 +191,27 @@ function asObjectArray(value: JsonValue, path: string): readonly JsonObject[] {
   }
   return value.map((entry, index) =>
     expectJsonObject(entry as JsonValue, `${path}[${index}]`),
+  );
+}
+
+function readStringArray(value: JsonValue, path: string): readonly string[] {
+  if (!Array.isArray(value)) {
+    throw new EngineFault(
+      "stage_module.manifest.shape",
+      `${path} must be an array`,
+      { path },
+    );
+  }
+  return Object.freeze(
+    value.map((entry, index) => {
+      if (typeof entry !== "string" || entry.length === 0) {
+        throw new EngineFault(
+          "stage_module.manifest.shape",
+          `${path}[${index}] must be a non-empty string`,
+          { path: `${path}[${index}]` },
+        );
+      }
+      return entry;
+    }),
   );
 }

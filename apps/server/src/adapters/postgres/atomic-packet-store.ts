@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import type { JsonDigest } from "@luoxia/contracts-runtime";
 import {
   CONTRACT_REF,
   EngineFault,
@@ -11,6 +12,7 @@ import {
   type ContractValidator,
   type JsonObject,
   type JsonValue,
+  type SaveEnvelopeDocument,
 } from "@luoxia/contracts-runtime/portable";
 import type {
   AtomicPacketStore,
@@ -27,11 +29,18 @@ import type {
 import type { ApplyPacketResultDocument } from "@luoxia/world-core";
 import type { Pool, PoolClient } from "pg";
 
+import {
+  assembleSaveEnvelope,
+  selectSaveWorldColumns,
+  type SaveWorldRow,
+} from "./runtime-save-repository.js";
+
 const MAX_SAFE_REVISION = BigInt(Number.MAX_SAFE_INTEGER);
 
 export interface PostgresAtomicPacketStoreDependencies {
   readonly pool: Pool;
   readonly contracts: ContractValidator;
+  readonly digest: JsonDigest;
 }
 
 export function createPostgresAtomicPacketStore(
@@ -43,10 +52,12 @@ export function createPostgresAtomicPacketStore(
 class PostgresAtomicPacketStore implements AtomicPacketStore {
   readonly #pool: Pool;
   readonly #contracts: ContractValidator;
+  readonly #digest: JsonDigest;
 
   public constructor(dependencies: PostgresAtomicPacketStoreDependencies) {
     this.#pool = dependencies.pool;
     this.#contracts = dependencies.contracts;
+    this.#digest = dependencies.digest;
   }
 
   public async withLockedWorld(
@@ -65,7 +76,12 @@ class PostgresAtomicPacketStore implements AtomicPacketStore {
       await client.query("BEGIN ISOLATION LEVEL READ COMMITTED");
       began = true;
 
-      const lockedWorld = await lockWorld(client, this.#contracts, packet.value);
+      const lockedWorld = await lockWorld(
+        client,
+        this.#contracts,
+        this.#digest,
+        packet.value,
+      );
       const transaction = new PostgresLockedWorldTransaction({
         client,
         contracts: this.#contracts,
@@ -100,13 +116,6 @@ class PostgresAtomicPacketStore implements AtomicPacketStore {
   }
 }
 
-interface LockedWorldRow {
-  readonly world_id: string;
-  readonly revision_text: string;
-  readonly event_cursor_text: string;
-  readonly state_document: unknown;
-}
-
 interface DuplicateEventRow {
   readonly world_id: string;
   readonly event_document: unknown;
@@ -121,6 +130,7 @@ interface LockedWorld {
   readonly worldId: string;
   readonly revision: number;
   readonly state: WorldStateDocument;
+  readonly saveEnvelope: SaveEnvelopeDocument;
 }
 
 interface PostgresLockedWorldTransactionDependencies {
@@ -135,6 +145,7 @@ type TransactionStage =
   | "duplicate_checked"
   | "duplicate"
   | "snapshot_read"
+  | "authority_envelope_read"
   | "identity_created"
   | "prepared"
   | "committed";
@@ -145,6 +156,7 @@ interface PreparedArtifacts {
   readonly committedEvent: CommittedEventDocument;
   readonly result: ApplyPacketResultDocument;
   readonly materializationRequests: readonly MaterializationRequestDocument[];
+  readonly contentUpgradeSave?: SaveEnvelopeDocument;
 }
 
 class PostgresLockedWorldTransaction implements LockedWorldTransaction {
@@ -241,10 +253,19 @@ class PostgresLockedWorldTransaction implements LockedWorldTransaction {
     return snapshot.value;
   }
 
+  public async readAuthorityEnvelope(): Promise<unknown> {
+    this.#requireStage("snapshot_read", "readAuthorityEnvelope");
+    this.#stage = "authority_envelope_read";
+    return this.#lockedWorld.saveEnvelope.value;
+  }
+
   public async createCommitIdentityCandidate(
     packet: ContentPacketDocument,
   ): Promise<unknown> {
-    this.#requireStage("snapshot_read", "createCommitIdentityCandidate");
+    this.#requireStage(
+      "authority_envelope_read",
+      "createCommitIdentityCandidate",
+    );
     assertSamePacket(this.#packet, packet, "commit identity");
     const identity = this.#contracts.assertObject(
       CONTRACT_REF.packetCommitIdentity,
@@ -261,6 +282,7 @@ class PostgresLockedWorldTransaction implements LockedWorldTransaction {
     nextWorldState: WorldStateDocument,
     domainEvents: readonly DomainEventDocument[],
     materializationRequests: readonly MaterializationRequestDocument[],
+    contentUpgradeSave?: SaveEnvelopeDocument,
   ): Promise<PacketCommitPreparation> {
     this.#requireStage("identity_created", "prepare");
     assertSamePacket(this.#packet, packet, "prepare");
@@ -293,6 +315,13 @@ class PostgresLockedWorldTransaction implements LockedWorldTransaction {
         ),
       ),
     );
+    const verifiedContentUpgradeSave =
+      contentUpgradeSave === undefined
+        ? undefined
+        : this.#contracts.assertObject(
+            CONTRACT_REF.saveEnvelope,
+            contentUpgradeSave.value,
+          );
 
     const eventId = expectString(
       commitIdentity.value,
@@ -301,6 +330,13 @@ class PostgresLockedWorldTransaction implements LockedWorldTransaction {
     );
     const packetWorldId = expectString(packet.value, "world_id", "ContentPacket");
     const revisionAfter = incrementRevision(this.#lockedWorld.revision);
+    assertContentUpgradePreparation(
+      packet.value,
+      this.#lockedWorld,
+      verifiedState,
+      verifiedContentUpgradeSave,
+      revisionAfter,
+    );
     for (const request of verifiedRequests) {
       assertMaterializationRequestIdentity(
         request.value,
@@ -343,6 +379,9 @@ class PostgresLockedWorldTransaction implements LockedWorldTransaction {
       committedEvent,
       result,
       materializationRequests: verifiedRequests,
+      ...(verifiedContentUpgradeSave === undefined
+        ? {}
+        : { contentUpgradeSave: verifiedContentUpgradeSave }),
     });
     this.#stage = "prepared";
     return Object.freeze({
@@ -393,6 +432,12 @@ class PostgresLockedWorldTransaction implements LockedWorldTransaction {
       "world.atomic_store.prepared_materialization_mismatch",
       "Authorized materialization requests differ from prepare",
     );
+    assertSameOptionalDocument(
+      artifacts.contentUpgradeSave,
+      prepared.contentUpgradeSave,
+      "world.atomic_store.prepared_content_upgrade_mismatch",
+      "Authorized Content Upgrade SaveEnvelope differs from prepare",
+    );
     assertCommitRelationships(prepared, artifacts.commitIdentity, this.#lockedWorld);
 
     const event = prepared.committedEvent.value;
@@ -430,10 +475,10 @@ class PostgresLockedWorldTransaction implements LockedWorldTransaction {
       await this.#client.query(
         `INSERT INTO luoxia_engine.materialization_requests (
            request_id, world_id, requested_by_event_id, ordinal,
-           request_document, inserted_at
+           request_document, inserted_at, updated_at
          ) VALUES (
            $1::uuid, $2::uuid, $3::uuid, $4::integer,
-           $5::jsonb, $6::timestamptz
+           $5::jsonb, $6::timestamptz, $6::timestamptz
          )`,
         [
           expectString(requestDocument, "request_id", "MaterializationRequest"),
@@ -446,23 +491,31 @@ class PostgresLockedWorldTransaction implements LockedWorldTransaction {
       );
     }
 
-    const update = await this.#client.query(
-      `UPDATE luoxia_engine.worlds
-          SET revision = $2::bigint,
-              event_cursor = $2::bigint,
-              state_document = $3::jsonb,
-              updated_at = $4::timestamptz
-        WHERE world_id = $1::uuid
-          AND revision = $5::bigint
-          AND event_cursor = $5::bigint`,
-      [
-        worldId,
-        revisionAfter.toString(),
-        JSON.stringify(prepared.nextWorldState.value),
-        committedAt,
-        revisionBefore.toString(),
-      ],
-    );
+    const update =
+      prepared.contentUpgradeSave === undefined
+        ? await this.#client.query(
+            `UPDATE luoxia_engine.worlds
+                SET revision = $2::bigint,
+                    event_cursor = $2::bigint,
+                    state_document = $3::jsonb,
+                    updated_at = $4::timestamptz
+              WHERE world_id = $1::uuid
+                AND revision = $5::bigint
+                AND event_cursor = $5::bigint`,
+            [
+              worldId,
+              revisionAfter.toString(),
+              JSON.stringify(prepared.nextWorldState.value),
+              committedAt,
+              revisionBefore.toString(),
+            ],
+          )
+        : await updateContentUpgradeWorld(
+            this.#client,
+            prepared.contentUpgradeSave,
+            committedAt,
+            revisionBefore,
+          );
     if (update.rowCount !== 1) {
       throw new EngineFault(
         "world.atomic_store.revision_conflict",
@@ -525,14 +578,12 @@ class PostgresLockedWorldTransaction implements LockedWorldTransaction {
 async function lockWorld(
   client: PoolClient,
   contracts: ContractValidator,
+  digest: JsonDigest,
   packet: JsonObject,
 ): Promise<LockedWorld> {
   const worldId = expectString(packet, "world_id", "ContentPacket");
-  const query = await client.query<LockedWorldRow>(
-    `SELECT world_id::text AS world_id,
-            revision::text AS revision_text,
-            event_cursor::text AS event_cursor_text,
-            state_document
+  const query = await client.query<SaveWorldRow>(
+    `${selectSaveWorldColumns()}
        FROM luoxia_engine.worlds
       WHERE world_id = $1::uuid
       FOR UPDATE`,
@@ -570,10 +621,41 @@ async function lockWorld(
       },
     );
   }
+  const saveEnvelope = assembleSaveEnvelope(contracts, row);
+  const source = expectJsonObject(
+    expectProperty(packet, "source", "ContentPacket"),
+    "ContentPacket.source",
+  );
+  if (
+    expectString(source, "source_kind", "PacketSource") ===
+    "content_upgrade"
+  ) {
+    const expectedDigest = expectString(
+      source,
+      "source_save_digest",
+      "PacketSource",
+    );
+    const actualDigest = digest.sha256(saveEnvelope.value);
+    if (actualDigest !== expectedDigest) {
+      throw new EngineFault(
+        "world.atomic_store.content_upgrade_source_save_mismatch",
+        "Locked PostgreSQL SaveEnvelope differs from the authorized Content Upgrade source",
+        {
+          world_id: worldId,
+          expected_source_save_digest: expectedDigest,
+          actual_source_save_digest: actualDigest,
+        },
+      );
+    }
+  }
   return Object.freeze({
     worldId,
     revision,
-    state: contracts.assertObject(CONTRACT_REF.worldState, row.state_document),
+    state: contracts.assertObject(
+      CONTRACT_REF.worldState,
+      expectProperty(saveEnvelope.value, "world_state", "SaveEnvelope"),
+    ),
+    saveEnvelope,
   });
 }
 
@@ -615,6 +697,127 @@ function assertSameDocumentArray(
   ) {
     throw new EngineFault(code, message);
   }
+}
+
+function assertSameOptionalDocument(
+  expected: SaveEnvelopeDocument | undefined,
+  actual: SaveEnvelopeDocument | undefined,
+  code: string,
+  message: string,
+): void {
+  if (
+    (expected === undefined) !== (actual === undefined) ||
+    (expected !== undefined &&
+      actual !== undefined &&
+      !jsonEquals(expected.value, actual.value))
+  ) {
+    throw new EngineFault(code, message);
+  }
+}
+
+function assertContentUpgradePreparation(
+  packet: JsonObject,
+  lockedWorld: LockedWorld,
+  nextWorldState: WorldStateDocument,
+  contentUpgradeSave: SaveEnvelopeDocument | undefined,
+  revisionAfter: number,
+): void {
+  const source = expectJsonObject(
+    expectProperty(packet, "source", "ContentPacket"),
+    "ContentPacket.source",
+  );
+  const isContentUpgrade =
+    expectString(source, "source_kind", "PacketSource") ===
+    "content_upgrade";
+  if (isContentUpgrade !== (contentUpgradeSave !== undefined)) {
+    throw new EngineFault(
+      "world.atomic_store.content_upgrade_candidate_mismatch",
+      "Content Upgrade source and prepared SaveEnvelope must occur together",
+      {
+        source_kind: expectString(source, "source_kind", "PacketSource"),
+        has_content_upgrade_save: contentUpgradeSave !== undefined,
+      },
+    );
+  }
+  if (contentUpgradeSave === undefined) {
+    return;
+  }
+  const value = contentUpgradeSave.value;
+  if (
+    expectString(value, "world_id", "SaveEnvelope") !==
+      lockedWorld.worldId ||
+    expectInteger(value, "world_revision", "SaveEnvelope") !==
+      revisionAfter ||
+    expectInteger(value, "event_cursor", "SaveEnvelope") !==
+      revisionAfter ||
+    !jsonEquals(
+      expectProperty(value, "world_state", "SaveEnvelope"),
+      nextWorldState.value,
+    )
+  ) {
+    throw new EngineFault(
+      "world.atomic_store.content_upgrade_candidate_mismatch",
+      "Prepared Content Upgrade SaveEnvelope does not exactly match the locked world's next revision",
+      {
+        world_id: lockedWorld.worldId,
+        revision_before: lockedWorld.revision,
+        revision_after: revisionAfter,
+      },
+    );
+  }
+}
+
+async function updateContentUpgradeWorld(
+  client: PoolClient,
+  envelope: SaveEnvelopeDocument,
+  committedAt: string,
+  revisionBefore: number,
+): Promise<{ readonly rowCount: number | null }> {
+  const value = envelope.value;
+  return client.query(
+    `UPDATE luoxia_engine.worlds
+        SET revision = $2::bigint,
+            state_document = $3::jsonb,
+            world_content_lock_document = $4::jsonb,
+            save_schema_version = $5::text,
+            engine_contract_version = $6::text,
+            dependency_bundle_locks_document = $7::jsonb,
+            rule_plugin_locks_document = $8::jsonb,
+            stage_module_locks_document = $9::jsonb,
+            event_cursor = $10::bigint,
+            asset_hashes_document = $11::jsonb,
+            migration_history_document = $12::jsonb,
+            updated_at = $13::timestamptz
+      WHERE world_id = $1::uuid
+        AND revision = $14::bigint
+        AND event_cursor = $14::bigint`,
+    [
+      expectString(value, "world_id", "SaveEnvelope"),
+      expectInteger(value, "world_revision", "SaveEnvelope").toString(),
+      JSON.stringify(expectProperty(value, "world_state", "SaveEnvelope")),
+      JSON.stringify(
+        expectProperty(value, "world_content_lock", "SaveEnvelope"),
+      ),
+      expectString(value, "save_schema_version", "SaveEnvelope"),
+      expectString(value, "engine_contract_version", "SaveEnvelope"),
+      JSON.stringify(
+        expectProperty(value, "dependency_bundle_locks", "SaveEnvelope"),
+      ),
+      JSON.stringify(
+        expectProperty(value, "rule_plugin_locks", "SaveEnvelope"),
+      ),
+      JSON.stringify(
+        expectProperty(value, "stage_module_locks", "SaveEnvelope"),
+      ),
+      expectInteger(value, "event_cursor", "SaveEnvelope").toString(),
+      JSON.stringify(expectProperty(value, "asset_hashes", "SaveEnvelope")),
+      JSON.stringify(
+        expectProperty(value, "migration_history", "SaveEnvelope"),
+      ),
+      committedAt,
+      revisionBefore.toString(),
+    ],
+  );
 }
 
 function assertCommitRelationships(

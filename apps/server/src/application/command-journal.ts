@@ -26,6 +26,7 @@ interface StoredCommandBase {
   readonly eventCardExecution?: EventCardCommandExecutionIdentity;
   readonly navigationExecution?: NavigationCommandExecutionIdentity;
   readonly stageOutcomeExecution?: StageOutcomeCommandExecutionIdentity;
+  readonly contentUpgradeExecution?: ContentUpgradeCommandExecutionIdentity;
 }
 
 /**
@@ -75,6 +76,16 @@ export interface NavigationCommandExecutionIdentity {
  * validated ClientMessage.
  */
 export interface StageOutcomeCommandExecutionIdentity {
+  readonly ruleRequestId: string;
+}
+
+/**
+ * Both identities are globally unique. upgradeCommandId is also the sole
+ * ContentPacket packet_id; ruleRequestId owns the recoverable transformer
+ * invocation. The client command_id remains Session-scoped.
+ */
+export interface ContentUpgradeCommandExecutionIdentity {
+  readonly upgradeCommandId: string;
   readonly ruleRequestId: string;
 }
 

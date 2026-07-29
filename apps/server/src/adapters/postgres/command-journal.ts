@@ -17,6 +17,7 @@ import type {
   CommandExecutionIdFactory,
   CommandJournal,
   CommandResultDocument,
+  ContentUpgradeCommandExecutionIdentity,
   DialogueCommandExecutionIdentity,
   DialogueCloseCommandExecutionIdentity,
   EventCardCommandExecutionIdentity,
@@ -71,6 +72,8 @@ interface CommandRow {
   readonly event_card_packet_id: string | null;
   readonly navigation_rule_request_id: string | null;
   readonly stage_outcome_rule_request_id: string | null;
+  readonly content_upgrade_command_id: string | null;
+  readonly content_upgrade_rule_request_id: string | null;
   readonly command_status: string;
   readonly result_document: unknown | null;
 }
@@ -183,6 +186,12 @@ class PostgresCommandJournal implements CommandJournal {
               this.#idFactory,
               received,
             );
+          const contentUpgradeExecution =
+            createContentUpgradeExecutionIdentity(
+              this.#contracts,
+              this.#idFactory,
+              received,
+            );
           const insert = await client.query(
             `INSERT INTO luoxia_engine.command_journal (
                session_id,
@@ -206,6 +215,8 @@ class PostgresCommandJournal implements CommandJournal {
                event_card_packet_id,
                navigation_rule_request_id,
                stage_outcome_rule_request_id,
+               content_upgrade_command_id,
+               content_upgrade_rule_request_id,
                command_status,
                received_at
              ) VALUES (
@@ -230,6 +241,8 @@ class PostgresCommandJournal implements CommandJournal {
                $19::uuid,
                $20::uuid,
                $21::uuid,
+               $22::uuid,
+               $23::uuid,
                'received',
                clock_timestamp()
              )`,
@@ -255,6 +268,8 @@ class PostgresCommandJournal implements CommandJournal {
               eventCardExecution?.packetId ?? null,
               navigationExecution?.ruleRequestId ?? null,
               stageOutcomeExecution?.ruleRequestId ?? null,
+              contentUpgradeExecution?.upgradeCommandId ?? null,
+              contentUpgradeExecution?.ruleRequestId ?? null,
             ],
           );
           if (insert.rowCount !== 1) {
@@ -290,6 +305,9 @@ class PostgresCommandJournal implements CommandJournal {
             ...(stageOutcomeExecution === undefined
               ? {}
               : { stageOutcomeExecution }),
+            ...(contentUpgradeExecution === undefined
+              ? {}
+              : { contentUpgradeExecution }),
           });
         },
       );
@@ -468,6 +486,9 @@ const COMMAND_SELECT = `SELECT
   event_card_packet_id::text AS event_card_packet_id,
   navigation_rule_request_id::text AS navigation_rule_request_id,
   stage_outcome_rule_request_id::text AS stage_outcome_rule_request_id,
+  content_upgrade_command_id::text AS content_upgrade_command_id,
+  content_upgrade_rule_request_id::text
+    AS content_upgrade_rule_request_id,
   command_status,
   result_document
 FROM luoxia_engine.command_journal`;
@@ -719,6 +740,50 @@ function createStageOutcomeExecutionIdentity(
   return Object.freeze({ ruleRequestId });
 }
 
+function createContentUpgradeExecutionIdentity(
+  contracts: ContractValidator,
+  idFactory: CommandExecutionIdFactory,
+  command: ReceivedCommandCandidate,
+): ContentUpgradeCommandExecutionIdentity | undefined {
+  if (command.commandKind !== "content_upgrade.accept") {
+    return undefined;
+  }
+  const upgradeCommandId = assertUuid(contracts, idFactory.createId());
+  const ruleRequestId = assertUuid(contracts, idFactory.createId());
+  for (const [identity, value] of [
+    ["content_upgrade_command_id", upgradeCommandId],
+    ["content_upgrade_rule_request_id", ruleRequestId],
+  ] as const) {
+    if (value !== value.toLowerCase()) {
+      throw new EngineFault(
+        "command.journal.generated_identity_noncanonical",
+        "Server-generated Content Upgrade identities must use lowercase canonical UUID text",
+        {
+          command_id: command.commandId,
+          identity,
+          uuid: value,
+        },
+      );
+    }
+  }
+  if (
+    upgradeCommandId === command.commandId ||
+    ruleRequestId === command.commandId ||
+    upgradeCommandId === ruleRequestId
+  ) {
+    throw new EngineFault(
+      "command.journal.content_upgrade_identity_collision",
+      "Content Upgrade execution identities must be pairwise distinct from the Session-scoped command identity",
+      {
+        command_id: command.commandId,
+        content_upgrade_command_id: upgradeCommandId,
+        content_upgrade_rule_request_id: ruleRequestId,
+      },
+    );
+  }
+  return Object.freeze({ upgradeCommandId, ruleRequestId });
+}
+
 function validateCommandRow(
   contracts: ContractValidator,
   digest: JsonDigest,
@@ -814,6 +879,12 @@ function validateCommandRow(
     commandKind,
     commandId,
   );
+  const contentUpgradeExecution = readContentUpgradeExecutionIdentity(
+    contracts,
+    row,
+    commandKind,
+    commandId,
+  );
   const base = Object.freeze({
     session,
     commandId,
@@ -834,6 +905,9 @@ function validateCommandRow(
     ...(stageOutcomeExecution === undefined
       ? {}
       : { stageOutcomeExecution }),
+    ...(contentUpgradeExecution === undefined
+      ? {}
+      : { contentUpgradeExecution }),
   });
   if (row.command_status === "received") {
     if (row.result_document !== null) {
@@ -985,6 +1059,62 @@ function readStageOutcomeExecutionIdentity(
     );
   }
   return Object.freeze({ ruleRequestId });
+}
+
+function readContentUpgradeExecutionIdentity(
+  contracts: ContractValidator,
+  row: CommandRow,
+  commandKind: string,
+  commandId: string,
+): ContentUpgradeCommandExecutionIdentity | undefined {
+  if (commandKind !== "content_upgrade.accept") {
+    if (
+      row.content_upgrade_command_id !== null ||
+      row.content_upgrade_rule_request_id !== null
+    ) {
+      throw new EngineFault(
+        "command.journal.database_corrupt",
+        "Non-Content-Upgrade command contains Content Upgrade execution identities",
+        { session_id: row.session_id, command_id: row.command_id },
+      );
+    }
+    return undefined;
+  }
+  if (
+    row.content_upgrade_command_id === null ||
+    row.content_upgrade_rule_request_id === null
+  ) {
+    throw new EngineFault(
+      "command.journal.database_corrupt",
+      "Content Upgrade command is missing its persisted execution identities",
+      { session_id: row.session_id, command_id: row.command_id },
+    );
+  }
+  const upgradeCommandId = assertUuid(
+    contracts,
+    row.content_upgrade_command_id,
+  );
+  const ruleRequestId = assertUuid(
+    contracts,
+    row.content_upgrade_rule_request_id,
+  );
+  if (
+    upgradeCommandId === commandId ||
+    ruleRequestId === commandId ||
+    upgradeCommandId === ruleRequestId
+  ) {
+    throw new EngineFault(
+      "command.journal.database_corrupt",
+      "Content Upgrade execution identities are not pairwise distinct",
+      {
+        session_id: row.session_id,
+        command_id: row.command_id,
+        content_upgrade_command_id: upgradeCommandId,
+        content_upgrade_rule_request_id: ruleRequestId,
+      },
+    );
+  }
+  return Object.freeze({ upgradeCommandId, ruleRequestId });
 }
 
 function readEventCardExecutionIdentity(

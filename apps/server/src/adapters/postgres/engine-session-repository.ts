@@ -7,6 +7,7 @@ import {
   type ContractValidator,
   type JsonObject,
   type JsonValue,
+  type StageModuleLockDocument,
 } from "@luoxia/contracts-runtime/portable";
 import type { WorldContentLockDocument } from "@luoxia/world-core";
 import type { Pool, PoolClient } from "pg";
@@ -53,6 +54,7 @@ interface EngineSessionContextRow {
   readonly current_world_revision_text: string;
   readonly state_document: unknown;
   readonly world_content_lock_document: unknown;
+  readonly stage_module_locks_document: unknown;
 }
 
 export interface LockedEngineSessionContext {
@@ -61,6 +63,7 @@ export interface LockedEngineSessionContext {
   readonly nextServerSequence: number;
   readonly worldState: JsonObject;
   readonly worldContentLock: WorldContentLockDocument;
+  readonly stageModuleLocks: readonly StageModuleLockDocument[];
 }
 
 export function createPostgresEngineSessionRepository(
@@ -345,7 +348,8 @@ export async function readEngineSessionContext(
             s.nonce::text AS nonce,
             w.revision::text AS current_world_revision_text,
             w.state_document,
-            w.world_content_lock_document
+            w.world_content_lock_document,
+            w.stage_module_locks_document
        FROM luoxia_engine.engine_sessions AS s
        JOIN luoxia_engine.worlds AS w
          ON w.world_id = s.world_id
@@ -374,6 +378,11 @@ export async function readEngineSessionContext(
   const worldContentLock = contracts.assertObject(
     CONTRACT_REF.worldContentLock,
     row.world_content_lock_document,
+  );
+  const stageModuleLocks = validateStageModuleLocks(
+    contracts,
+    row.stage_module_locks_document,
+    sessionId,
   );
   const currentWorldRevision = parseSafeUnsignedInteger(
     row.current_world_revision_text,
@@ -418,7 +427,27 @@ export async function readEngineSessionContext(
     nextServerSequence,
     worldState: worldState.value,
     worldContentLock,
+    stageModuleLocks,
   });
+}
+
+function validateStageModuleLocks(
+  contracts: ContractValidator,
+  candidate: unknown,
+  sessionId: string,
+): readonly StageModuleLockDocument[] {
+  if (!Array.isArray(candidate)) {
+    throw new EngineFault(
+      "session.database_corrupt",
+      "World stage_module_locks_document must be an array",
+      { session_id: sessionId },
+    );
+  }
+  return Object.freeze(
+    candidate.map((entry: unknown) =>
+      contracts.assertObject(CONTRACT_REF.stageModuleLock, entry),
+    ),
+  );
 }
 
 export function assertSessionWorldCurrent(

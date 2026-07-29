@@ -18,6 +18,7 @@ import type {
   ServerEnvelopeFactory,
 } from "../../application/server-envelope.js";
 import type { SessionSynchronizationService } from "../../application/session-synchronization.js";
+import type { StageOpenMessageProjector } from "../../application/stage-open-message-projector.js";
 import type { SessionViewAssembler } from "../../application/session-view-assembler.js";
 import { readEngineSessionContext } from "./engine-session-repository.js";
 import {
@@ -32,6 +33,7 @@ export interface PostgresSessionSynchronizationDependencies {
   readonly pool: Pool;
   readonly contracts: ContractValidator;
   readonly views: SessionViewAssembler;
+  readonly stageOpens: StageOpenMessageProjector;
   readonly envelopes: ServerEnvelopeFactory;
 }
 
@@ -47,6 +49,7 @@ class PostgresSessionSynchronization
   readonly #pool: Pool;
   readonly #contracts: ContractValidator;
   readonly #views: SessionViewAssembler;
+  readonly #stageOpens: StageOpenMessageProjector;
   readonly #envelopes: ServerEnvelopeFactory;
 
   public constructor(
@@ -55,6 +58,7 @@ class PostgresSessionSynchronization
     this.#pool = dependencies.pool;
     this.#contracts = dependencies.contracts;
     this.#views = dependencies.views;
+    this.#stageOpens = dependencies.stageOpens;
     this.#envelopes = dependencies.envelopes;
   }
 
@@ -141,11 +145,13 @@ class PostgresSessionSynchronization
               )
             : context.session;
           const messages = publishesView
-            ? createSessionViewMessage(
+            ? createSynchronizationMessages(
                 this.#views,
+                this.#stageOpens,
                 nextSession,
                 context.worldState,
                 context.worldContentLock,
+                context.stageModuleLocks.map((lock) => lock.value),
               )
             : createUnsupportedProtocolMessage(request);
           const envelopes = this.#envelopes.createBatch({
@@ -254,11 +260,13 @@ function readSynchronizationRequest(
   );
 }
 
-function createSessionViewMessage(
+function createSynchronizationMessages(
   views: SessionViewAssembler,
+  stageOpens: StageOpenMessageProjector,
   session: EngineSessionRecord,
   worldState: JsonObject,
   worldContentLock: WorldContentLockDocument,
+  stageModuleLocks: readonly JsonObject[],
 ): readonly JsonObject[] {
   const view = views.assemble({
     session,
@@ -266,11 +274,19 @@ function createSessionViewMessage(
     worldContentLock,
     noticeCandidates: [],
   });
+  const stageMessages = stageOpens.project({
+    worldId: session.worldId,
+    worldContentLock,
+    stageModuleLocks,
+    worldState,
+    playerEntityId: session.playerEntityId,
+  });
   return Object.freeze([
     Object.freeze({
       type: "session.view",
       view: view.value,
     }),
+    ...stageMessages.map((message) => message.value),
   ]);
 }
 

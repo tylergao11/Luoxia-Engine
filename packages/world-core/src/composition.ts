@@ -1,6 +1,7 @@
 import {
   CONTRACT_REF,
   EngineFault,
+  assertSaveEnvelopeRelationships,
   expectInteger,
   expectJsonObject,
   expectProperty,
@@ -8,6 +9,7 @@ import {
   jsonEquals,
   type ContractValidator,
   type JsonObject,
+  type SaveEnvelopeDocument,
   type ValidatedJsonObject,
 } from "@luoxia/contracts-runtime/portable";
 
@@ -52,6 +54,7 @@ export interface PacketSemanticGate {
   assertApplicable(
     packet: ContentPacketDocument,
     snapshot: WorldSnapshotDocument,
+    authorityEnvelope: SaveEnvelopeDocument,
   ): Promise<void>;
 }
 
@@ -59,6 +62,7 @@ export interface PacketTransitionCandidates {
   readonly nextWorldStateCandidate: unknown;
   readonly domainEventCandidates: readonly unknown[];
   readonly materializationRequestCandidates: readonly unknown[];
+  readonly contentUpgradeSaveCandidate?: unknown;
 }
 
 export interface PacketStateTransition {
@@ -85,11 +89,17 @@ export interface SessionViewProjector {
 
 export {
   createPacketSemanticGate,
+  type AssetAcceptanceAuthorizationLookup,
+  type AssetAcceptanceAuthorizationRecord,
+  type ContentUpgradeAuthorizationClock,
+  type ContentUpgradeAuthorizationLookup,
+  type ContentUpgradeAuthorizationRecord,
   type DecimalAmountComparer,
   type PacketContentDigest,
   type PacketSemanticGateDependencies,
   type RuleHoldEvaluator,
   type RulePluginProposalReceiptLookup,
+  type StageOpenContractLookup,
   type StaticComponentDigestLookup,
 } from "./packet-semantic-gate.js";
 
@@ -109,8 +119,11 @@ export {
   type BundleLockRef,
   type ContentRulePluginOperationBinding,
   type ContentRulePluginOperationKind,
+  type ContentUpgradeContentBinding,
   type ContentRuntimeCatalog,
   type ContentRuntimeCatalogDependencies,
+  type MaterializationContentBinding,
+  type PresentationProfileRefLike,
   type RuleEvaluationBinding,
   type RuleRefLike,
   type StaticDefinitionRefLike,
@@ -130,6 +143,15 @@ export {
 export { materializeContentFieldValues } from "./content-field-values.js";
 
 export {
+  createContentUpgradeAuthorizationAuthority,
+  type ContentUpgradeAuthorizationAuthority,
+  type ContentUpgradeAuthorizationAuthorityDependencies,
+  type ContentUpgradeAuthorizationDigest,
+  type ContentUpgradeAuthorizationIssueInput,
+  type ContentUpgradeAuthorizationTokenCodec,
+} from "./content-upgrade-authorization.js";
+
+export {
   createDeterministicContextAuthority,
   type DeterministicContextAuthority,
   type DeterministicContextAuthorityDependencies,
@@ -139,6 +161,14 @@ export {
   type DeterministicContextIssueInput,
   type DeterministicContextTokenCodec,
 } from "./deterministic-context-authority.js";
+
+export {
+  createRulePluginChoiceAuthority,
+  type RulePluginChoiceAuthority,
+  type RulePluginChoiceAuthorityDependencies,
+  type RulePluginChoiceResolutionIssueInput,
+  type RulePluginChoiceResolutionVerificationInput,
+} from "./rule-plugin-choice-authority.js";
 
 export interface PacketCommitPreparation {
   readonly committedEventCandidate: unknown;
@@ -151,11 +181,18 @@ export interface AuthorizedPacketCommit {
   readonly committedEvent: CommittedEventDocument;
   readonly result: ApplyPacketResultDocument;
   readonly materializationRequests: readonly MaterializationRequestDocument[];
+  readonly contentUpgradeSave?: SaveEnvelopeDocument;
 }
 
 export interface LockedWorldTransaction {
   readDuplicateResult(packet: ContentPacketDocument): Promise<unknown | undefined>;
   readSnapshot(): Promise<unknown>;
+  /**
+   * Returns the current SaveEnvelope assembled from the same locked world row
+   * as readSnapshot. World Core validates both documents and their exact
+   * identity relationship before semantic evaluation.
+   */
+  readAuthorityEnvelope(): Promise<unknown>;
   /**
    * Creates an unpersisted identity candidate for this apply attempt.
    * It must not reserve a row or mutate storage before all candidates validate.
@@ -169,6 +206,7 @@ export interface LockedWorldTransaction {
     nextWorldState: WorldStateDocument,
     domainEvents: readonly DomainEventDocument[],
     materializationRequests: readonly MaterializationRequestDocument[],
+    contentUpgradeSave?: SaveEnvelopeDocument,
   ): Promise<PacketCommitPreparation>;
   commit(prepared: AuthorizedPacketCommit): Promise<void>;
 }
@@ -236,7 +274,23 @@ class DefaultWorldAuthority implements WorldAuthority {
           await transaction.readSnapshot(),
         );
         assertSnapshotMatchesPacket(packet.value, snapshot.value);
-        await this.#semanticGate.assertApplicable(packet, snapshot);
+        const authorityEnvelope = this.#contracts.assertObject(
+          CONTRACT_REF.saveEnvelope,
+          await transaction.readAuthorityEnvelope(),
+        );
+        assertSaveEnvelopeRelationships(
+          this.#contracts,
+          authorityEnvelope,
+        );
+        assertSnapshotMatchesAuthorityEnvelope(
+          snapshot.value,
+          authorityEnvelope.value,
+        );
+        await this.#semanticGate.assertApplicable(
+          packet,
+          snapshot,
+          authorityEnvelope,
+        );
 
         const commitIdentity = this.#contracts.assertObject(
           CONTRACT_REF.packetCommitIdentity,
@@ -264,12 +318,53 @@ class DefaultWorldAuthority implements WorldAuthority {
             ),
           ),
         );
+        const contentUpgradeSave =
+          transition.contentUpgradeSaveCandidate === undefined
+            ? undefined
+            : this.#contracts.assertObject(
+                CONTRACT_REF.saveEnvelope,
+                transition.contentUpgradeSaveCandidate,
+              );
+        const packetSource = expectJsonObject(
+          expectProperty(packet.value, "source", "ContentPacket"),
+          "ContentPacket.source",
+        );
+        const isContentUpgrade =
+          expectString(packetSource, "source_kind", "PacketSource") ===
+          "content_upgrade";
+        if (isContentUpgrade !== (contentUpgradeSave !== undefined)) {
+          throw new EngineFault(
+            "world.apply_packet.content_upgrade_candidate_mismatch",
+            "Content Upgrade packet source and transition candidate must occur together",
+            {
+              source_kind: expectString(
+                packetSource,
+                "source_kind",
+                "PacketSource",
+              ),
+              has_content_upgrade_save: contentUpgradeSave !== undefined,
+            },
+          );
+        }
+        if (contentUpgradeSave !== undefined) {
+          assertSaveEnvelopeRelationships(
+            this.#contracts,
+            contentUpgradeSave,
+          );
+          assertContentUpgradeSaveCandidate(
+            packet.value,
+            snapshot.value,
+            nextWorldState.value,
+            contentUpgradeSave.value,
+          );
+        }
         const preparation = await transaction.prepare(
           packet,
           commitIdentity,
           nextWorldState,
           domainEvents,
           materializationRequests,
+          contentUpgradeSave,
         );
         const committedEvent = this.#contracts.assertObject(
           CONTRACT_REF.committedEvent,
@@ -296,6 +391,9 @@ class DefaultWorldAuthority implements WorldAuthority {
             committedEvent,
             result,
             materializationRequests,
+            ...(contentUpgradeSave === undefined
+              ? {}
+              : { contentUpgradeSave }),
           }),
         );
         return result;
@@ -441,6 +539,82 @@ function assertCommittedEvent(
         packet_basis_revision: packetBasisRevision,
         event_world_id: eventWorldId,
         packet_world_id: packetWorldId,
+      },
+    );
+  }
+}
+
+function assertSnapshotMatchesAuthorityEnvelope(
+  snapshot: JsonObject,
+  envelope: JsonObject,
+): void {
+  const snapshotWorldId = expectString(
+    snapshot,
+    "world_id",
+    "WorldSnapshot",
+  );
+  const snapshotRevision = expectInteger(
+    snapshot,
+    "world_revision",
+    "WorldSnapshot",
+  );
+  if (
+    expectString(envelope, "world_id", "SaveEnvelope") !== snapshotWorldId ||
+    expectInteger(envelope, "world_revision", "SaveEnvelope") !==
+      snapshotRevision ||
+    !jsonEquals(
+      expectProperty(envelope, "world_state", "SaveEnvelope"),
+      expectProperty(snapshot, "world_state", "WorldSnapshot"),
+    )
+  ) {
+    throw new EngineFault(
+      "world.apply_packet.authority_envelope_mismatch",
+      "Locked SaveEnvelope does not represent the exact WorldSnapshot used for apply_packet",
+      {
+        world_id: snapshotWorldId,
+        world_revision: snapshotRevision,
+      },
+    );
+  }
+}
+
+function assertContentUpgradeSaveCandidate(
+  packet: JsonObject,
+  snapshot: JsonObject,
+  nextWorldState: JsonObject,
+  candidateSave: JsonObject,
+): void {
+  const packetWorldId = expectString(packet, "world_id", "ContentPacket");
+  const basisRevision = expectInteger(
+    packet,
+    "basis_revision",
+    "ContentPacket",
+  );
+  const candidateRevision = expectInteger(
+    candidateSave,
+    "world_revision",
+    "SaveEnvelope",
+  );
+  if (
+    expectString(candidateSave, "world_id", "SaveEnvelope") !==
+      packetWorldId ||
+    expectString(snapshot, "world_id", "WorldSnapshot") !== packetWorldId ||
+    expectInteger(snapshot, "world_revision", "WorldSnapshot") !==
+      basisRevision ||
+    candidateRevision !== basisRevision + 1 ||
+    !Number.isSafeInteger(candidateRevision) ||
+    !jsonEquals(
+      expectProperty(candidateSave, "world_state", "SaveEnvelope"),
+      nextWorldState,
+    )
+  ) {
+    throw new EngineFault(
+      "world.apply_packet.content_upgrade_candidate_mismatch",
+      "Content Upgrade SaveEnvelope does not represent the exact next world revision and state",
+      {
+        world_id: packetWorldId,
+        basis_revision: basisRevision,
+        candidate_revision: candidateRevision,
       },
     );
   }

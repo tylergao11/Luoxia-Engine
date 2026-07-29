@@ -428,6 +428,9 @@
         },
         {
           "$ref": "#/$defs/EventBudgetOpenOp"
+        },
+        {
+          "$ref": "#/$defs/ContentUpgradeApplyOp"
         }
       ]
     },
@@ -2369,9 +2372,77 @@
           "format": "date-time"
         },
         "result_digest": {
+          "description": "The lowercase SHA-256 of the RFC 8785 canonical UTF-8 bytes of the candidate SaveEnvelope with this newest entry's result_digest member omitted. A save_schema step computes this after the Server has preserved all prior history and appended the step-owned source, target, implementation_digest and executed_at fields; content_upgrade uses the same omission rule for its larger authorized entry.",
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "upgrade_command_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "migration_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "source_save_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "authorization_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "deterministic_context_digest": {
           "$ref": "common.v1.schema.json#/$defs/Sha256"
         }
-      }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "migration_kind": {
+              "const": "save_schema"
+            }
+          },
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "upgrade_command_id"
+                ]
+              },
+              {
+                "required": [
+                  "migration_id"
+                ]
+              },
+              {
+                "required": [
+                  "source_save_digest"
+                ]
+              },
+              {
+                "required": [
+                  "authorization_digest"
+                ]
+              },
+              {
+                "required": [
+                  "deterministic_context_digest"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "properties": {
+            "migration_kind": {
+              "const": "content_upgrade"
+            }
+          },
+          "required": [
+            "upgrade_command_id",
+            "migration_id",
+            "source_save_digest",
+            "authorization_digest",
+            "deterministic_context_digest"
+          ]
+        }
+      ]
     },
     "WorldContentLock": {
       "type": "object",
@@ -2468,6 +2539,22 @@
           "items": {
             "$ref": "#/$defs/MigrationHistoryEntry"
           }
+        }
+      }
+    },
+    "ContentUpgradeApplyOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "candidate_save"
+      ],
+      "properties": {
+        "op": {
+          "const": "content_upgrade.apply"
+        },
+        "candidate_save": {
+          "$ref": "#/$defs/SaveEnvelope"
         }
       }
     },
@@ -3956,6 +4043,54 @@
               "$ref": "common.v1.schema.json#/$defs/Sha256"
             }
           }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source_kind",
+            "acceptance_id"
+          ],
+          "properties": {
+            "source_kind": {
+              "const": "asset_acceptance"
+            },
+            "acceptance_id": {
+              "$ref": "common.v1.schema.json#/$defs/Uuid"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source_kind",
+            "upgrade_command_id",
+            "migration_id",
+            "source_save_digest",
+            "authorization_digest",
+            "result_digest"
+          ],
+          "properties": {
+            "source_kind": {
+              "const": "content_upgrade"
+            },
+            "upgrade_command_id": {
+              "$ref": "common.v1.schema.json#/$defs/Uuid"
+            },
+            "migration_id": {
+              "$ref": "common.v1.schema.json#/$defs/Identifier"
+            },
+            "source_save_digest": {
+              "$ref": "common.v1.schema.json#/$defs/Sha256"
+            },
+            "authorization_digest": {
+              "$ref": "common.v1.schema.json#/$defs/Sha256"
+            },
+            "result_digest": {
+              "$ref": "common.v1.schema.json#/$defs/Sha256"
+            }
+          }
         }
       ]
     },
@@ -4017,9 +4152,6 @@
         },
         {
           "$ref": "#/$defs/MaterializationRequestOp"
-        },
-        {
-          "$ref": "#/$defs/VisualBindingUpsertOp"
         },
         {
           "$ref": "#/$defs/DomainEventEmitOp"

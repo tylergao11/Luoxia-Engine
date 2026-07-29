@@ -144,7 +144,7 @@ ContentBundle 直接初始化角色行动状态机、世界状态机、角色私
 
 “按天推进”不是把玩家行为延迟到日结才生效。对话、EventCard、关系、物品、伤势及其他确定结果仍在发生时经 `apply_packet` 立即提交；日边界只负责 NPC 与世界状态机、自主事件、延迟后果和下一日机会的集中推进。世界不会按现实时间在玩家未提交命令时自行流逝，玩家阶段只由显式 `player_day.end` 结束。
 
-等待模型与并行任务属于 Runtime 的编排工作状态，不写入 WorldState。Server 使用 PostgreSQL Command Journal，以 `(session_id, command_id)` 锁定请求摘要和命令所有的稳定子身份：同一摘要恢复或返回已有结果，不同摘要明确冲突。阶段只从 Command Journal 身份、模型/RulePlugin Journal 和 CommittedEvent 等各自真相组合推导，不复制第二份 workflow 状态。基础对话首次接收时原子保存 dialogue、human/character turn、两次 RulePlugin request 与一次 model request 共六个 UUID；专属 Dialogue Director run 再持久化 `director.dialogue_events` 或 `director.system_dialogue` model request ID。verified Director 输出中的 Definition、GoalPlan、EventCard 三类提案必须一次性按精确顺序绑定 proposal ID 与 RulePlugin request ID；Definition/GoalPlan 同时绑定 Server 生成的 WorldState ID 及稳定 provenance 时间。后续按 Definition → GoalPlan → EventCard 固定顺序执行，阶段仍只由各 Journal 与 CommittedEvent 推导。三类动态提案的唯一当前持久化所有者是 `dialogue_director_proposal_runs`；旧的 EventCard 专用子表不再属于当前 schema，也不得形成兼容读取或第二真相。已有部署数据库必须由部署流程显式迁移或重建，Engine 不在运行时改表。`event_card.trigger` 在 Command Journal 持有与客户端 command ID 分离的 Server packet ID；`map.move`、`dialogue.close` 与 `stage.outcome_proposal` 各自持有 Server 生成、全局唯一的 RulePlugin request ID；`player_day.end` 只额外保存不可变的源日。日循环的状态机、Character Reaction、AutomaticEvent 与三种 phase transition 使用 PostgreSQL `(world_id, day, execution_kind, subject_id)` 唯一身份表取得稳定 request ID；WorldExtension resolver request ID 则由 runtime world、plan、node 与已提交 extension request 通过 UUIDv5 唯一派生，不建立映射表。同一 world 同时只允许一条 `received` 命令。RulePlugin 请求在执行前持久化，因其 deterministic + no_io 可以用完全相同请求重放；`apply_packet` 只用同一 packet ID 幂等重试。已 dispatched 但没有持久化结果的模型调用保持 ambiguous/blocked，禁止自动重调并继续持有 world 执行槽。命令完成时 Session 推进、CommandResult 与精确 ServerEnvelope outbox 在同一 PostgreSQL 事务提交，重复命令重放相同 message ID、sequence 与正文。NPC 反应落地后不在当天重新唤醒 Director；后续 Director 调用自然读取最新世界投影与客观轨迹。任何必要模型响应缺失都会使当前编排保持未完成，不生成无影响、跳过或替代结果。
+等待模型与并行任务属于 Runtime 的编排工作状态，不写入 WorldState。Server 使用 PostgreSQL Command Journal，以 `(session_id, command_id)` 锁定请求摘要和命令所有的稳定子身份：同一摘要恢复或返回已有结果，不同摘要明确冲突。阶段只从 Command Journal 身份、模型/RulePlugin Journal 和 CommittedEvent 等各自真相组合推导，不复制第二份 workflow 状态。基础对话首次接收时原子保存 dialogue、human/character turn、两次 RulePlugin request 与一次 model request 共六个 UUID；专属 Dialogue Director run 再持久化 `director.dialogue_events` 或 `director.system_dialogue` model request ID。verified Director 输出中的 Definition、GoalPlan、EventCard 三类提案必须一次性按精确顺序绑定 proposal ID 与 RulePlugin request ID；Definition/GoalPlan 同时绑定 Server 生成的 WorldState ID 及稳定 provenance 时间。后续按 Definition → GoalPlan → EventCard 固定顺序执行，阶段仍只由各 Journal 与 CommittedEvent 推导。三类动态提案的唯一当前持久化所有者是 `dialogue_director_proposal_runs`；旧的 EventCard 专用子表不再属于当前 schema，也不得形成兼容读取或第二真相。已有部署数据库必须由部署流程显式迁移或重建，Engine 不在运行时改表。`event_card.trigger` 在 Command Journal 持有与客户端 command ID 分离的 Server packet ID；`map.move`、`dialogue.close` 与 `stage.outcome_proposal` 各自持有 Server 生成、全局唯一的 RulePlugin request ID；`content_upgrade.accept` 同时持有全局 upgrade/packet ID 与独立 RulePlugin request ID；`player_day.end` 只额外保存不可变的源日。日循环的状态机、Character Reaction、AutomaticEvent 与三种 phase transition 使用 PostgreSQL `(world_id, day, execution_kind, subject_id)` 唯一身份表取得稳定 request ID；WorldExtension resolver request ID 则由 runtime world、plan、node 与已提交 extension request 通过 UUIDv5 唯一派生，不建立映射表。同一 world 同时只允许一条 `received` 命令。RulePlugin 请求在执行前持久化，因其 deterministic + no_io 可以用完全相同请求重放；Content Upgrade 还必须先持久化 Core 授权，并在 resolved 输出核验后把授权账本单向推进到 `commit_ready`。`apply_packet` 只用同一 packet ID 幂等重试。已 dispatched 但没有持久化结果的模型调用保持 ambiguous/blocked，禁止自动重调并继续持有 world 执行槽。命令完成时 Session 推进、CommandResult 与精确 ServerEnvelope outbox 在同一 PostgreSQL 事务提交，重复命令重放相同 message ID、sequence 与正文。NPC 反应落地后不在当天重新唤醒 Director；后续 Director 调用自然读取最新世界投影与客观轨迹。任何必要模型响应缺失都会使当前编排保持未完成，不生成无影响、跳过或替代结果。
 
 新世界 revision 0 固定处于 day 1 `autonomous`，不预开 EventBudget。可信管理面必须先调用 `kernel.dayCycle.advanceToPlayer`：Runtime 先按 GoalPlan/GoalNode 原序串行解析 active 计划中已提交的 WorldExtensionRequest，再按实例顺序推进全部状态机，提交 `autonomous → director_settlement`，从连续 CommittedEvent 重建上个 settlement 边界以来的客观轨迹并执行每日唯一 Director 请求；CharacterEvent 按目标 Entity 聚合并行调用 Character Mind，AutomaticEvent 再按 Director 顺序经专属 RulePlugin resolver 串行提交；最后 `director_settlement → player` 与该日唯一 `event_budget.open` 同包提交。`player_day.end` 固定提交 `player d → autonomous d+1`（同包穷举过期卡），随后恢复同一流程直到下一日 player；命令持久化的 `from_day` 防止崩溃重进时多推进一天。
 
@@ -262,11 +262,11 @@ event_card.trigger command
 
 `ledger.post` 的全部 entries 合并同账户后必须精确零和。首个严格零和的 `ledger.post` 可以在同一候选状态内创建尚不存在的 ledger；此后仍只有普通零和过账，不提供 mint / burn 特权。发行、库存或财政账户由内容定义，Engine 不内置账户；增发与销毁只能通过对手账户完成，是否允许由世界规则与前置条件裁决。算术层不拦截负余额。原 `LedgerState.balances` 账户必须唯一；过账保留原账户顺序，新账户按 entries 中首次出现顺序追加，零余额不删除。`ledger.balance_at_least` 使用同一 ExactDecimal 比较。
 
-`apply_packet` 在世界锁内依次完成幂等查询、同事务快照、语义门禁，并为本次提交生成一个尚未持久化、经 Schema 校验的 `PacketCommitIdentity` 候选；生成候选不得预留记录或修改存储。该身份作为调用参数传给唯一的 EffectOp Handler Map，不能成为 StateTransition 单例的构造依赖。Handler Map 一次产出候选 WorldState、按 op 顺序投影的 DomainEvent 与 MaterializationRequest；三类结果分别通过正式 Schema 后才交给事务 prepare。`MaterializationRequestOp` 只携带不含提交身份和生命周期的 Draft，Handler Map 必须注入本次 event ID 并创建 `pending` 正式请求。`domain_event.emit` 的唯一落点是 `CommittedEvent.domain_events`，`materialization.request` 的当前记录进入与世界提交原子的 Materialization Ledger / outbox，二者都不进入 WorldState；AtomicPacketStore 只能持久化这些已验证结果，禁止重新扫描 Packet 实现第二套 EffectOp 语义。
+`apply_packet` 在世界锁内依次完成幂等查询、同事务快照、从该锁定行分字段重建并整体验证同一 SaveEnvelope 权威上下文、语义门禁，并为本次提交生成一个尚未持久化、经 Schema 校验的 `PacketCommitIdentity` 候选；生成候选不得预留记录或修改存储。普通语义只消费锁定 WorldSnapshot；`stage.open` 还必须从同一权威上下文精确取得 WorldContentLock 与 StageModule locks，禁止事务外二次读取、调用方拼锁或按 module/scene 猜测。该身份作为调用参数传给唯一的 EffectOp Handler Map，不能成为 StateTransition 单例的构造依赖。Handler Map 一次产出候选 WorldState、按 op 顺序投影的 DomainEvent 与 MaterializationRequest；三类结果分别通过正式 Schema 后才交给事务 prepare。`MaterializationRequestOp` 只携带不含提交身份和生命周期的 Draft，Handler Map 必须注入本次 event ID 并创建 `pending` 正式请求。`domain_event.emit` 的唯一落点是 `CommittedEvent.domain_events`，`materialization.request` 的当前记录进入与世界提交原子的 Materialization Ledger / outbox，二者都不进入 WorldState；AtomicPacketStore 只能持久化这些已验证结果，禁止重新扫描 Packet 实现第二套 EffectOp 语义。
 
-v1 的唯一权威 Store 是 PostgreSQL 18.x，由 Server composition root 以 node-postgres `Pool` 显式注入。正式 SQL migration 创建 `worlds`、`committed_events`、`materialization_requests`、`engine_sessions`、`command_journal`、`command_server_envelopes`、模型调用记录、`rule_plugin_invocations`、日循环身份、Dialogue Director run 与动态 EventCard 子身份记录：WorldState 是 `worlds.state_document` 的唯一当前真相，CommittedEvent 是不可变事件真相，物化请求以同一事务 outbox 记录；其他表只保存正式合同原文、会话状态、请求摘要、编排身份或已经 Schema 验证的出站 Envelope，不保存第二份世界状态。`engine_sessions.next_server_sequence` 是该 Session 下一条 ServerEnvelope sequence 的唯一分配游标。JSONB 只能保存已经过对应 Schema 的完整合同，列、revision 与 JSON 关键身份字段必须由数据库约束相互校验。所有 Store 都不读取环境变量、不创建 Pool、不自动执行 migration，也不重试事务。
+v1 的唯一权威 Store 是 PostgreSQL 18.x，由 Server composition root 以 node-postgres `Pool` 显式注入。正式 SQL migration 创建 `worlds`、`committed_events`、`materialization_requests`、`engine_sessions`、`command_journal`、`command_server_envelopes`、模型调用记录、`rule_plugin_invocations`、`content_upgrade_authorizations`、日循环身份与 Dialogue Director run：WorldState 是 `worlds.state_document` 的唯一当前真相，CommittedEvent 是不可变事件真相，物化请求以同一事务 outbox 记录；授权表只保存 Core 签发的正式授权、命令/插件身份和 commit-ready 结果摘要，候选 SaveEnvelope 仍只存在于 RulePlugin Journal 原始响应及最终 `worlds` 分字段事实中。`engine_sessions.next_server_sequence` 是该 Session 下一条 ServerEnvelope sequence 的唯一分配游标。JSONB 只能保存已经过对应 Schema 的完整合同，列、revision 与 JSON 关键身份字段必须由数据库约束相互校验。所有 Store 都不读取环境变量、不创建 Pool、不自动执行 migration，也不重试事务。
 
-每次 `apply_packet` 使用同一 PoolClient 执行 `BEGIN ISOLATION LEVEL READ COMMITTED`，先锁定目标 world，再在锁内查询全局 packet_id 幂等记录、读取快照、生成未持久化 event ID、prepare 全部候选并逐项核验，最后依次写入 CommittedEvent、Materialization outbox，使用 revision CAS 更新 WorldState；只有完整 authorized commit 或精确 duplicate 才由外层物理 COMMIT，其余情况一律 ROLLBACK。Save Schema migration、Content Upgrade 与数据库 DDL migration 是三条独立流程：前两者不得借数据库 schema 变更重解释世界，DDL migration 也不得改写已提交世界或内容锁。
+每次 `apply_packet` 使用同一 PoolClient 执行 `BEGIN ISOLATION LEVEL READ COMMITTED`，先锁定目标 world，再在锁内查询全局 packet_id 幂等记录、读取快照、生成未持久化 event ID、prepare 全部候选并逐项核验，最后依次写入 CommittedEvent、Materialization outbox，使用 revision CAS 更新权威世界事实；只有完整 authorized commit 或精确 duplicate 才由外层物理 COMMIT，其余情况一律 ROLLBACK。普通 packet 只更新 WorldState 与 revision/event cursor；唯一例外是 `content_upgrade` source 下的单一 `content_upgrade.apply`，它必须携带 commit-ready 授权链，并在同一 CAS 中把已验证候选 SaveEnvelope 的 WorldState、WorldContentLock、依赖/实现锁、资产摘要和迁移历史一起原子拆列提交。Save Schema migration、Content Upgrade 与数据库 DDL migration 是三条独立流程：前两者不得借数据库 schema 变更重解释世界，DDL migration 也不得改写已提交世界或内容锁。
 
 Runtime 读侧按 `world_id` 重新校验当前 WorldSnapshot，或按明确的排他起点与包含终点读取连续、有序的 CommittedEvent 区间；数据库列与每份合同文档的身份不一致都视为存储损坏。RulePlugin 唯一执行顺序固定为 Gateway prepare（Schema、模型证据、DeterministicContext）→ Journal 提交完整 RulePluginRequest → deterministic/no_io adapter → Gateway 校验响应 → Journal resolved。`prepared` 崩溃残留可用完全相同请求重放；`resolved` 必须经同一 Gateway 重验；同一 request ID 的不同请求或不同响应明确冲突。PacketProposal 仅作为 resolved response 的精确成员保存，World Core 仍只通过 `RulePluginProposalReceiptLookup` 取得重新校验后的正式 Proposal。
 
@@ -276,7 +276,7 @@ Runtime 读侧按 `world_id` 重新校验当前 WorldSnapshot，或按明确的�
 
 ### 7.2 Runtime Content Activation
 
-部署组合根通过 `createRuntimeContentActivation` 显式提供世界事务 Pool、同库独立 RulePlugin Journal Pool、`ContractValidator`、`JsonDigest`、`ModelProvider`、五种闭合模型入口各自的 ModelProfile ID、不可信 ContentBundle JSON 列表、受信 `RulePluginModuleV1[]`，以及不可信 `stageModuleManifestCandidates`。五个 ModelProfile 选择都属于部署事实，不进入内容、世界或客户端消息；activation 在任何 durable dispatch 前分别验证 Provider 的精确 `(profile, request kind)` 能力。DeterministicContext 与 Session basis 分别使用必填 HMAC keyring，组合根拒绝两者复用任何密钥材料；无默认 key、默认空数组或兼容入口。Server `runtime` 模式只按显式绝对路径加载一个受信 deployment module，不扫描目录；module 返回完整 activation input 和关闭全部部署资源的 `close`。
+部署组合根通过 `createRuntimeContentActivation` 显式提供世界事务 Pool、同库且彼此独立的 RulePlugin Journal Pool 与 Materialization Ledger Pool、`ContractValidator`、`JsonDigest`、`ModelProvider`、五种闭合模型入口各自的 ModelProfile ID、不可信 ContentBundle JSON 列表、受信 `RulePluginModuleV1[]`、不可信 `stageModuleManifestCandidates`、受信 `SaveSchemaMigrationModuleV1[]` 与不可信 migration plan candidates。两个辅助 Pool 都不得与 world transaction Pool 或彼此复用；RulePlugin Journal Pool 同时服务持锁期间只读的 Content Upgrade 授权联接，避免查询耗尽 world transaction Pool。五个 ModelProfile 选择都属于部署事实，不进入内容、世界或客户端消息；activation 在任何 durable dispatch 前分别验证 Provider 的精确 `(profile, request kind)` 能力。DeterministicContext、Session basis 与 Content Upgrade authorization 分别使用必填 HMAC keyring，组合根拒绝三者两两复用任何密钥材料；升级授权 lifetime 秒数也必须显式提供。无默认 key、默认 migration plan 或兼容入口；没有历史迁移制品时，部署仍显式提供两个空数组。Server `runtime` 模式只按显式绝对路径加载一个受信 deployment module，不扫描目录；module 返回完整 activation input 和关闭全部部署资源的 `close`。
 
 激活路径固定为：
 
@@ -316,7 +316,7 @@ Stage Registry 只证明依赖与场景合同可用；`requiredStageModules` 只
 - 可以评估 RuleRef、解析 Capability、验证同一份 DynamicDefinitionProposal / GoalPlanProposal、解析已提交的 WorldExtensionRequest、提出该 operation 白名单内的 PacketProposal，以及执行显式内容升级映射；
 - 不能访问数据库、模型 Provider、文件系统、网络、客户端运行时内部对象或 WorldState 写句柄；
 - 不能调用 `apply_packet`，不能发明新的 EffectOp executor；Core 还必须逐项验证 `proposed_by` 与 request/plugin/operation 相同，并验证每个 op 属于该 operation 的 allowed-op 子集；
-- 随机只返回 ChoiceSpec；DeterministicContext 由 Core 签发 context ID、digest 与 token，插件响应必须原样回显，Core 比对后才可封装 Packet；
+- 插件不得自行取随机数；需要选择时只能返回 ChoiceSpec。选择所有权固定属于 Server：World Core 校验唯一 `choice_id` / `option_id` 与正整数权重，使用 Server OS CSPRNG 产生 256-bit 熵，再以绑定父子 request、ChoiceSpec JCS digest 与计数器的 SHA-256 rejection sampling 做无偏加权选择。Core 将 `choice_id + option_id + entropy_commitment` 作为唯一新增项签入新的 DeterministicContext；原 logical time 与 external results 必须逐值保持。熵揭示、承诺、ChoiceSpec digest、新 context 与父子 request ID 在继续调用插件前写入 PostgreSQL RulePlugin Journal；一个父请求只允许一个子请求，恢复只能复用该边，不重新抽取。插件从新 context 读取选项并返回终态，或以新的 choice_id 请求下一层；链最长 64 层。该流程不下发客户端、不使用 `Math.random`、不按首项或权重顺序代选；
 - 插件 API 版本与实现 digest 被存档锁定，缺少依赖时拒绝加载，不启用通用兜底规则；
 - 内容包只声明通用 capability/plugin ID 与配置，组合根解析实现，World Core 不按世界 import 代码。
 
@@ -335,7 +335,7 @@ RuleRef
        deterministic_context = 当前 ContentPacket 原值
        request_id 仅作关联，不进入规则语义或存档
   → RulePluginGateway（Schema + 语义门禁 + 同一 ABI Adapter）
-  → 仅 ValidationOutput.valid 映射为 holds 布尔；reject / choice.required 明确失败
+  → 仅 ValidationOutput.valid 映射为 holds 布尔；reject 明确失败，合同不允许 ChoiceSpec
 ```
 
 ContentBundle 的 `DependencyLock` 不含 `api_version`；`PluginLock.api_version` 只来自已注册 manifest，不用 `DependencyLock.version` 猜测。`DependencyLock.version` 必须等于 `manifest.implementation_version`。Catalog 无法解析绑定或 ABI 未注册实现时立即失败，不猜测映射。`rule.holds` 求值只读，不生成 PacketProposal，不调用 `apply_packet`。
@@ -355,11 +355,12 @@ StageInstance 是有开始、检查点和结束边界的局部行动事务。检
 服务端 Content Activation 已建立引擎中立的 StageModule manifest Registry：组合根显式传入不可信 manifests，经 `client-bridge.v1` 校验后锁定 `module_id`、`StageModuleLock`、scene 索引与 `depends_on` DAG。该 Registry 只服务依赖与场景合同门禁，不是完整 Stage Runtime；不读取目录、不动态 import、不执行制品。正式 Unity Host 的本地运行 ABI 必须由组合根显式注册；manifest `entrypoint` 只交给 Unity 构建与部署流程解释，不由 Engine 动态加载。
 
 ```text
-World Core     → StageOpen（可见上下文、允许输入、资产绑定）
+World Core     → stage.open EffectOp → 已提交 StageInstance
+Server         → StageOpen（完整 StageModuleLock、可见上下文、允许输入、hash 资产绑定）
 Client Runtime → StageInput
 Client Runtime → StageOutcomeProposal（语义结果与证据，不含 EffectOp）
 World Core     → stage_outcome.resolve（只允许 EventOutcomeOp / stage.update / stage.close）→ PacketProposal → ContentPacket → apply_packet
-World Core     → StageClose + SessionView
+Server         → StageUpdate / StageClose + SessionView
 ```
 
 StageModule 只消费已提交 Signal 并提出后续 Proposal，不得在回调中重入提交。多个模块的顺序由显式依赖 DAG 决定，冲突直接报告。阶段完成条件必须是可求值谓词，不能藏在文案、模型判断或客户端运行时分支里。
@@ -382,29 +383,29 @@ Unity Editor 尚未安装时只封板责任，不预选 Editor、SDK、JSON 库�
 
 SessionReplica 的闭合状态为 `bootstrapped → synchronizing → synchronized → resynchronizing`，任一合同错误进入 `fatal`；不设置自动降级状态。Bootstrap 后发送 `client.ready`，只有关联的完整 SessionView 才进入 `synchronized`。正常批次要求 Server sequence 连续；gap、delta basis 不符或未知消息立即暂停新的世界交互并发送 resync。resync 成功后以完整 View 和其 sequence 建立新基线，再按上一节的历史事务恢复规则处理仍未完成交互。首版同一 Session 只允许一个会改变权威世界的交互处于本地未完成状态，以匹配 Server 的单 world 执行槽；表现动画可以并行，但不能阻塞或重排权威消息应用。
 
-`dialogue.reply` 只用于低延迟呈现；同 revision 的 `SessionView.dialogues` 是最终集合，turn 按稳定 `turn_id` 去重。EventCard 成功响应固定先应用权威 SessionView，再播放同批 `presentation.frame`，最后以 CommandResult 结束 pending command；断线恢复不得重新触发卡片。`player_day.end` 返回的新 View 是次日唯一客户端基线，旧日卡片、预算与表现缓存整体失效。第一阶段不加载 Unity Stage/3D 制品。Server 已闭合 `stage.outcome_proposal` 的权威裁决、提交和重放；`stage.input` 与 `stage.open` 的 Unity Runtime 驱动仍保持明确 unsupported，直到真实秘境制品接入。`StageOpen.bindings[].fetch_uri` 当前也没有资产交付 URI 的正式所有者，Server 不从 ContentBundle 相对路径或文件系统位置猜网络地址。
+`dialogue.reply` 只用于低延迟呈现；同 revision 的 `SessionView.dialogues` 是最终集合，turn 按稳定 `turn_id` 去重。EventCard 成功响应固定先应用权威 SessionView，再发送本次提交新打开的玩家 `stage.open`、播放同批 `presentation.frame`，最后以 CommandResult 结束 pending command；断线恢复不得重新触发卡片。`player_day.end` 返回的新 View 是次日唯一客户端基线，旧日卡片、预算与表现缓存整体失效。Server 已闭合 `stage.open` 的锁定合同门禁、消息投影、ready/resync 重建，以及 `stage.outcome_proposal` 的权威裁决、提交和重放；尚未实现的是 Unity 对这些消息的本地 Stage/3D 实例化。`stage.input` 只留在 Unity Runtime 本地帧域。`StageOpen.bindings` 只携带 `binding_id + slot_id + AssetContentRef`；Engine 协议不拥有下载 URI，Unity/部署资产层按内容 hash 取得 blob，Server 不从 ContentBundle 相对路径或文件系统位置猜网络地址。
 
 ## 10. World Core ↔ Client Bridge
 
-Client Bridge 是传输无关、引擎中立的版本化 JSON Envelope（`client-bridge.v1`）。当前无 Unity 的基础闭环由 Server `POST /api/client-envelope` 接收恰好一个 ClientEnvelope，并按权威序列返回 ServerEnvelope 数组；统一 router 已注册 `client.ready`、`session.resync_request`、`dialogue.start`、`dialogue.continue`、`dialogue.close`、`map.move`、`stage.outcome_proposal`、`event_card.trigger` 与 `player_day.end`，其余尚无编排器的合同命令明确失败且不会先占用 Command Journal。该 HTTP framing 不是新的协议模型，只接受可信管理面已经建立的 Session。账号鉴权、世界创建与 Session 打开不作为匿名 endpoint 暴露；同进程部署应用必须从公开 deployment composition API 创建 activation，按 `worldCreation → dayCycle.advanceToPlayer → sessions.open` 顺序接到自己的鉴权管理面。后续 Unity Host 仍只消费同一 Bridge，推送或连接管理属于 Host/部署传输层；合同不绑定 Unity 内部类型。
+Client Bridge 是传输无关、引擎中立的版本化 JSON Envelope（`client-bridge.v1`）。当前无 Unity 的基础闭环由 Server `POST /api/client-envelope` 接收恰好一个 ClientEnvelope，并按权威序列返回 ServerEnvelope 数组；统一 router 穷举正式 ClientMessage 集合中的 `client.ready`、`session.resync_request`、`dialogue.start`、`dialogue.continue`、`dialogue.close`、`map.move`、`stage.outcome_proposal`、`event_card.trigger`、`player_day.end` 与 `content_upgrade.accept`，未知类型先在 Schema 门禁失败且不会占用 Command Journal。`StageInput` 只保留为 Unity 本地 Stage ABI 定义，不进入 ClientMessage Envelope。该 HTTP framing 不是新的协议模型，只接受可信管理面已经建立的 Session。账号鉴权、世界创建与 Session 打开不作为匿名 endpoint 暴露；同进程部署应用必须从公开 deployment composition API 创建 activation，按 `worldCreation → dayCycle.advanceToPlayer → sessions.open` 顺序接到自己的鉴权管理面。后续 Unity Host 仍只消费同一 Bridge，推送或连接管理属于 Host/部署传输层；合同不绑定 Unity 内部类型。
 
 Session 入场的所有权固定为：外部网关认证账号并显式选择 runtime world 与 human ControlBinding；Server `kernel.sessions.open` 从同一事务锁定的 WorldState 创建 Engine Session、签发 basis token，并返回经过正式 Schema 验证的首个完整 SessionView。网关只能把该 SessionView 作为自己认证响应中的正式合同值交给客户端，不得重新组装字段、补造可见事实或另建一套 bootstrap View 模型。Session 打开不是匿名 ClientMessage，也不向 Client Bridge 增加登录语义。
 
 Server 必须只有一个完整 SessionView 组装入口：Session 打开使用创建 Session 时锁定的同一 WorldSnapshot，命令 finalizer 使用其事务内锁定的 Session/WorldState，resync 使用同一次一致性读取取得的当前 Session/WorldState；三者随后共用同一 basis-token、表现候选与 World Core `SessionViewProjector` 路径。禁止由 `sessions.open` 只返回裸 `session_id + basis_token` 后再二次读取拼首包，也禁止在 command finalizer、resync 或部署网关中分别复制 View 组装逻辑。
 
-`session.resync_request` 是已认证 Session 内的同步控制消息，不是世界命令，不携带 `basis_token`，不进入 Command Journal，也不写 WorldState。Server 在同一 PostgreSQL 事务中锁定 Session 与当前 WorldState，拒绝高于权威值的客户端 view revision；仅当 world revision 已变化时把 Session view revision 推进一步，再经唯一组装入口生成完整 `session.view`，同时原子分配并推进 `next_server_sequence`。该即时响应不写命令 outbox；若响应丢失，重新发起 resync 会取得更后的权威 sequence。客户端收到 `correlation_id` 命中本次 resync 请求的完整 View 时，必须原子替换本地 View，并把下一预期 ServerEnvelope sequence 重置为该响应 `sequence + 1`，此前的序列空洞由完整快照截断。
+`session.resync_request` 是已认证 Session 内的同步控制消息，不是世界命令，不携带 `basis_token`，不进入 Command Journal，也不写 WorldState。Server 在同一 PostgreSQL 事务中锁定 Session 与当前 WorldState，拒绝高于权威值的客户端 view revision；仅当 world revision 已变化时把 Session view revision 推进一步，再经唯一组装入口生成完整 `session.view`，并从同次读取的 WorldState、WorldContentLock 与 StageModule locks 投影当前玩家全部 open Stage，同时原子分配并推进整批 `next_server_sequence`。该即时响应不写命令 outbox；若响应丢失，重新发起 resync 会取得更后的权威 sequence。客户端收到 `correlation_id` 命中本次 resync 请求的完整 View 与随后的 `stage.open` 列表时，必须原子替换本地 View，以这批 Stage ID 作为权威 open 集合并移除不在其中的本地 Stage，再把下一预期 ServerEnvelope sequence 重置为批次末尾 `sequence + 1`；此前的序列空洞由完整快照截断。
 
 命令响应丢失后，客户端必须重发首次提交时保存的**完整同一份 ClientEnvelope**，包括 `message_id`、client `sequence`、`command_id`、`basis_token` 与消息正文；不能只保留 command ID 后重建外壳。Command Journal 对完整已验证 ClientEnvelope 做 JCS 摘要并逐值比对，因此同一 command ID 的不同 envelope 明确冲突，完成命令才能稳定返回原 `correlation_id` 及原 ServerEnvelope outbox。若客户端已先用较新 resync 完整 View 截断序列空洞，再收到该命令较早 sequence 的精确历史 outbox，Host 只能在整个批次均早于当前预期 sequence、且 `correlation_id` 命中这份正在恢复的原 ClientEnvelope 时按“历史命令恢复”处理：不得回退 View 或下一预期 sequence；同 revision 的 SessionView 只核对后忽略，稳定 message/frame 身份负责去重，未见过且 `view_revision` 等于当前 View 的 PresentationFrame 可以补播，最终 CommandResult 只解除该 pending command。批次交叠、revision 不一致或相关身份不一致都必须再次 resync 或 fatal，禁止猜测合并。
 
-`client.ready` 是同一同步端口的连接入场消息：客户端必须在 `supported_protocols` 中显式包含 `client-bridge.v1`；命中后 Server 从锁定的当前 Session/WorldState 返回关联到该请求的完整 `session.view`，其 revision 与 sequence 规则和 resync 相同。未命中时只返回 `client.protocol.unsupported` 的 fatal `protocol.error`，原子消耗一个 ServerEnvelope sequence，但不推进 View/world revision。`client_build_digest` 是经过 Schema 校验的客户端制品身份，不在 Engine 内形成默认或隐式 allowlist；需要限制具体客户端制品时，由已认证部署网关在调用 Engine 前用自己的显式部署配置门禁。
+`client.ready` 是同一同步端口的连接入场消息：客户端必须在 `supported_protocols` 中显式包含 `client-bridge.v1`；命中后 Server 从锁定的当前 Session/WorldState 返回关联到该请求的完整 `session.view`，随后按稳定 Stage ID 顺序返回当前玩家全部 `stage.open`，这份 Stage 列表与 resync 一样是本地实例的权威全集。未命中时只返回 `client.protocol.unsupported` 的 fatal `protocol.error`，原子消耗一个 ServerEnvelope sequence，但不推进 View/world revision。`client_build_digest` 是经过 Schema 校验的客户端制品身份，不在 Engine 内形成默认或隐式 allowlist；需要限制具体客户端制品时，由已认证部署网关在调用 Engine 前用自己的显式部署配置门禁。
 
-客户端适配器只认识固定渲染原语、通用交互消息和不透明内容 ID，不接收完整 WorldState，不按 `world_id` 分剧情。客户端可以提交：在已选择 NPC/System 的对话中对该对象说的话、显式关闭自己参与的 active Dialogue、`map.move`、EventCard 触发、结束玩家日、StageInput、StageOutcomeProposal 与 ACK/readiness。首版不存在全局自由文本行动框或命令行，不把对话文本解释为选目标、移动、战斗、修炼、做饭等通用行动；也没有砍人、做饭等结构化行动按钮、事件派发或 AP 写入接口。未来 StageInput 来自玩家对 3D 秘境的直接操作，不来自自然语言行动解析器。
+客户端适配器只认识固定渲染原语、通用交互消息和不透明内容 ID，不接收完整 WorldState，不按 `world_id` 分剧情。Bridge 客户端只能提交正式 `client.ready`、`session.resync_request`、在已选择 NPC/System 的对话中对该对象说的话、显式关闭自己参与的 active Dialogue、`map.move`、EventCard 触发、结束玩家日与 `stage.outcome_proposal`；协议没有独立 ACK。首版不存在全局自由文本行动框或命令行，不把对话文本解释为选目标、移动、战斗、修炼、做饭等通用行动；也没有砍人、做饭等结构化行动按钮、事件派发或 AP 写入接口。未来 StageInput 来自玩家对 3D 秘境的直接操作，只在 Unity 本地帧域消费，不是自然语言行动，也不是当前 ClientMessage。
 
 `map.move` 只携带目标地点；actor 从鉴权 Session 的 human ControlBinding 推导，内容包的 `navigation_resolver` 决定可达性并产生位置提案。它不调用模型，RulePlugin Reject code 原样成为 CommandResult code；接受分支只允许一个 `entity.relocate`。Finalizer 必须把命令持有的 request ID、resolved proposal、CommittedEvent、actor 与 destination 全部关联一致后，才推进 Session 并返回新 SessionView；重复命令重放同一出站结果。失败不改变世界，也不转交 Director。
 
-`stage.outcome_proposal` 是 Stage 帧域回交世界的唯一客户端世界命令；`stage.input` 留在未来 Unity Stage Runtime 的本地帧域，不进入 Command Journal。首次接收时 Command Journal 保存独立 RulePlugin request ID；执行前必须证明 Session 玩家拥有 active human ControlBinding、是目标 open StageInstance 的 participant，并且 stage revision、StageModuleLock、scene 与 outcome type 全部精确命中注册合同。`stage_outcome.resolve` 接受分支必须以恰好一个对应 `stage.update` 或 `stage.close` 结束，evidence digest 或 outcome type/body 与原客户端提案逐值一致。Finalizer 再把 resolved proposal、CommittedEvent 与最终 StageInstance 精确关联，按 `session.view + stage.update|stage.close + command.result` 原子写出并支持精确重放。若插件返回 `ChoiceSpec`，在客户端选择协议尚未定义时命令明确保持 unresolved；Server 不代选。
+`stage.outcome_proposal` 是 Stage 帧域回交世界的唯一客户端世界命令；`stage.input` 留在未来 Unity Stage Runtime 的本地帧域，不进入 Command Journal。首次接收时 Command Journal 保存独立 RulePlugin 根 request ID；执行前必须证明 Session 玩家拥有 active human ControlBinding、是目标 open StageInstance 的 participant，并且 stage revision、StageModuleLock、scene 与 outcome type 全部精确命中注册合同。`stage_outcome.resolve` 可以先返回由 Server 权威裁决的 ChoiceSpec；每次子调用除 request ID 与已签名 DeterministicContext 外必须逐值保持根请求，Finalizer 沿 Journal 的唯一父子链定位 proposal/reject 终态。接受分支必须以恰好一个对应 `stage.update` 或 `stage.close` 结束，evidence digest 或 outcome type/body 与原客户端提案逐值一致。Finalizer 再把终态 proposal、CommittedEvent 与最终 StageInstance 精确关联，按 `session.view + stage.update|stage.close + command.result` 原子写出并支持精确重放。
 
-服务端只能推送 SessionView、对话回复、CommandResult、PresentationFrame、Stage open/update/close、AssetBinding 与协议错误。SessionView 与 DialogueReply 只携带 DialogueView/DialogueTurnView；模型请求 ID、输出摘要、AgencyCommitment 与内部 dialogue revision 永不下发客户端。卡片结果叙事只在封存结果成功提交后，通过 `narrative.show` 发送；其中 `dialogue_quote` 由服务端从不可变 DialogueTurn 投影为 DialogueTurnQuoteView，Director 不能提供 speaker 或 text。
+服务端只能推送 SessionView、对话回复、CommandResult、PresentationFrame、Stage open/update/close 与协议错误。资产引用内嵌在 RenderNode、PresentationOp 或 `StageOpen.bindings[].asset` 的正式 `AssetContentRef` 中；没有独立 AssetBinding 消息或推送确认生命周期。SessionView 与 DialogueReply 只携带 DialogueView/DialogueTurnView；模型请求 ID、输出摘要、AgencyCommitment 与内部 dialogue revision 永不下发客户端。卡片结果叙事只在封存结果成功提交后，通过 `narrative.show` 发送；其中 `dialogue_quote` 由服务端从不可变 DialogueTurn 投影为 DialogueTurnQuoteView，Director 不能提供 speaker 或 text。
 
 SessionView 由 World Core 的纯投影端口从锁定 WorldSnapshot 生成：它只依据会话指定的 active human ControlBinding 确定玩家，并按玩家与当日筛选预算、卡片、GoalPlan 和对话；Dialogue 的参与者与 speaker 只投影稳定身份，不携带 `expected_revision`。session ID、view revision、basis token 以及 RenderNode/Notice 候选只由 Server 或 Stage 表现层提供；Core 不签发或校验 token，不缓存，不按 world/content 猜表现，也不把候选写回 WorldState。最终完整 View 必须通过正式 Schema，客户端永远不能取得未投影的世界字段。
 
@@ -426,22 +427,21 @@ Server 当前实现把上述状态分字段保存在 `engine_sessions`：打开 
 
 ## 11. Materialization / Asset Engine
 
-运行时新 Definition、Entity、NPC、地点、组织或建筑可以产生 MaterializationRequest。`on_demand` MaterializationProfile 必须通过显式 dependency ID 命中 required `asset_provider` DependencyLock；Server 的唯一 AssetProvider Registry 已按该精确锁注册部署 adapter，并在 Content Activation 阶段拒绝缺失、版本不符或重复身份。Adapter 可以执行网络、文件与生成 I/O，但只能接收已验证 MaterializationRequest 和已解析 profile，返回值仍是不可信 `AssetCandidate` JSON，必须先经 Materialization Schema 和 request / revision / digest 关联门禁。不存在默认 Provider、缺失 Provider 降级或把 Provider 配置写入内容包。Registry 本身不冒充尚未实现的 outbox 处理器、审核 Ledger 或 VisualBinding 提交编排。
+运行时新 Definition、Entity、NPC、地点、组织或建筑可以产生 MaterializationRequest。`on_demand` MaterializationProfile 必须通过显式 dependency ID 命中 required `asset_provider` DependencyLock；Server 的唯一 AssetProvider Registry 按该精确锁注册部署 adapter，并在 Content Activation 阶段拒绝缺失、版本不符或重复身份。`kernel.materializations.generateNext` 从 PostgreSQL outbox 以 `FOR UPDATE SKIP LOCKED` 领取 pending request，先证明 profile 所属 bundle 在该 runtime world 的 root/dependency lock 图内、fallback 等于 profile 锁定的 PackAsset、主体仍是当前 active revision，再调用唯一 Provider。Adapter 可以执行网络、文件与生成 I/O，但只能接收已验证 MaterializationRequest、同次读取的精确 EntityState/DynamicDefinitionState 和已解析 profile，返回值仍是不可信 `AssetCandidate` JSON；正式门禁要求 request / revision / generation digest 精确相等，且 provenance 必须以 `asset_provider` 指向锁定 package identity。不存在默认 Provider、缺失 Provider 降级或把 Provider 配置写入内容包；进程若在 Provider dispatch 后失联，请求保持 `generating`，不会自动重调。
 
-当前 Materialization 提交边界存在一个必须先封板的合同缺口：World Runtime 已有 `visual_binding.upsert`，Materialization 合同也已有 `AssetAcceptance`，但 `ContentPacket.source` 只闭合了 `rule_plugin` 与 `sealed_event_result`，AssetAcceptance 没有权威提交身份。实现不得借用 RulePlugin source、伪造 EventCard 或直接写 WorldState。后续只有在正式 source 所有者及其关联门禁获批后，才能实现 outbox → Provider → review → acceptance → binding 的持久处理器。
+Materialization Ledger 是 Request、Candidate、ReviewReceipt、AssetAcceptance 的唯一持久所有者。`kernel.materializations.submitReview` 只接收正式 Schema 的外部审核凭据，按 MaterializationProfile 精确要求 `policy` 或 `human` reviewer，并检查总 verdict 与逐项 checks 一致；Engine 不伪造自动审核结果。接受分支在同一事务写入 ReviewReceipt 与 AssetAcceptance，Acceptance 固定拥有 Server 随机 `acceptance_id` / `binding_id`、候选资产、当前世界逻辑时间和由唯一 DeterministicContext Authority 签发的完整链摘要。`ContentPacket.source` 的第三个闭合分支是 `asset_acceptance { acceptance_id }`；packet 固定 `packet_id = acceptance_id`、`cause_id = request_id`，只有一个 `visual_binding.upsert`，且 binding 必须带 `source_request_id + acceptance_id`。World Core 在持锁快照内从 Ledger 重验 Request/Candidate/Review/Acceptance 全链、精确 precondition 与唯一 op 后才允许 `apply_packet`；普通 RulePlugin 和封存 EventOutcome 均无 VisualBinding 写权限。主体 revision 已变化时 Acceptance 保留审计事实、Request 转为 `superseded`，不绑定旧资产；丢失提交响应可按同一 acceptance ID 幂等恢复。
 
 ```text
-CommittedEvent / new subject revision
-  → derive required visual slots
-  → search session / pack / reviewed library
-  → exact asset_provider DependencyLock
-  → composition-root AssetProvider adapter on miss
+CommittedEvent / MaterializationRequest outbox
+  → prove current subject revision + locked profiles
+  → exact required asset_provider DependencyLock
+  → composition-root AssetProvider adapter
   → untrusted AssetCandidate JSON
-  → style / technical / semantic review
-  → immutable bytes + provenance + content digest
-  → AssetAcceptance
-  → VisualBinding
-  → asset.binding through JSON Bridge
+  → explicit policy / human ReviewReceipt
+  → PostgreSQL AssetAcceptance
+  → asset_acceptance ContentPacket
+  → apply_packet → VisualBinding
+  → subsequent SessionView / StageOpen projection embeds AssetContentRef
 ```
 
 该设计吸收 GameCastle 的资产引擎思想，但不复制其代码：
@@ -451,7 +451,7 @@ CommittedEvent / new subject revision
 - 请求锁定主体 definition revision、视觉槽位、风格 digest 与生成规格 digest；VisualBinding 提案不含提交事件 ID，由 apply_packet 在提交时注入；
 - 候选结果必须匹配 request ID 和主体 revision，过期候选不得绑定；
 - fallback 由内容包的 MaterializationProfile 显式声明，不按 slot 或资源类型猜测；
-- 接受决定、绑定 hash 与来源写入独立 Ledger；重载直接复用，blob 缺失显式报损坏，不静默重生成；
+- 接受决定、绑定 hash 与来源写入独立 Ledger；提交恢复直接复用同一 Acceptance，blob 缺失显式报损坏，不静默重生成；
 - WorldState 中的 VisualBinding 永远是 session scope；不可变 Pack 资产来自 ContentBundle，Shared Library 只由独立审核晋升服务写入，世界 ContentPacket 无权晋升；私人创造不自动跨世界传播。
 
 ## 12. 模型角色、上下文分区与调用协议
@@ -524,17 +524,18 @@ ContentBundle 不是预制任务全集。它提供初始世界、角色行动状
 2. ContentBundle 本地 `Identifier` 到运行时 UUID 的唯一映射固定为 RFC 9562 UUIDv5：namespace 是运行时 `world_id`，name 是 UTF-8 `pack_id + "\0" + kind + "\0" + local_id`；初始实体、关系和状态机绑定分别使用 `entity`、`relation`、`state_machine_binding`。同一世界实例内映射可重算且稳定；Content Upgrade 改 local ID 时必须显式声明映射。
 3. ContentBundle 的 `catalog.entities` / `catalog.relations` 是同包全部 WorldDefinition 共享的初始世界图；不同初始图必须使用不同 ContentBundle，禁止再建立隐式 world 过滤规则。每条 InitialRelation 必须声明内容侧 `InitialVisibility`；`known_to.actors` 只允许符号玩家或本包本地 Entity，创建时才映射为 runtime `actor_ids`。WorldDefinition 选择该共享图上的起点、玩家 archetype、`player_initial_components`、`player_location_relation_type_id`、`player_location_fields`、`player_location_visibility`、规则、Director 与表现配置；玩家起点 fields 必须按 relation type 的 ExtensionField 合同校验。
 4. 新世界创建请求必须显式携带已验证 WorldContentLock 与玩家名。Server 生成随机 runtime world、player、human/CharacterMind ControlBinding、玩家起点关系与初始 frame UUID；内容初始 entity / relation / machine binding 使用上述 UUIDv5 映射。玩家 archetype 保持 StaticDefinitionRef，不复制静态定义组件为可变状态；只物化 WorldDefinition 的 `player_initial_components`。起点关系使用 `player_location_relation_type_id` 指向 `start_location_entity_id`，data 与 visibility 只来自同一 WorldDefinition。revision 0 不预造 EventBudget；Runtime 首次完成 `autonomous → director_settlement → player` 时，`day_cycle.advance` 才在同一权威 Packet 内创建 day-1 唯一预算，capacity 只取所选 WorldDefinition 的 `event_budget.daily_capacity`，不得由 SessionView 投影补造。内容实体/关系 provenance 固定为锁定 bundle digest，玩家及其起点关系 provenance 固定为本次 runtime world 创建。初始 machine frame 使用定义的 `initial_state_id`，固定 `indefinite + remain`。新世界固定为 world revision 0、day 1、`autonomous` phase、phase revision 0；完整 WorldSnapshot 与 WorldContentLock 先经 Schema，再在一个 PostgreSQL 事务内插入并回读精确复核。
-5. SaveEnvelope 只作为导入/导出合同，不与数据库并行保存整份副本；PostgreSQL 分字段拥有 WorldState、内容/依赖/插件/Stage 锁、Save/Engine 版本、event cursor、资产摘要与迁移历史。新世界创建先组成完整 revision-0 SaveEnvelope，再与外部导入共用同一原子分解入口；导出在 repeatable-read 快照内重建并整体验证。导入必须先经 Schema、顶层关联和当前激活依赖图精确兼容门禁，随后只能创建不存在的 `world_id`，禁止覆盖现有 world、Session 或 Journal。v1 固定 `event_cursor === world_revision`；PostgreSQL 另存内部 event-history floor：本地新世界为 0，导入世界为导入 cursor，后续 `apply_packet` 同步推进 revision 与 event cursor，但不伪造导入前的 CommittedEvent。`SealedEventResult` 因此必须携带完整 DeterministicContext，任何可用 EventCard 都不能依赖存档外的历史事件才能点击。
-6. `apply_packet` 不得修改 WorldContentLock、实现锁或迁移历史；同一存档不切换到另一个 base pack。
+5. SaveEnvelope 只作为导入/导出合同，不与数据库并行保存整份副本；PostgreSQL 分字段拥有 WorldState、内容/依赖/插件/Stage 锁、Save/Engine 版本、event cursor、资产摘要与迁移历史。新世界创建先组成完整 revision-0 SaveEnvelope，再与外部导入共用同一原子分解入口；导出在 repeatable-read 快照内重建并整体验证。导入只接受正式 `SaveSchemaImportRequest`：`current` 模式要求候选已经是当前版本，`migrate` 模式要求显式 `plan_id` 并先完成 Save Schema Migration；随后才做顶层关联和当前激活依赖图精确兼容门禁，并且只能创建不存在的 `world_id`，禁止覆盖现有 world、Session 或 Journal。v1 固定 `event_cursor === world_revision`；PostgreSQL 另存内部 event-history floor：本地新世界为 0，导入世界为导入 cursor，后续 `apply_packet` 同步推进 revision 与 event cursor，但不伪造导入前的 CommittedEvent。`SealedEventResult` 因此必须携带完整 DeterministicContext，任何可用 EventCard 都不能依赖存档外的历史事件才能点击。
+6. 普通 `apply_packet` 不得修改 WorldContentLock、实现锁或迁移历史；唯一例外是 source_kind 固定为 `content_upgrade` 且 ops 只有一个 `content_upgrade.apply` 的封闭升级 packet。该操作不能携带任意路径修改，只能提交已经通过 SaveEnvelope Schema、关联、目标激活兼容与 transformer 专属语义门禁的完整候选。
 7. 已发布 ContentBundle 不得原地修改；存档同时锁定 RulePlugin 与 StageModule 精确实现 digest，服务器保留所有活跃存档仍引用的 bundle、实现与资产 blob。
-8. Save Schema Migration 与 Content Upgrade 是两条独立流程：前者只改变存档结构，禁止改变 bundle lock 或重新解释世界事实；后者必须由用户/运营显式发起。
-9. Content Upgrade 必须提供精确 source/target digest、声明式 ID 映射、所需实现锁，以及 Core 签发的玩家升级命令与同意凭证；禁止自动升级或按显示名猜测重绑。
-10. 两类迁移都只能在服务端安全点逐版本、确定性执行，完整验证后原子写入新存档；成功前保留旧 bundle 和旧存档。
-11. 无法从旧真相推导的新字段只能标记 unresolved 或停止迁移，禁止发明默认世界事实。
-12. DynamicDefinition、GoalPlan、WorldExtension、StageInstance 与 VisualBinding 属于存档，迁移必须显式保留、转换或拒绝。
-13. 每次迁移记录 source/target、engine/plugin/compiler 版本、确定性输入、执行时间与结果，支持运营回溯。
-
-当前迁移实现边界不是代码缺页，而是合同所有权尚未闭合：SaveEnvelope 已能从 PostgreSQL 分字段事实原子导入/导出，但没有版本化 Save migration step 的正式注册与精确选择合同；ContentBundle 的 `ContentUpgrade` 拥有 `migration_id`，`ContentUpgradeInput` 却不携带该身份，无法在禁止默认和禁止“唯一一个”猜测的前提下选择 transformer；`UpgradeAuthorization` 已声明 token/digest/有效期字段，但 Core 的签发、验签算法与密钥所有者尚未定义。上述字段或所有权获批前，Runtime 只接受当前 activation 精确兼容的 Save/Engine/content locks，不自动迁移或升级。
+8. Save Schema Migration 与 Content Upgrade 是两条独立流程：前者只改变存档结构，禁止改变 bundle lock 或重新解释世界事实；后者只由玩家通过 `content_upgrade.accept` 显式发起，不存在启动时自动升级。数据库 DDL migration 是第三条独立流程，也不得代替或触发前两者。
+9. Content Upgrade 选择的唯一身份是目标 PackLock + `migration_id`。目标 ContentBundle 必须声明精确 `from_pack_version`、`from_bundle_digest`、`to_pack_version`、`declared_mapping` 与 transformer；source/target pack ID 必须相同，禁止跨 base pack、按显示名、数组顺序或“唯一一个”猜测重绑。
+10. World Core 是 `UpgradeAuthorization` 的唯一签发与验签所有者。授权摘要绑定 upgrade command、world、玩家、source revision、源 SaveEnvelope 摘要、migration、source/target bundle digest、同意文本摘要和有效期；Server 使用第三套独立部署 HMAC keyring，禁止与 DeterministicContext 或 Session basis keyring 复用。
+11. Command Journal 为升级预分配全局 upgrade/packet ID 与 RulePlugin request ID。`content_upgrade_authorizations` 必须先保存授权，再允许持久化并执行 deterministic + no_io 的 `content_upgrade.transform`；只有 resolved response 摘要进入 `commit_ready` 后，World Core 才能通过独立 Pool 联接原始 RulePlugin request/response 并重验。
+12. 候选 SaveEnvelope 必须保持 world/save/engine 身份，revision 与 event cursor 精确增加一，切换到目标 PackLock，保持 world_definition_id，追加且只追加一条完整 content-upgrade migration history；unresolved 非空时整条命令拒绝，禁止默认补值。
+13. `content_upgrade.apply` 是唯一能在既有 world 上同时改变 WorldState、内容/依赖/插件/Stage 锁、资产摘要和迁移历史的 EffectOp；它必须是 packet 唯一 op，且由同一个 PostgreSQL `apply_packet` 事务整包提交或完整拒绝。packet 提交后的恢复只认相同 packet ID、授权与插件收据，不能重新转换。
+14. DynamicDefinition、GoalPlan、WorldExtension、StageInstance 与 VisualBinding 属于存档，升级 transformer 必须显式保留、转换或拒绝；每次成功升级的迁移历史记录 source/target、实现摘要、授权、确定性上下文、执行时间与结果摘要。
+15. Save Schema Migration 的机器真相是 `save-schema-migration.v1` 中的 ModuleManifest、MigrationPlan、ImportRequest 与 StoredMigrationRequest。部署显式注册受信同步 `pure + no_io` module 和计划候选；计划必须从请求源版本逐步连续到当前版本，每步精确命中 module identity、source/target Schema ref 与 implementation digest。禁止按版本号猜路径、默认计划、异步 I/O、Content Upgrade transformer 复用或未注册步骤。
+16. 每个 Save migration step 先用声明的源 Schema 验证，再执行 module，再用声明的目标 Schema 验证；world、WorldState、内容/实现锁、revision、event cursor、资产与 engine contract 身份必须逐值不变，迁移历史及其 JCS digest 只能由 Server 追加。存量 world 迁移必须在 PostgreSQL world 行锁内重建候选并原子写回 `save_schema_version + migration_history + updated_at`，不调用 `apply_packet`。仓库不伪造历史 Schema、module 或 plan；部署没有真实历史制品时显式注册空数组，旧版本输入明确失败。
 
 ## 15. 首版非目标
 

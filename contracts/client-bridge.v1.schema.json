@@ -95,13 +95,7 @@
           "$ref": "#/$defs/MapMove"
         },
         {
-          "$ref": "#/$defs/StageInput"
-        },
-        {
           "$ref": "#/$defs/StageOutcomeProposal"
-        },
-        {
-          "$ref": "#/$defs/ClientAck"
         },
         {
           "$ref": "#/$defs/ResyncRequest"
@@ -120,6 +114,9 @@
         },
         {
           "$ref": "#/$defs/PlayerDayEnd"
+        },
+        {
+          "$ref": "#/$defs/ContentUpgradeAccept"
         }
       ]
     },
@@ -233,27 +230,6 @@
         }
       }
     },
-    "ClientAck": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "acked_message_id",
-        "view_revision"
-      ],
-      "properties": {
-        "type": {
-          "const": "client.ack"
-        },
-        "acked_message_id": {
-          "$ref": "common.v1.schema.json#/$defs/Uuid"
-        },
-        "view_revision": {
-          "type": "integer",
-          "minimum": 0
-        }
-      }
-    },
     "ResyncRequest": {
       "type": "object",
       "additionalProperties": false,
@@ -297,9 +273,6 @@
         },
         {
           "$ref": "#/$defs/StageClose"
-        },
-        {
-          "$ref": "#/$defs/AssetBindingMessage"
         },
         {
           "$ref": "#/$defs/ProtocolError"
@@ -662,7 +635,7 @@
         "type",
         "stage_instance_id",
         "stage_revision",
-        "module_id",
+        "stage_module_lock",
         "scene_id",
         "visible_context",
         "allowed_input_types",
@@ -679,8 +652,8 @@
           "type": "integer",
           "minimum": 0
         },
-        "module_id": {
-          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        "stage_module_lock": {
+          "$ref": "common.v1.schema.json#/$defs/StageModuleLock"
         },
         "scene_id": {
           "$ref": "common.v1.schema.json#/$defs/Identifier"
@@ -698,7 +671,7 @@
         "bindings": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/ClientAssetBinding"
+            "$ref": "#/$defs/StageAssetBinding"
           }
         }
       }
@@ -753,21 +726,16 @@
         }
       }
     },
-    "ClientAssetBinding": {
+    "StageAssetBinding": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "binding_id",
-        "render_node_id",
         "slot_id",
-        "asset",
-        "fetch_uri"
+        "asset"
       ],
       "properties": {
         "binding_id": {
-          "$ref": "common.v1.schema.json#/$defs/Uuid"
-        },
-        "render_node_id": {
           "$ref": "common.v1.schema.json#/$defs/Identifier"
         },
         "slot_id": {
@@ -775,27 +743,6 @@
         },
         "asset": {
           "$ref": "common.v1.schema.json#/$defs/AssetContentRef"
-        },
-        "fetch_uri": {
-          "type": "string",
-          "format": "uri",
-          "maxLength": 2048
-        }
-      }
-    },
-    "AssetBindingMessage": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "binding"
-      ],
-      "properties": {
-        "type": {
-          "const": "asset.binding"
-        },
-        "binding": {
-          "$ref": "#/$defs/ClientAssetBinding"
         }
       }
     },
@@ -1068,6 +1015,40 @@
           "type": "string",
           "minLength": 32,
           "maxLength": 512
+        }
+      }
+    },
+    "ContentUpgradeAccept": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "command_id",
+        "basis_token",
+        "target_bundle",
+        "migration_id",
+        "consent_text_digest"
+      ],
+      "properties": {
+        "type": {
+          "const": "content_upgrade.accept"
+        },
+        "command_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "basis_token": {
+          "type": "string",
+          "minLength": 32,
+          "maxLength": 512
+        },
+        "target_bundle": {
+          "$ref": "common.v1.schema.json#/$defs/PackLock"
+        },
+        "migration_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "consent_text_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
         }
       }
     },

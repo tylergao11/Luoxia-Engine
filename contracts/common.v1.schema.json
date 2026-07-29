@@ -374,6 +374,7 @@
             "system_plan",
             "rule_plugin",
             "stage_outcome",
+            "asset_provider",
             "model_proposal",
             "migration",
             "operator"
@@ -453,6 +454,7 @@
         },
         "random_choices": {
           "type": "array",
+          "maxItems": 64,
           "items": {
             "type": "object",
             "additionalProperties": false,

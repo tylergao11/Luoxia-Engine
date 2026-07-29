@@ -17,6 +17,7 @@ import type { Pool } from "pg";
 
 import { createNodeDeterministicContextIdFactory } from "../adapters/crypto/context-id-factory.js";
 import { createNodeContentRuntimeIdentityMapper } from "../adapters/crypto/content-runtime-identity-mapper.js";
+import type { ContentUpgradeHmacKeyring } from "../adapters/crypto/content-upgrade-hmac-token-codec.js";
 import {
   createHmacDeterministicContextTokenCodec,
   type DeterministicContextHmacKeyring,
@@ -31,6 +32,7 @@ import {
 import type { ModelProvider } from "./model-gateway.js";
 import type { RulePluginDependencyIdentity } from "./rule-plugin-abi.js";
 import type { RulePluginModuleV1 } from "./rule-plugin-abi.js";
+import type { SaveSchemaMigrationModuleV1 } from "./save-schema-migration-abi.js";
 import { collectRulePluginOperationRequirements } from "./rule-plugin-operation-requirement.js";
 import {
   createRuntimeExecutionKernel,
@@ -50,6 +52,11 @@ export interface RuntimeContentActivationInput {
    * locked. Must target the same database and be a distinct Pool object.
    */
   readonly rulePluginJournalPool: Pool;
+  /**
+   * Dedicated Pool for Materialization Ledger reads performed while a world
+   * row is locked. Must target the same database and differ from both pools.
+   */
+  readonly materializationLedgerPool: Pool;
   readonly contracts: ContractValidator;
   readonly digest: JsonDigest;
   readonly modelProvider: ModelProvider;
@@ -77,8 +84,24 @@ export interface RuntimeContentActivationInput {
    * TTL, login claims, or reuse of DeterministicContext key material.
    */
   readonly sessionBasisHmacKeyring: SessionBasisHmacKeyring;
+  /**
+   * Independent HMAC keyring for Content Upgrade authorization proofs.
+   * Required and prohibited from reusing either other keyring.
+   */
+  readonly contentUpgradeHmacKeyring: ContentUpgradeHmacKeyring;
+  /** Explicit positive lifetime in seconds for one upgrade authorization. */
+  readonly contentUpgradeAuthorizationLifetimeSeconds: number;
   /** Explicit SaveEnvelope schema version supported by this deployment. */
   readonly saveSchemaVersion: string;
+  /**
+   * Explicit trusted synchronous pure Save Schema migration modules.
+   * Required even when empty; no scan, default module or inferred chain.
+   */
+  readonly saveSchemaMigrationModules: readonly SaveSchemaMigrationModuleV1[];
+  /**
+   * Untrusted explicit migration plan manifests. Required even when empty.
+   */
+  readonly saveSchemaMigrationPlanCandidates: readonly unknown[];
   /** Explicit public Engine contract version supported by this deployment. */
   readonly engineContractVersion: string;
   /**
@@ -98,6 +121,7 @@ export interface RuntimeContentActivationInput {
 
 export type { DeterministicContextHmacKeyring } from "../adapters/crypto/deterministic-context-hmac-token-codec.js";
 export type { SessionBasisHmacKeyring } from "../adapters/crypto/session-basis-hmac-authority.js";
+export type { ContentUpgradeHmacKeyring } from "../adapters/crypto/content-upgrade-hmac-token-codec.js";
 
 export interface ActivatedBundleIdentity {
   readonly pack_id: string;
@@ -147,6 +171,7 @@ export async function createRuntimeContentActivation(
   assertIndependentHmacKeyrings(
     input.deterministicContextHmacKeyring,
     input.sessionBasisHmacKeyring,
+    input.contentUpgradeHmacKeyring,
   );
   input.contracts.assert(
     CONTRACT_REF.identifier,
@@ -284,6 +309,7 @@ export async function createRuntimeContentActivation(
   const kernel = createRuntimeExecutionKernel({
     pool: input.pool,
     rulePluginJournalPool: input.rulePluginJournalPool,
+    materializationLedgerPool: input.materializationLedgerPool,
     contracts: input.contracts,
     digest: input.digest,
     modelProvider: input.modelProvider,
@@ -294,7 +320,11 @@ export async function createRuntimeContentActivation(
     rulePluginOperationRequirements,
     contentRuntimeCatalog: catalog,
     contentRuntimeIdentityMapper,
+    assetProviders,
     saveSchemaVersion: input.saveSchemaVersion,
+    saveSchemaMigrationModules: input.saveSchemaMigrationModules,
+    saveSchemaMigrationPlanCandidates:
+      input.saveSchemaMigrationPlanCandidates,
     engineContractVersion: input.engineContractVersion,
     activatedBundles: Object.freeze(
       records.map((record) =>
@@ -311,6 +341,9 @@ export async function createRuntimeContentActivation(
     deterministicContextTokenCodec,
     deterministicContextIdFactory: createNodeDeterministicContextIdFactory(),
     sessionBasisHmacKeyring: input.sessionBasisHmacKeyring,
+    contentUpgradeHmacKeyring: input.contentUpgradeHmacKeyring,
+    contentUpgradeAuthorizationLifetimeSeconds:
+      input.contentUpgradeAuthorizationLifetimeSeconds,
     characterDialogueModelProfileId:
       input.characterDialogueModelProfileId,
     directorDailySettlementModelProfileId:
@@ -344,21 +377,56 @@ export async function createRuntimeContentActivation(
 function assertIndependentHmacKeyrings(
   contextKeyring: DeterministicContextHmacKeyring,
   sessionKeyring: SessionBasisHmacKeyring,
+  upgradeKeyring: ContentUpgradeHmacKeyring,
 ): void {
-  for (const contextKey of contextKeyring.keys) {
-    for (const sessionKey of sessionKeyring.keys) {
+  assertKeyMaterialNotReused(
+    "deterministic_context",
+    contextKeyring.keys,
+    "session_basis",
+    sessionKeyring.keys,
+  );
+  assertKeyMaterialNotReused(
+    "deterministic_context",
+    contextKeyring.keys,
+    "content_upgrade",
+    upgradeKeyring.keys,
+  );
+  assertKeyMaterialNotReused(
+    "session_basis",
+    sessionKeyring.keys,
+    "content_upgrade",
+    upgradeKeyring.keys,
+  );
+}
+
+function assertKeyMaterialNotReused(
+  leftOwner: string,
+  leftKeys: readonly {
+    readonly keyId: string;
+    readonly secret: Uint8Array;
+  }[],
+  rightOwner: string,
+  rightKeys: readonly {
+    readonly keyId: string;
+    readonly secret: Uint8Array;
+  }[],
+): void {
+  for (const leftKey of leftKeys) {
+    for (const rightKey of rightKeys) {
       if (
-        contextKey.secret instanceof Uint8Array &&
-        sessionKey.secret instanceof Uint8Array &&
-        contextKey.secret.byteLength === sessionKey.secret.byteLength &&
-        Buffer.from(contextKey.secret).equals(Buffer.from(sessionKey.secret))
+        leftKey.secret instanceof Uint8Array &&
+        rightKey.secret instanceof Uint8Array &&
+        leftKey.secret.byteLength === rightKey.secret.byteLength &&
+        Buffer.from(leftKey.secret).equals(Buffer.from(rightKey.secret))
       ) {
         throw new EngineFault(
           "runtime.activation.hmac_key_reuse",
-          "Session basis_token and DeterministicContext keyrings must not reuse key material",
+          "Independent runtime HMAC authorities must not reuse key material",
           {
-            deterministic_context_key_id: contextKey.keyId,
-            session_basis_key_id: sessionKey.keyId,
+            left_owner: leftOwner,
+            left_key_id: leftKey.keyId,
+            right_owner: rightOwner,
+            right_key_id: rightKey.keyId,
           },
         );
       }
@@ -561,6 +629,7 @@ function assertRequiredStageRefs(
       record,
       dependencyById,
       stageModules,
+      undefined,
     );
   }
 
@@ -586,6 +655,10 @@ function assertRequiredStageRefs(
       record,
       dependencyById,
       stageModules,
+      Object.freeze({
+        bindingId: expectString(binding, "binding_id", "PackBinding"),
+        slotId: expectString(binding, "slot_id", "PackBinding"),
+      }),
     );
   }
 }
@@ -596,6 +669,12 @@ function assertStageRefAgainstRequiredModules(
   record: LoadedBundleRecord,
   dependencyById: ReadonlyMap<string, JsonObject>,
   stageModules: StageModuleRegistry,
+  binding:
+    | {
+        readonly bindingId: string;
+        readonly slotId: string;
+      }
+    | undefined,
 ): void {
   const dependencyId = expectString(
     stageRef,
@@ -632,7 +711,15 @@ function assertStageRefAgainstRequiredModules(
   }
 
   if (dependency.required !== true) {
-    return;
+    throw new EngineFault(
+      "runtime.activation.stage_ref_dependency_not_required",
+      "StageRef stage_module dependency must be required by the ContentBundle",
+      {
+        pack_id: record.packId,
+        path,
+        stage_module_dependency_id: dependencyId,
+      },
+    );
   }
 
   const identity: StageModuleDependencyIdentity = Object.freeze({
@@ -645,7 +732,24 @@ function assertStageRefAgainstRequiredModules(
     ),
   });
   const module = stageModules.requireModuleForDependency(identity);
-  stageModules.requireScene(module, sceneId);
+  const scene = stageModules.requireScene(module, sceneId);
+  if (
+    binding !== undefined &&
+    !scene.slotIds.includes(binding.slotId)
+  ) {
+    throw new EngineFault(
+      "runtime.activation.stage_binding_slot_not_declared",
+      "Stage PackBinding slot_id is not declared by the exact StageModule scene",
+      {
+        pack_id: record.packId,
+        path,
+        binding_id: binding.bindingId,
+        slot_id: binding.slotId,
+        module_id: module.indexed.moduleId,
+        scene_id: sceneId,
+      },
+    );
+  }
 }
 
 function indexDependenciesById(

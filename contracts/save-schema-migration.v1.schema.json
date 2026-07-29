@@ -1,0 +1,196 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.luoxia.engine/contracts/save-schema-migration.v1.schema.json",
+  "title": "Luoxia Save Schema Migration Contract v1",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/ModuleManifest"
+    },
+    {
+      "$ref": "#/$defs/MigrationPlan"
+    },
+    {
+      "$ref": "#/$defs/ImportRequest"
+    },
+    {
+      "$ref": "#/$defs/StoredMigrationRequest"
+    }
+  ],
+  "$defs": {
+    "SchemaRef": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^https://schemas\\.luoxia\\.engine/contracts/"
+    },
+    "ModuleManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "record_type",
+        "api_version",
+        "migration_id",
+        "source_save_schema_version",
+        "target_save_schema_version",
+        "source_schema_ref",
+        "target_schema_ref",
+        "implementation_digest",
+        "deterministic",
+        "no_io"
+      ],
+      "properties": {
+        "contract_version": {
+          "const": "save-schema-migration.v1"
+        },
+        "record_type": {
+          "const": "save_schema.module_manifest"
+        },
+        "api_version": {
+          "const": "1.0.0"
+        },
+        "migration_id": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "source_save_schema_version": {
+          "$ref": "common.v1.schema.json#/$defs/SemVer"
+        },
+        "target_save_schema_version": {
+          "$ref": "common.v1.schema.json#/$defs/SemVer"
+        },
+        "source_schema_ref": {
+          "$ref": "#/$defs/SchemaRef"
+        },
+        "target_schema_ref": {
+          "$ref": "#/$defs/SchemaRef"
+        },
+        "implementation_digest": {
+          "$ref": "common.v1.schema.json#/$defs/Sha256"
+        },
+        "deterministic": {
+          "const": true
+        },
+        "no_io": {
+          "const": true
+        }
+      }
+    },
+    "MigrationPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "record_type",
+        "plan_id",
+        "source_save_schema_version",
+        "target_save_schema_version",
+        "migration_ids"
+      ],
+      "properties": {
+        "contract_version": {
+          "const": "save-schema-migration.v1"
+        },
+        "record_type": {
+          "const": "save_schema.migration_plan"
+        },
+        "plan_id": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "source_save_schema_version": {
+          "$ref": "common.v1.schema.json#/$defs/SemVer"
+        },
+        "target_save_schema_version": {
+          "$ref": "common.v1.schema.json#/$defs/SemVer"
+        },
+        "migration_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+          }
+        }
+      }
+    },
+    "ImportRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "record_type",
+        "mode",
+        "save_candidate"
+      ],
+      "properties": {
+        "contract_version": {
+          "const": "save-schema-migration.v1"
+        },
+        "record_type": {
+          "const": "save_schema.import_request"
+        },
+        "mode": {
+          "enum": [
+            "current",
+            "migrate"
+          ]
+        },
+        "plan_id": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "save_candidate": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "mode": {
+              "const": "current"
+            }
+          },
+          "not": {
+            "required": [
+              "plan_id"
+            ]
+          }
+        },
+        {
+          "properties": {
+            "mode": {
+              "const": "migrate"
+            }
+          },
+          "required": [
+            "plan_id"
+          ]
+        }
+      ]
+    },
+    "StoredMigrationRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "record_type",
+        "world_id",
+        "plan_id"
+      ],
+      "properties": {
+        "contract_version": {
+          "const": "save-schema-migration.v1"
+        },
+        "record_type": {
+          "const": "save_schema.stored_migration_request"
+        },
+        "world_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "plan_id": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        }
+      }
+    }
+  }
+}

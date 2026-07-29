@@ -5,13 +5,19 @@ import {
   expectJsonObject,
   expectProperty,
   expectString,
+  jsonEquals,
   type ContractValidator,
   type JsonObject,
   type JsonValue,
+  type UpgradeAuthorizationDocument,
   type ValidatedJsonObject,
 } from "@luoxia/contracts-runtime";
 
 import type { RuntimeWorldReader } from "./runtime-persistence.js";
+import type {
+  AssetAcceptanceDocument,
+  MaterializationRequestDocument,
+} from "./runtime-persistence.js";
 import type {
   RulePluginInvocationProvenanceVerifier,
   VerifiedRulePluginInvocationReceipt,
@@ -29,9 +35,27 @@ export interface EventCardClickPacketInput {
   readonly eventCardId: string;
 }
 
+export interface AssetAcceptancePacketInput {
+  readonly request: MaterializationRequestDocument;
+  readonly acceptance: AssetAcceptanceDocument;
+}
+
+export interface ContentUpgradePacketInput {
+  readonly authorization: UpgradeAuthorizationDocument;
+  readonly receipt: VerifiedRulePluginInvocationReceipt;
+}
+
 export interface AuthoritativePacketBuilder {
   fromRulePluginReceipt(
     receipt: VerifiedRulePluginInvocationReceipt,
+  ): ContentPacketDocument;
+
+  buildAssetAcceptance(
+    input: AssetAcceptancePacketInput,
+  ): Promise<ContentPacketDocument>;
+
+  buildContentUpgrade(
+    input: ContentUpgradePacketInput,
   ): ContentPacketDocument;
 
   buildEventCardTrigger(
@@ -168,6 +192,300 @@ class DefaultAuthoritativePacketBuilder implements AuthoritativePacketBuilder {
       source: {
         source_kind: "rule_plugin",
         proposal_id: proposalId,
+      },
+    });
+  }
+
+  public async buildAssetAcceptance(
+    input: AssetAcceptancePacketInput,
+  ): Promise<ContentPacketDocument> {
+    const request = this.#contracts.assertObject(
+      CONTRACT_REF.materializationRequest,
+      input.request.value,
+    ).value;
+    const acceptance = this.#contracts.assertObject(
+      CONTRACT_REF.assetAcceptance,
+      input.acceptance.value,
+    ).value;
+    const requestId = expectString(
+      request,
+      "request_id",
+      "MaterializationRequest",
+    );
+    const acceptanceId = expectString(
+      acceptance,
+      "acceptance_id",
+      "AssetAcceptance",
+    );
+    assertEqual(
+      "asset_acceptance.request_id",
+      requestId,
+      expectString(acceptance, "request_id", "AssetAcceptance"),
+    );
+    assertEqual(
+      "asset_acceptance.request_status",
+      "accepted",
+      expectString(request, "status", "MaterializationRequest"),
+    );
+    const subjectRevision = expectInteger(
+      request,
+      "subject_revision",
+      "MaterializationRequest",
+    );
+    assertEqual(
+      "asset_acceptance.subject_revision",
+      subjectRevision,
+      expectInteger(
+        acceptance,
+        "subject_revision",
+        "AssetAcceptance",
+      ),
+    );
+    const worldId = expectString(
+      request,
+      "world_id",
+      "MaterializationRequest",
+    );
+    const { snapshot } = await this.#worlds.readCurrent(worldId);
+    assertEqual(
+      "asset_acceptance.world_id",
+      worldId,
+      expectString(snapshot.value, "world_id", "WorldSnapshot"),
+    );
+    const basisRevision = expectInteger(
+      snapshot.value,
+      "world_revision",
+      "WorldSnapshot",
+    );
+    const preconditions = buildAssetAcceptancePreconditions(
+      request,
+      subjectRevision,
+    );
+    return this.#sealPacket({
+      contract_version: "world-runtime.v1",
+      record_type: "content.packet",
+      packet_id: acceptanceId,
+      cause_id: requestId,
+      world_id: worldId,
+      basis_revision: basisRevision,
+      preconditions,
+      deterministic_context: cloneJson(
+        expectProperty(
+          acceptance,
+          "deterministic_context",
+          "AssetAcceptance",
+        ),
+      ),
+      ops: [
+        {
+          op: "visual_binding.upsert",
+          binding: {
+            binding_id: expectString(
+              acceptance,
+              "binding_id",
+              "AssetAcceptance",
+            ),
+            world_id: worldId,
+            subject: cloneJson(
+              expectProperty(request, "subject", "MaterializationRequest"),
+            ),
+            subject_revision: subjectRevision,
+            slot_id: expectString(
+              request,
+              "slot_id",
+              "MaterializationRequest",
+            ),
+            asset: cloneJson(
+              expectProperty(acceptance, "asset", "AssetAcceptance"),
+            ),
+            source_request_id: requestId,
+            acceptance_id: acceptanceId,
+            scope: "session",
+            state: "active",
+          },
+        },
+      ],
+      source: {
+        source_kind: "asset_acceptance",
+        acceptance_id: acceptanceId,
+      },
+    });
+  }
+
+  public buildContentUpgrade(
+    input: ContentUpgradePacketInput,
+  ): ContentPacketDocument {
+    if (!this.#rulePluginProvenance.isVerified(input.receipt)) {
+      throw new EngineFault(
+        "runtime.packet_builder.rule_plugin_receipt_required",
+        "Content Upgrade packet construction requires this runtime's verified RulePlugin receipt",
+      );
+    }
+    const authorization = this.#contracts.assertObject(
+      CONTRACT_REF.upgradeAuthorization,
+      input.authorization.value,
+    ).value;
+    const request = input.receipt.request.value;
+    const response = input.receipt.response.value;
+    const requestInput = expectJsonObject(
+      expectProperty(request, "input", "RulePluginRequest"),
+      "RulePluginRequest.input",
+    );
+    const output = expectJsonObject(
+      expectProperty(response, "output", "RulePluginResponse"),
+      "RulePluginResponse.output",
+    );
+    if (
+      expectString(request, "operation_kind", "RulePluginRequest") !==
+        "content_upgrade.transform" ||
+      expectString(response, "operation_kind", "RulePluginResponse") !==
+        "content_upgrade.transform" ||
+      expectString(output, "output_kind", "ContentUpgradeOutput") !==
+        "content_upgrade.candidate" ||
+      !jsonEquals(
+        expectProperty(
+          requestInput,
+          "authorization",
+          "ContentUpgradeInput",
+        ),
+        authorization,
+      )
+    ) {
+      throw new EngineFault(
+        "runtime.packet_builder.content_upgrade_receipt_mismatch",
+        "Verified RulePlugin receipt is not the authorized Content Upgrade candidate",
+        {
+          upgrade_command_id: expectString(
+            authorization,
+            "upgrade_command_id",
+            "UpgradeAuthorization",
+          ),
+        },
+      );
+    }
+    const unresolved = expectProperty(
+      output,
+      "unresolved",
+      "ContentUpgradeOutput",
+    );
+    if (!Array.isArray(unresolved) || unresolved.length !== 0) {
+      throw new EngineFault(
+        "runtime.packet_builder.content_upgrade_unresolved",
+        "Content Upgrade output cannot form a packet while unresolved items remain",
+        {
+          upgrade_command_id: expectString(
+            authorization,
+            "upgrade_command_id",
+            "UpgradeAuthorization",
+          ),
+        },
+      );
+    }
+    const readonlyWorld = expectJsonObject(
+      expectProperty(request, "readonly_world", "RulePluginRequest"),
+      "RulePluginRequest.readonly_world",
+    );
+    const sourceSave = expectJsonObject(
+      expectProperty(requestInput, "source_save", "ContentUpgradeInput"),
+      "ContentUpgradeInput.source_save",
+    );
+    const migrationId = expectString(
+      authorization,
+      "migration_id",
+      "UpgradeAuthorization",
+    );
+    assertEqual(
+      "content_upgrade.migration_id.input",
+      migrationId,
+      expectString(requestInput, "migration_id", "ContentUpgradeInput"),
+    );
+    assertEqual(
+      "content_upgrade.migration_id.output",
+      migrationId,
+      expectString(output, "migration_id", "ContentUpgradeOutput"),
+    );
+    assertEqual(
+      "content_upgrade.world_id.source_save",
+      expectString(readonlyWorld, "world_id", "WorldSnapshot"),
+      expectString(sourceSave, "world_id", "SaveEnvelope"),
+    );
+    assertEqual(
+      "content_upgrade.world_id.authorization",
+      expectString(readonlyWorld, "world_id", "WorldSnapshot"),
+      expectString(authorization, "world_id", "UpgradeAuthorization"),
+    );
+    assertEqual(
+      "content_upgrade.revision.source_save",
+      expectInteger(readonlyWorld, "world_revision", "WorldSnapshot"),
+      expectInteger(sourceSave, "world_revision", "SaveEnvelope"),
+    );
+    assertEqual(
+      "content_upgrade.revision.authorization",
+      expectInteger(readonlyWorld, "world_revision", "WorldSnapshot"),
+      expectInteger(
+        authorization,
+        "source_world_revision",
+        "UpgradeAuthorization",
+      ),
+    );
+    return this.#sealPacket({
+      contract_version: "world-runtime.v1",
+      record_type: "content.packet",
+      packet_id: expectString(
+        authorization,
+        "upgrade_command_id",
+        "UpgradeAuthorization",
+      ),
+      cause_id: migrationId,
+      world_id: expectString(readonlyWorld, "world_id", "WorldSnapshot"),
+      basis_revision: expectInteger(
+        readonlyWorld,
+        "world_revision",
+        "WorldSnapshot",
+      ),
+      preconditions: [],
+      deterministic_context: cloneJson(
+        expectProperty(
+          request,
+          "deterministic_context",
+          "RulePluginRequest",
+        ),
+      ),
+      ops: [
+        {
+          op: "content_upgrade.apply",
+          candidate_save: cloneJson(
+            expectProperty(
+              output,
+              "candidate_save",
+              "ContentUpgradeOutput",
+            ),
+          ),
+        },
+      ],
+      source: {
+        source_kind: "content_upgrade",
+        upgrade_command_id: expectString(
+          authorization,
+          "upgrade_command_id",
+          "UpgradeAuthorization",
+        ),
+        migration_id: migrationId,
+        source_save_digest: expectString(
+          authorization,
+          "source_save_digest",
+          "UpgradeAuthorization",
+        ),
+        authorization_digest: expectString(
+          authorization,
+          "authorization_digest",
+          "UpgradeAuthorization",
+        ),
+        result_digest: expectString(
+          output,
+          "result_digest",
+          "ContentUpgradeOutput",
+        ),
       },
     });
   }
@@ -440,4 +758,69 @@ function assertEqual(
       { field, expected, actual },
     );
   }
+}
+
+function buildAssetAcceptancePreconditions(
+  request: JsonObject,
+  subjectRevision: number,
+): readonly JsonObject[] {
+  const subject = expectJsonObject(
+    expectProperty(request, "subject", "MaterializationRequest"),
+    "MaterializationRequest.subject",
+  );
+  const subjectKind = expectString(subject, "kind", "SubjectRef");
+  if (subjectKind === "entity") {
+    const entity = expectJsonObject(
+      expectProperty(subject, "entity", "SubjectRef"),
+      "SubjectRef.entity",
+    );
+    if (entity.expected_revision !== undefined) {
+      assertEqual(
+        "asset_acceptance.entity_revision",
+        subjectRevision,
+        expectInteger(entity, "expected_revision", "EntityRef"),
+      );
+    }
+    return Object.freeze([
+      {
+        kind: "entity.revision_is",
+        entity_id: expectString(entity, "entity_id", "EntityRef"),
+        revision: subjectRevision,
+      },
+    ]);
+  }
+  if (subjectKind === "definition") {
+    const definition = expectJsonObject(
+      expectProperty(subject, "definition", "SubjectRef"),
+      "SubjectRef.definition",
+    );
+    if (expectString(definition, "kind", "DefinitionRef") !== "dynamic") {
+      throw new EngineFault(
+        "runtime.packet_builder.asset_acceptance_subject_immutable",
+        "AssetAcceptance can bind only runtime Entity or DynamicDefinition subjects",
+        { request_id: expectString(request, "request_id", "MaterializationRequest") },
+      );
+    }
+    assertEqual(
+      "asset_acceptance.definition_revision",
+      subjectRevision,
+      expectInteger(definition, "revision", "DynamicDefinitionRef"),
+    );
+    return Object.freeze([
+      {
+        kind: "definition.revision_is",
+        definition_id: expectString(
+          definition,
+          "definition_id",
+          "DynamicDefinitionRef",
+        ),
+        revision: subjectRevision,
+      },
+    ]);
+  }
+  throw new EngineFault(
+    "runtime.packet_builder.asset_acceptance_subject_kind",
+    "AssetAcceptance references an unsupported subject kind",
+    { subject_kind: subjectKind },
+  );
 }

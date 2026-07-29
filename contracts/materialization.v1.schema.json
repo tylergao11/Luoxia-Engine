@@ -330,12 +330,14 @@
         "contract_version",
         "record_type",
         "acceptance_id",
+        "binding_id",
         "request_id",
         "candidate_id",
         "subject_revision",
         "asset",
         "review_id",
-        "accepted_at"
+        "accepted_at",
+        "deterministic_context"
       ],
       "properties": {
         "contract_version": {
@@ -345,6 +347,9 @@
           "const": "asset.acceptance"
         },
         "acceptance_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "binding_id": {
           "$ref": "common.v1.schema.json#/$defs/Uuid"
         },
         "request_id": {
@@ -366,6 +371,9 @@
         "accepted_at": {
           "type": "string",
           "format": "date-time"
+        },
+        "deterministic_context": {
+          "$ref": "common.v1.schema.json#/$defs/DeterministicContext"
         }
       }
     },
@@ -379,6 +387,8 @@
         "subject_revision",
         "slot_id",
         "asset",
+        "source_request_id",
+        "acceptance_id",
         "scope",
         "state"
       ],
@@ -414,21 +424,7 @@
         "state": {
           "const": "active"
         }
-      },
-      "allOf": [
-        {
-          "if": {
-            "required": [
-              "source_request_id"
-            ]
-          },
-          "then": {
-            "required": [
-              "acceptance_id"
-            ]
-          }
-        }
-      ]
+      }
     },
     "VisualBinding": {
       "type": "object",
@@ -442,6 +438,8 @@
         "subject_revision",
         "slot_id",
         "asset",
+        "source_request_id",
+        "acceptance_id",
         "scope",
         "created_by_event_id",
         "state"
@@ -490,21 +488,7 @@
             "retired"
           ]
         }
-      },
-      "allOf": [
-        {
-          "if": {
-            "required": [
-              "source_request_id"
-            ]
-          },
-          "then": {
-            "required": [
-              "acceptance_id"
-            ]
-          }
-        }
-      ]
+      }
     },
     "PromotionDecision": {
       "type": "object",

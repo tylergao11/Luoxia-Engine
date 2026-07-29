@@ -7,6 +7,10 @@ export {
   type PostgresCommandJournalDependencies,
 } from "./command-journal.js";
 export {
+  createPostgresContentUpgradeAuthorizationLedger,
+  type PostgresContentUpgradeAuthorizationLedgerDependencies,
+} from "./content-upgrade-authorization-ledger.js";
+export {
   createPostgresCommandFinalizer,
   type PostgresCommandFinalizerDependencies,
 } from "./command-finalizer.js";
@@ -28,6 +32,10 @@ export {
   type PostgresRuntimeInvocationJournalDependencies,
 } from "./runtime-invocation-journal.js";
 export {
+  createPostgresMaterializationLedger,
+  type PostgresMaterializationLedgerDependencies,
+} from "./materialization-ledger.js";
+export {
   createPostgresRulePluginInvocationJournal,
   type PostgresRulePluginInvocationJournalDependencies,
 } from "./rule-plugin-invocation-journal.js";
@@ -40,6 +48,10 @@ export {
   createPostgresRuntimeSaveRepository,
   type PostgresRuntimeSaveRepositoryDependencies,
 } from "./runtime-save-repository.js";
+export {
+  createPostgresRuntimeSaveMigrationRepository,
+  type PostgresRuntimeSaveMigrationRepositoryDependencies,
+} from "./runtime-save-migration-repository.js";
 export {
   createPostgresSessionSynchronization,
   type PostgresSessionSynchronizationDependencies,

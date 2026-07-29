@@ -1,6 +1,7 @@
 import {
   CONTRACT_REF,
   EngineFault,
+  assertSaveEnvelopeRelationships as assertIntrinsicSaveEnvelopeRelationships,
   expectInteger,
   expectJsonObject,
   expectProperty,
@@ -28,9 +29,11 @@ import type {
   StageModuleRegistry,
 } from "./stage-module-registry.js";
 import type {
+  RuntimeSaveMigrationRepository,
   RuntimeSaveRepository,
   RuntimeWorldRecord,
 } from "./runtime-persistence.js";
+import type { SaveSchemaMigrationService } from "./save-schema-migration.js";
 
 export interface RuntimeActivatedBundleDescriptor {
   readonly packId: string;
@@ -63,10 +66,17 @@ export interface RuntimeSaveService {
   /** Reconstruct one complete SaveEnvelope from PostgreSQL's separate facts. */
   exportSave(worldId: string): Promise<SaveEnvelopeDocument>;
   /**
-   * Validate one untrusted SaveEnvelope completely, prove deployment
+   * Validate one explicit current-or-migrate ImportRequest, prove deployment
    * compatibility, then create a new PostgreSQL world atomically.
    */
-  importSave(candidate: unknown): Promise<RuntimeSaveImportResult>;
+  importSave(requestCandidate: unknown): Promise<RuntimeSaveImportResult>;
+  /**
+   * Explicitly migrate one existing PostgreSQL world under its row lock.
+   * World facts and revision remain unchanged; this never calls apply_packet.
+   */
+  migrateStored(
+    requestCandidate: unknown,
+  ): Promise<SaveEnvelopeDocument>;
 }
 
 export interface RuntimeSaveCompatibility {
@@ -91,6 +101,8 @@ export interface RuntimeSaveServiceDependencies {
   readonly contracts: ContractValidator;
   readonly compatibility: RuntimeSaveCompatibility;
   readonly repository: RuntimeSaveRepository;
+  readonly migrationRepository: RuntimeSaveMigrationRepository;
+  readonly migrations: SaveSchemaMigrationService;
   readonly clock: RuntimeSaveClock;
 }
 
@@ -508,17 +520,20 @@ export function createRuntimeSaveService(
       return envelope;
     },
 
-    async importSave(candidate: unknown): Promise<RuntimeSaveImportResult> {
-      const envelope = dependencies.contracts.assertObject(
-        CONTRACT_REF.saveEnvelope,
-        candidate,
+    async importSave(
+      requestCandidate: unknown,
+    ): Promise<RuntimeSaveImportResult> {
+      const persistedAt = dependencies.clock.now();
+      const envelope = dependencies.migrations.resolveImport(
+        requestCandidate,
+        persistedAt,
       );
       assertSaveEnvelopeRelationships(dependencies.contracts, envelope);
       dependencies.compatibility.assertImportCompatible(envelope);
       const stored = await persistAndVerify(
         dependencies,
         envelope,
-        dependencies.clock.now(),
+        persistedAt,
       );
       return Object.freeze({
         saveEnvelope: stored,
@@ -527,6 +542,45 @@ export function createRuntimeSaveService(
           stored,
         ),
       });
+    },
+
+    async migrateStored(
+      requestCandidate: unknown,
+    ): Promise<SaveEnvelopeDocument> {
+      const request =
+        dependencies.migrations.validateStoredRequest(requestCandidate);
+      const worldId = expectString(
+        request.value,
+        "world_id",
+        "StoredSaveSchemaMigrationRequest",
+      );
+      const migratedAt = dependencies.clock.now();
+      const storedCandidate =
+        await dependencies.migrationRepository.migrateLocked(
+          worldId,
+          migratedAt,
+          (sourceCandidate) => {
+            const migrated =
+              dependencies.migrations.migrateStoredCandidate(
+                request,
+                sourceCandidate,
+                migratedAt,
+              );
+            assertSaveEnvelopeRelationships(
+              dependencies.contracts,
+              migrated,
+            );
+            dependencies.compatibility.assertImportCompatible(migrated);
+            return migrated;
+          },
+        );
+      const stored = dependencies.contracts.assertObject(
+        CONTRACT_REF.saveEnvelope,
+        storedCandidate,
+      );
+      assertSaveEnvelopeRelationships(dependencies.contracts, stored);
+      dependencies.compatibility.assertImportCompatible(stored);
+      return stored;
     },
   });
 }
@@ -566,84 +620,7 @@ export function assertSaveEnvelopeRelationships(
   contracts: ContractValidator,
   envelope: SaveEnvelopeDocument,
 ): void {
-  const value = envelope.value;
-  const worldId = expectString(value, "world_id", "SaveEnvelope");
-  const worldRevision = expectInteger(
-    value,
-    "world_revision",
-    "SaveEnvelope",
-  );
-  const eventCursor = expectInteger(
-    value,
-    "event_cursor",
-    "SaveEnvelope",
-  );
-  if (eventCursor !== worldRevision) {
-    throw new EngineFault(
-      "runtime.save.event_cursor_mismatch",
-      "SaveEnvelope v1 requires event_cursor to equal world_revision",
-      {
-        world_id: worldId,
-        world_revision: worldRevision,
-        event_cursor: eventCursor,
-      },
-    );
-  }
-
-  contracts.assertObject(CONTRACT_REF.worldSnapshot, {
-    world_id: worldId,
-    world_revision: worldRevision,
-    world_state: expectProperty(value, "world_state", "SaveEnvelope"),
-  });
-  const worldContentLock = expectJsonObject(
-    expectProperty(value, "world_content_lock", "SaveEnvelope"),
-    "SaveEnvelope.world_content_lock",
-  );
-  const rootBundleLock = expectJsonObject(
-    expectProperty(
-      worldContentLock,
-      "root_bundle_lock",
-      "WorldContentLock",
-    ),
-    "WorldContentLock.root_bundle_lock",
-  );
-  const rootPackId = expectString(rootBundleLock, "pack_id", "PackLock");
-
-  const dependencyLocks = asObjectArray(
-    expectProperty(value, "dependency_bundle_locks", "SaveEnvelope"),
-    "SaveEnvelope.dependency_bundle_locks",
-  );
-  const dependenciesById = indexUniqueLocks(
-    dependencyLocks,
-    "pack_id",
-    "PackLock",
-    "runtime.save.dependency_bundle_lock_duplicate",
-  );
-  if (dependenciesById.has(rootPackId)) {
-    throw new EngineFault(
-      "runtime.save.root_bundle_repeated",
-      "SaveEnvelope root bundle must not also appear in dependency_bundle_locks",
-      { world_id: worldId, pack_id: rootPackId },
-    );
-  }
-  indexUniqueLocks(
-    asObjectArray(
-      expectProperty(value, "rule_plugin_locks", "SaveEnvelope"),
-      "SaveEnvelope.rule_plugin_locks",
-    ),
-    "plugin_id",
-    "PluginLock",
-    "runtime.save.rule_plugin_lock_duplicate",
-  );
-  indexUniqueLocks(
-    asObjectArray(
-      expectProperty(value, "stage_module_locks", "SaveEnvelope"),
-      "SaveEnvelope.stage_module_locks",
-    ),
-    "module_id",
-    "StageModuleLock",
-    "runtime.save.stage_module_lock_duplicate",
-  );
+  assertIntrinsicSaveEnvelopeRelationships(contracts, envelope);
 }
 
 function worldRecordFromInsertedEnvelope(
@@ -664,6 +641,30 @@ function worldRecordFromInsertedEnvelope(
     worldContentLock: contracts.assertObject(
       CONTRACT_REF.worldContentLock,
       expectProperty(value, "world_content_lock", "SaveEnvelope"),
+    ),
+    dependencyBundleLocks: Object.freeze(
+      asObjectArray(
+        expectProperty(
+          value,
+          "dependency_bundle_locks",
+          "SaveEnvelope",
+        ),
+        "SaveEnvelope.dependency_bundle_locks",
+      ).map((entry) =>
+        contracts.assertObject(CONTRACT_REF.packLock, entry),
+      ),
+    ),
+    stageModuleLocks: Object.freeze(
+      asObjectArray(
+        expectProperty(
+          value,
+          "stage_module_locks",
+          "SaveEnvelope",
+        ),
+        "SaveEnvelope.stage_module_locks",
+      ).map((entry) =>
+        contracts.assertObject(CONTRACT_REF.stageModuleLock, entry),
+      ),
     ),
     eventHistoryFloorRevision: expectInteger(
       value,

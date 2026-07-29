@@ -123,6 +123,7 @@ interface MachineRecord {
 
 interface BundleIndex {
   readonly packId: string;
+  readonly packVersion: string;
   readonly bundleDigest: string;
   readonly dependencies: ReadonlyMap<string, DependencyRecord>;
   readonly worlds: ReadonlySet<string>;
@@ -183,6 +184,11 @@ function buildIndex(bundle: JsonObject, bundleDigest: string): BundleIndex {
     "bundle.manifest",
   );
   const packId = expectString(manifest, "pack_id", "manifest");
+  const packVersion = expectString(
+    manifest,
+    "pack_version",
+    "manifest",
+  );
 
   const dependencies = uniqueIndex(
     asObjectArray(expectProperty(bundle, "dependencies", "bundle"), "bundle.dependencies"),
@@ -363,6 +369,7 @@ function buildIndex(bundle: JsonObject, bundleDigest: string): BundleIndex {
 
   return Object.freeze({
     packId,
+    packVersion,
     bundleDigest,
     dependencies,
     worlds,
@@ -1488,6 +1495,34 @@ function assertPresentation(bundle: JsonObject, index: BundleIndex): void {
         `${path}.stage`,
         index,
       );
+      if (
+        subjectKind !== "world" &&
+        subjectKind !== "entity" &&
+        subjectKind !== "definition"
+      ) {
+        throw semanticFault(
+          "content_bundle.semantic.stage_subject_kind_unsupported",
+          "Stage PackBinding must target a world, entity, or definition with an unambiguous runtime instance",
+          {
+            path,
+            subject_kind: subjectKind,
+          },
+        );
+      }
+      const hasAsset = binding.asset_id !== undefined;
+      const hasMaterializationProfile =
+        binding.materialization_profile_id !== undefined;
+      if (hasAsset === hasMaterializationProfile) {
+        throw semanticFault(
+          "content_bundle.semantic.stage_binding_asset_ambiguous",
+          "Stage PackBinding must select exactly one asset_id or materialization_profile_id",
+          {
+            path,
+            has_asset_id: hasAsset,
+            has_materialization_profile_id: hasMaterializationProfile,
+          },
+        );
+      }
     }
     assertFieldValues(
       asObjectArray(expectProperty(binding, "fields", path), `${path}.fields`),
@@ -1540,12 +1575,117 @@ function assertContentUpgrades(bundle: JsonObject, index: BundleIndex): void {
   );
   for (const [upgradeIndex, upgrade] of upgrades.entries()) {
     const path = `bundle.content_upgrades[${upgradeIndex}]`;
+    const migrationId = expectString(upgrade, "migration_id", path);
+    const fromPackVersion = expectString(
+      upgrade,
+      "from_pack_version",
+      path,
+    );
+    const fromBundleDigest = expectString(
+      upgrade,
+      "from_bundle_digest",
+      path,
+    );
+    const toPackVersion = expectString(
+      upgrade,
+      "to_pack_version",
+      path,
+    );
+    if (toPackVersion !== index.packVersion) {
+      throw semanticFault(
+        "content_bundle.semantic.content_upgrade_target_version_mismatch",
+        "ContentUpgrade.to_pack_version must equal its containing ContentBundle pack_version",
+        {
+          path,
+          migration_id: migrationId,
+          to_pack_version: toPackVersion,
+          pack_version: index.packVersion,
+        },
+      );
+    }
+    if (fromPackVersion === toPackVersion) {
+      throw semanticFault(
+        "content_bundle.semantic.content_upgrade_version_unchanged",
+        "ContentUpgrade must move between distinct pack versions",
+        {
+          path,
+          migration_id: migrationId,
+          pack_version: toPackVersion,
+        },
+      );
+    }
+    if (fromBundleDigest === index.bundleDigest) {
+      throw semanticFault(
+        "content_bundle.semantic.content_upgrade_digest_unchanged",
+        "ContentUpgrade source and target bundle digests must differ",
+        {
+          path,
+          migration_id: migrationId,
+          bundle_digest: index.bundleDigest,
+        },
+      );
+    }
+    assertContentUpgradeMappings(
+      asObjectArray(
+        expectProperty(upgrade, "declared_mapping", path),
+        `${path}.declared_mapping`,
+      ),
+      path,
+      migrationId,
+    );
     assertPluginOperationRef(
       expectJsonObject(expectProperty(upgrade, "transformer", path), `${path}.transformer`),
       `${path}.transformer`,
       index,
       "rule_plugin",
     );
+  }
+}
+
+function assertContentUpgradeMappings(
+  mappings: readonly JsonObject[],
+  path: string,
+  migrationId: string,
+): void {
+  const sourceKeys = new Set<string>();
+  const targetKeys = new Set<string>();
+  for (const [mappingIndex, mapping] of mappings.entries()) {
+    const mappingPath = `${path}.declared_mapping[${mappingIndex}]`;
+    const catalogKind = expectString(
+      mapping,
+      "catalog_kind",
+      mappingPath,
+    );
+    const sourceId = expectString(mapping, "source_id", mappingPath);
+    const targetId = expectString(mapping, "target_id", mappingPath);
+    const sourceKey = `${catalogKind}\u0000${sourceId}`;
+    const targetKey = `${catalogKind}\u0000${targetId}`;
+    if (sourceKeys.has(sourceKey)) {
+      throw semanticFault(
+        "content_bundle.semantic.content_upgrade_mapping_source_duplicate",
+        "ContentUpgrade declared_mapping must map each source identity at most once",
+        {
+          path: mappingPath,
+          migration_id: migrationId,
+          catalog_kind: catalogKind,
+          source_id: sourceId,
+        },
+      );
+    }
+    if (targetKeys.has(targetKey)) {
+      throw semanticFault(
+        "content_bundle.semantic.content_upgrade_mapping_target_duplicate",
+        "ContentUpgrade declared_mapping must not merge multiple source identities into one target identity",
+        {
+          path: mappingPath,
+          migration_id: migrationId,
+          catalog_kind: catalogKind,
+          target_id: targetId,
+        },
+      );
+    }
+    sourceKeys.add(sourceKey);
+    targetKeys.add(targetKey);
   }
 }
 
@@ -1896,6 +2036,16 @@ function assertStageRef(ref: JsonObject, path: string, index: BundleIndex): void
         path,
         dependency_id: dependencyId,
         actual_kind: dependency.kind,
+      },
+    );
+  }
+  if (!dependency.required) {
+    throw semanticFault(
+      "content_bundle.semantic.stage_dependency_not_required",
+      `Referenced stage_module dependency ${dependencyId} must set required=true`,
+      {
+        path,
+        dependency_id: dependencyId,
       },
     );
   }

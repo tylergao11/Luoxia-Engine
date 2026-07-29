@@ -1,15 +1,14 @@
 import {
   CONTRACT_REF,
   EngineFault,
+  expectString,
   indexStageModuleManifest,
+  jsonEquals,
   type ContractValidator,
+  type IndexedStageModuleScene,
   type IndexedStageModuleManifest,
-  type ValidatedJsonObject,
+  type StageModuleLockDocument,
 } from "@luoxia/contracts-runtime";
-
-export type StageModuleLockDocument = ValidatedJsonObject<
-  typeof CONTRACT_REF.stageModuleLock
->;
 
 /**
  * Identity derived only from a validated ContentBundle DependencyLock.
@@ -36,7 +35,12 @@ export interface StageModuleRegistry {
     dependency: StageModuleDependencyIdentity,
   ): RegisteredStageModule;
 
-  requireScene(module: RegisteredStageModule, sceneId: string): void;
+  requireModuleForLock(candidate: unknown): RegisteredStageModule;
+
+  requireScene(
+    module: RegisteredStageModule,
+    sceneId: string,
+  ): IndexedStageModuleScene;
 
   /**
    * Expand required root modules into a dependency-first activation plan.
@@ -71,11 +75,13 @@ export function createStageModuleRegistry(
 }
 
 class DefaultStageModuleRegistry implements StageModuleRegistry {
+  readonly #contracts: ContractValidator;
   readonly #byModuleId = new Map<string, RegisteredStageModule>();
   readonly #byIntegrityKey = new Map<string, RegisteredStageModule>();
   readonly #registeredModules: readonly RegisteredStageModule[];
 
   public constructor(dependencies: StageModuleRegistryDependencies) {
+    this.#contracts = dependencies.contracts;
     for (const [index, candidate] of dependencies.manifestCandidates.entries()) {
       this.#register(dependencies.contracts, candidate, index);
     }
@@ -123,7 +129,40 @@ class DefaultStageModuleRegistry implements StageModuleRegistry {
     return registered;
   }
 
-  public requireScene(module: RegisteredStageModule, sceneId: string): void {
+  public requireModuleForLock(candidate: unknown): RegisteredStageModule {
+    const lock = this.#contracts.assertObject(
+      CONTRACT_REF.stageModuleLock,
+      candidate,
+    );
+    const registered = this.requireModuleForDependency({
+      package_id: expectString(lock.value, "module_id", "StageModuleLock"),
+      version: expectString(
+        lock.value,
+        "implementation_version",
+        "StageModuleLock",
+      ),
+      integrity_sha256: expectString(
+        lock.value,
+        "implementation_digest",
+        "StageModuleLock",
+      ),
+    });
+    if (!jsonEquals(registered.stageModuleLock.value, lock.value)) {
+      throw new EngineFault(
+        "stage_module.registry.lock_mismatch",
+        "StageModuleLock differs from the exact registered StageModule",
+        {
+          module_id: registered.indexed.moduleId,
+        },
+      );
+    }
+    return registered;
+  }
+
+  public requireScene(
+    module: RegisteredStageModule,
+    sceneId: string,
+  ): IndexedStageModuleScene {
     const registered = this.#requireRegisteredObject(module);
     const moduleId = registered.indexed.moduleId;
 
@@ -137,6 +176,7 @@ class DefaultStageModuleRegistry implements StageModuleRegistry {
         },
       );
     }
+    return registered.indexed.requireScene(sceneId);
   }
 
   public planRequiredModules(

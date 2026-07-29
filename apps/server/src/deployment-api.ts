@@ -33,6 +33,7 @@ export type {
 } from "./deployment/runtime-deployment.js";
 export type {
   DeterministicContextHmacKeyring,
+  ContentUpgradeHmacKeyring,
   SessionBasisHmacKeyring,
 } from "./application/runtime-content-activation.js";
 export {
@@ -44,6 +45,9 @@ export type {
   RulePluginModuleV1,
 } from "./application/rule-plugin-abi.js";
 export type {
+  SaveSchemaMigrationModuleV1,
+} from "./application/save-schema-migration-abi.js";
+export type {
   ModelProvider,
   ResolvedModelInvocation,
 } from "./application/model-gateway.js";
@@ -51,3 +55,9 @@ export type {
   RuntimeSaveImportResult,
   RuntimeSaveService,
 } from "./application/runtime-save.js";
+export type {
+  MaterializationAcceptanceResult,
+  MaterializationGenerationResult,
+  MaterializationOrchestrator,
+  MaterializationReviewResult,
+} from "./application/materialization-orchestrator.js";

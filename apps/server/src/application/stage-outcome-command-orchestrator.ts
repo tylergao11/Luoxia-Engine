@@ -172,6 +172,10 @@ class DefaultStageOutcomeCommandOrchestrator
         });
       },
     });
+    this.#rulePlugins.assertExecutionRoot(
+      receipt,
+      stored.stageOutcomeExecution.ruleRequestId,
+    );
 
     const currentBinding = await this.#worlds.resolveCurrent(
       stored.session.worldId,
@@ -209,8 +213,8 @@ class DefaultStageOutcomeCommandOrchestrator
         });
       }
       throw new EngineFault(
-        "stage_outcome.orchestration.choice_unresolved",
-        "Stage outcome ChoiceSpec requires an explicit client choice protocol before the command can continue",
+        "stage_outcome.orchestration.terminal_output_invalid",
+        "Stage outcome RulePlugin execution terminated without a proposal or rejection",
         {
           session_id: stored.session.sessionId,
           command_id: stored.commandId,
@@ -621,8 +625,6 @@ function assertRecoveredStageOutcomeIdentity(input: {
   if (
     input.receipt.worldId !== input.stored.session.worldId ||
     input.receipt.basisRevision !== input.stored.session.worldRevision ||
-    expectString(request, "request_id", "RulePluginRequest") !==
-      execution.ruleRequestId ||
     expectString(request, "operation_kind", "RulePluginRequest") !==
       "stage_outcome.resolve" ||
     expectString(request, "operation_id", "RulePluginRequest") !==
@@ -648,7 +650,12 @@ function assertRecoveredStageOutcomeIdentity(input: {
       {
         session_id: input.stored.session.sessionId,
         command_id: input.stored.commandId,
-        request_id: execution.ruleRequestId,
+        root_request_id: execution.ruleRequestId,
+        terminal_request_id: expectString(
+          request,
+          "request_id",
+          "RulePluginRequest",
+        ),
       },
     );
   }

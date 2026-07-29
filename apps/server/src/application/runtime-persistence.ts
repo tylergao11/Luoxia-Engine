@@ -1,12 +1,20 @@
 import type {
+  AssetAcceptanceAuthorizationLookup,
   CommittedEventDocument,
+  ContentUpgradeAuthorizationLookup,
   RulePluginProposalReceiptLookup,
   WorldSnapshotDocument,
 } from "@luoxia/world-core";
 import type { ApplyPacketResultDocument } from "@luoxia/world-core";
-import type {
-  SaveEnvelopeDocument,
-  WorldContentLockDocument,
+import {
+  CONTRACT_REF,
+  type PackLockDocument,
+  type RulePluginChoiceResolutionDocument,
+  type SaveEnvelopeDocument,
+  type StageModuleLockDocument,
+  type UpgradeAuthorizationDocument,
+  type ValidatedJsonObject,
+  type WorldContentLockDocument,
 } from "@luoxia/contracts-runtime/portable";
 
 import type {
@@ -35,6 +43,8 @@ import type {
 export interface RuntimeWorldRecord {
   readonly snapshot: WorldSnapshotDocument;
   readonly worldContentLock: WorldContentLockDocument;
+  readonly dependencyBundleLocks: readonly PackLockDocument[];
+  readonly stageModuleLocks: readonly StageModuleLockDocument[];
   /**
    * Lowest revision for which this PostgreSQL world can provide subsequent
    * CommittedEvents. It is 0 for a locally created world and the imported
@@ -57,6 +67,19 @@ export interface RuntimeSaveRepository {
   insert(
     envelope: SaveEnvelopeDocument,
     persistedAt: string,
+  ): Promise<unknown>;
+}
+
+/**
+ * Save Schema migration is a representation-only lifecycle operation. The
+ * PostgreSQL adapter owns the world-row transaction and invokes the supplied
+ * synchronous pure transformation while that row is locked.
+ */
+export interface RuntimeSaveMigrationRepository {
+  migrateLocked(
+    worldId: string,
+    migratedAt: string,
+    migrate: (sourceCandidate: unknown) => SaveEnvelopeDocument,
   ): Promise<unknown>;
 }
 
@@ -187,6 +210,63 @@ export interface DailySettlementRunJournal
 export interface StoredPreparedRulePluginInvocation {
   readonly phase: "prepared";
   readonly request: RulePluginRequestDocument;
+  readonly continuation: StoredRulePluginChoiceContinuation | undefined;
+}
+
+export interface StoredRulePluginChoiceContinuation {
+  readonly parentRequestId: string;
+  readonly resolution: RulePluginChoiceResolutionDocument;
+}
+
+export type MaterializationRequestDocument = ValidatedJsonObject<
+  typeof CONTRACT_REF.materializationRequest
+>;
+export type AssetCandidateDocument = ValidatedJsonObject<
+  typeof CONTRACT_REF.assetCandidate
+>;
+export type ReviewReceiptDocument = ValidatedJsonObject<
+  typeof CONTRACT_REF.reviewReceipt
+>;
+export type AssetAcceptanceDocument = ValidatedJsonObject<
+  typeof CONTRACT_REF.assetAcceptance
+>;
+
+export interface StoredMaterializationCandidate {
+  readonly request: MaterializationRequestDocument;
+  readonly candidate: AssetCandidateDocument;
+}
+
+export interface StoredMaterializationReview
+  extends StoredMaterializationCandidate {
+  readonly review: ReviewReceiptDocument;
+  readonly acceptance: AssetAcceptanceDocument | undefined;
+}
+
+export interface MaterializationLedger
+  extends AssetAcceptanceAuthorizationLookup {
+  claimNextPending(): Promise<MaterializationRequestDocument | undefined>;
+  markFailed(
+    requestId: string,
+    expectedStatus: "generating" | "reviewing",
+  ): Promise<MaterializationRequestDocument>;
+  recordCandidate(
+    requestId: string,
+    candidate: AssetCandidateDocument,
+  ): Promise<StoredMaterializationCandidate>;
+  readByCandidateId(
+    candidateId: string,
+  ): Promise<StoredMaterializationCandidate | undefined>;
+  recordReview(
+    review: ReviewReceiptDocument,
+    acceptance: AssetAcceptanceDocument | undefined,
+  ): Promise<StoredMaterializationReview>;
+  readAccepted(
+    acceptanceId: string,
+  ): Promise<StoredMaterializationReview | undefined>;
+  markSuperseded(
+    requestId: string,
+    expectedStatus: "generating" | "reviewing" | "accepted",
+  ): Promise<MaterializationRequestDocument>;
 }
 
 export interface StoredResolvedRulePluginInvocation {
@@ -194,6 +274,7 @@ export interface StoredResolvedRulePluginInvocation {
   readonly request: RulePluginRequestDocument;
   readonly response: RulePluginResponseDocument;
   readonly proposal: PacketProposalDocument | undefined;
+  readonly continuation: StoredRulePluginChoiceContinuation | undefined;
 }
 
 export type StoredRulePluginInvocation =
@@ -205,10 +286,44 @@ export interface RulePluginInvocationJournal
   persistPrepared(
     invocation: PreparedRulePluginInvocation,
   ): Promise<StoredRulePluginInvocation>;
+  persistChoiceContinuation(input: {
+    readonly parent: VerifiedRulePluginInvocationReceipt;
+    readonly invocation: PreparedRulePluginInvocation;
+    readonly resolution: RulePluginChoiceResolutionDocument;
+  }): Promise<StoredRulePluginInvocation>;
   recordResolved(
     receipt: VerifiedRulePluginInvocationReceipt,
   ): Promise<StoredResolvedRulePluginInvocation>;
   readByRequestId(
     requestId: string,
   ): Promise<StoredRulePluginInvocation | undefined>;
+  readChoiceContinuation(
+    parentRequestId: string,
+  ): Promise<StoredRulePluginInvocation | undefined>;
+}
+
+export interface StoredContentUpgradeAuthorization {
+  readonly phase: "authorized" | "commit_ready";
+  readonly sessionId: string;
+  readonly clientCommandId: string;
+  readonly ruleRequestId: string;
+  readonly authorization: UpgradeAuthorizationDocument;
+  readonly resultDigest?: string;
+}
+
+export interface ContentUpgradeAuthorizationLedger
+  extends ContentUpgradeAuthorizationLookup {
+  persistAuthorized(input: {
+    readonly sessionId: string;
+    readonly clientCommandId: string;
+    readonly ruleRequestId: string;
+    readonly authorization: UpgradeAuthorizationDocument;
+  }): Promise<StoredContentUpgradeAuthorization>;
+  markCommitReady(input: {
+    readonly upgradeCommandId: string;
+    readonly resultDigest: string;
+  }): Promise<StoredContentUpgradeAuthorization>;
+  readByUpgradeCommandId(
+    upgradeCommandId: string,
+  ): Promise<StoredContentUpgradeAuthorization | undefined>;
 }

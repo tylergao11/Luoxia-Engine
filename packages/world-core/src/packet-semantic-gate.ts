@@ -9,9 +9,12 @@ import {
   type ContractValidator,
   type JsonObject,
   type JsonValue,
+  type SaveEnvelopeDocument,
+  type WorldContentLockDocument,
 } from "@luoxia/contracts-runtime/portable";
 
 import type {
+  ContentUpgradeAuthorizationAuthority,
   ContentPacketDocument,
   DeterministicContextAuthority,
   PacketSemanticGate,
@@ -62,6 +65,46 @@ export interface RulePluginProposalReceiptLookup {
 }
 
 /**
+ * Authoritative Materialization Ledger record behind one AssetAcceptance.
+ * Every returned JSON value remains untrusted until validated against its
+ * owning materialization contract.
+ */
+export interface AssetAcceptanceAuthorizationRecord {
+  readonly request: unknown;
+  readonly candidate: unknown;
+  readonly review: unknown;
+  readonly acceptance: unknown;
+}
+
+export interface AssetAcceptanceAuthorizationLookup {
+  findByAcceptanceId(
+    acceptanceId: string,
+  ): Promise<AssetAcceptanceAuthorizationRecord | undefined>;
+}
+
+/**
+ * Commit-ready Content Upgrade evidence. The Server adapter may reconstruct
+ * the RulePlugin request/response from its invocation journal, but World Core
+ * treats every returned document as untrusted until its Schema and identities
+ * are rechecked here.
+ */
+export interface ContentUpgradeAuthorizationRecord {
+  readonly authorization: unknown;
+  readonly request: unknown;
+  readonly response: unknown;
+}
+
+export interface ContentUpgradeAuthorizationLookup {
+  findByUpgradeCommandId(
+    upgradeCommandId: string,
+  ): Promise<ContentUpgradeAuthorizationRecord | undefined>;
+}
+
+export interface ContentUpgradeAuthorizationClock {
+  now(): string;
+}
+
+/**
  * Resolves the authoritative value digest of a component on a locked static definition.
  * The implementation owns ContentBundle lock and Catalog lookup; World Core owns comparison.
  */
@@ -73,13 +116,35 @@ export interface StaticComponentDigestLookup {
   }): Promise<string | undefined>;
 }
 
+/**
+ * Exact content/deployment authority for one StageOpenOp. The caller supplies
+ * only facts validated from the same locked SaveEnvelope as the WorldSnapshot.
+ * Implementations must resolve the WorldContentLock through the registered
+ * ContentBundle and the exact StageModuleLock through the deployment registry.
+ */
+export interface StageOpenContractLookup {
+  assertAllowed(input: {
+    readonly worldContentLock: WorldContentLockDocument;
+    readonly stageModuleLocks: readonly JsonObject[];
+    readonly stageModuleLock: JsonObject;
+    readonly sceneId: string;
+  }): void;
+}
+
 export interface PacketSemanticGateDependencies {
   readonly contracts: ContractValidator;
   readonly digest: PacketContentDigest;
   readonly decimalComparer: DecimalAmountComparer;
   readonly ruleHoldEvaluator: RuleHoldEvaluator;
   readonly proposalReceiptLookup: RulePluginProposalReceiptLookup;
+  readonly assetAcceptanceLookup: AssetAcceptanceAuthorizationLookup;
+  readonly contentUpgradeAuthorizationLookup:
+    ContentUpgradeAuthorizationLookup;
+  readonly contentUpgradeAuthorizationAuthority:
+    ContentUpgradeAuthorizationAuthority;
+  readonly contentUpgradeClock: ContentUpgradeAuthorizationClock;
   readonly staticComponentDigestLookup: StaticComponentDigestLookup;
+  readonly stageOpenContractLookup: StageOpenContractLookup;
   /** Sole DeterministicContext authenticity authority for this composition. */
   readonly deterministicContextAuthority: DeterministicContextAuthority;
 }
@@ -100,7 +165,12 @@ const PRECONDITION_KINDS = [
 
 type PreconditionKind = (typeof PRECONDITION_KINDS)[number];
 
-const SOURCE_KINDS = ["rule_plugin", "sealed_event_result"] as const;
+const SOURCE_KINDS = [
+  "rule_plugin",
+  "sealed_event_result",
+  "asset_acceptance",
+  "content_upgrade",
+] as const;
 type SourceKind = (typeof SOURCE_KINDS)[number];
 
 interface EvaluationContext {
@@ -109,6 +179,7 @@ interface EvaluationContext {
   readonly worldId: string;
   readonly worldRevision: number;
   readonly worldState: JsonObject;
+  readonly authorityEnvelope: JsonObject;
   readonly dependencies: PacketSemanticGateDependencies;
 }
 
@@ -145,6 +216,7 @@ class DefaultPacketSemanticGate implements PacketSemanticGate {
   public async assertApplicable(
     packet: ContentPacketDocument,
     snapshot: WorldSnapshotDocument,
+    authorityEnvelope: SaveEnvelopeDocument,
   ): Promise<void> {
     const packetValue = packet.value;
     const snapshotValue = snapshot.value;
@@ -162,6 +234,7 @@ class DefaultPacketSemanticGate implements PacketSemanticGate {
         "WorldSnapshot",
       ),
       worldState,
+      authorityEnvelope: authorityEnvelope.value,
       dependencies: this.#dependencies,
     };
 
@@ -182,6 +255,46 @@ class DefaultPacketSemanticGate implements PacketSemanticGate {
       ),
       context,
     );
+    assertStageOpenContracts(context);
+  }
+}
+
+function assertStageOpenContracts(context: EvaluationContext): void {
+  const stageOpenOps = asObjectArray(
+    expectProperty(context.packet, "ops", "ContentPacket"),
+    "ContentPacket.ops",
+  ).filter((op) => expectString(op, "op", "EffectOp") === "stage.open");
+  if (stageOpenOps.length === 0) {
+    return;
+  }
+
+  const worldContentLock = context.dependencies.contracts.assertObject(
+    CONTRACT_REF.worldContentLock,
+    expectProperty(
+      context.authorityEnvelope,
+      "world_content_lock",
+      "SaveEnvelope",
+    ),
+  );
+  const stageModuleLocks = asObjectArray(
+    expectProperty(
+      context.authorityEnvelope,
+      "stage_module_locks",
+      "SaveEnvelope",
+    ),
+    "SaveEnvelope.stage_module_locks",
+  );
+
+  for (const op of stageOpenOps) {
+    context.dependencies.stageOpenContractLookup.assertAllowed({
+      worldContentLock,
+      stageModuleLocks,
+      stageModuleLock: expectJsonObject(
+        expectProperty(op, "stage_module_lock", "StageOpenOp"),
+        "StageOpenOp.stage_module_lock",
+      ),
+      sceneId: expectString(op, "scene_id", "StageOpenOp"),
+    });
   }
 }
 
@@ -531,6 +644,8 @@ const SOURCE_HANDLERS: {
 } = {
   rule_plugin: assertRulePluginSource,
   sealed_event_result: assertSealedEventResultSource,
+  asset_acceptance: assertAssetAcceptanceSource,
+  content_upgrade: assertContentUpgradeSource,
 };
 
 async function assertRulePluginSource(
@@ -626,7 +741,366 @@ async function assertRulePluginSource(
       },
     );
   }
+  if (
+    asObjectArray(packetOps, "ContentPacket.ops").some(
+      (op) => expectString(op, "op", "EffectOp") === "visual_binding.upsert",
+    )
+  ) {
+    throw fault(
+      "world.packet.visual_binding_source_forbidden",
+      "RulePlugin packet source cannot authorize visual_binding.upsert",
+      {
+        source_kind: "rule_plugin",
+        proposal_id: proposalId,
+      },
+    );
+  }
+  if (
+    asObjectArray(packetOps, "ContentPacket.ops").some(
+      (op) => expectString(op, "op", "EffectOp") === "content_upgrade.apply",
+    )
+  ) {
+    throw fault(
+      "world.packet.content_upgrade_source_forbidden",
+      "RulePlugin packet source cannot authorize content_upgrade.apply",
+      {
+        source_kind: "rule_plugin",
+        proposal_id: proposalId,
+      },
+    );
+  }
+}
 
+async function assertContentUpgradeSource(
+  source: JsonObject,
+  context: EvaluationContext,
+): Promise<void> {
+  const upgradeCommandId = expectString(
+    source,
+    "upgrade_command_id",
+    "PacketSource",
+  );
+  const record =
+    await context.dependencies.contentUpgradeAuthorizationLookup
+      .findByUpgradeCommandId(upgradeCommandId);
+  if (record === undefined) {
+    throw fault(
+      "world.packet.content_upgrade_authorization_missing",
+      "No commit-ready Content Upgrade authorization exists for this packet",
+      {
+        source_kind: "content_upgrade",
+        upgrade_command_id: upgradeCommandId,
+      },
+    );
+  }
+
+  const authorization =
+    context.dependencies.contentUpgradeAuthorizationAuthority
+      .assertAuthentic(
+        record.authorization,
+        context.dependencies.contentUpgradeClock.now(),
+      ).value;
+  const request = context.dependencies.contracts.assertObject(
+    CONTRACT_REF.rulePluginRequest,
+    record.request,
+  ).value;
+  const response = context.dependencies.contracts.assertObject(
+    CONTRACT_REF.rulePluginResponse,
+    record.response,
+  ).value;
+  const input = expectJsonObject(
+    expectProperty(request, "input", "RulePluginRequest"),
+    "RulePluginRequest.input",
+  );
+  const output = expectJsonObject(
+    expectProperty(response, "output", "RulePluginResponse"),
+    "RulePluginResponse.output",
+  );
+  const sourceSave = context.dependencies.contracts.assertObject(
+    CONTRACT_REF.saveEnvelope,
+    expectProperty(input, "source_save", "ContentUpgradeInput"),
+  ).value;
+  const candidateSave = context.dependencies.contracts.assertObject(
+    CONTRACT_REF.saveEnvelope,
+    expectProperty(output, "candidate_save", "ContentUpgradeOutput"),
+  ).value;
+  const migrationId = expectString(
+    source,
+    "migration_id",
+    "PacketSource",
+  );
+  const sourceSaveDigest = expectString(
+    source,
+    "source_save_digest",
+    "PacketSource",
+  );
+  const authorizationDigest = expectString(
+    source,
+    "authorization_digest",
+    "PacketSource",
+  );
+  const resultDigest = expectString(
+    source,
+    "result_digest",
+    "PacketSource",
+  );
+
+  assertEqual(
+    "content_upgrade.request.operation_kind",
+    "content_upgrade.transform",
+    expectString(request, "operation_kind", "RulePluginRequest"),
+  );
+  assertEqual(
+    "content_upgrade.response.operation_kind",
+    "content_upgrade.transform",
+    expectString(response, "operation_kind", "RulePluginResponse"),
+  );
+  assertEqual(
+    "content_upgrade.output.output_kind",
+    "content_upgrade.candidate",
+    expectString(output, "output_kind", "ContentUpgradeOutput"),
+  );
+  const unresolved = expectProperty(
+    output,
+    "unresolved",
+    "ContentUpgradeOutput",
+  );
+  if (!Array.isArray(unresolved) || unresolved.length !== 0) {
+    throw fault(
+      "world.packet.content_upgrade_unresolved",
+      "Content Upgrade cannot commit while its verified output has unresolved items",
+      { upgrade_command_id: upgradeCommandId },
+    );
+  }
+
+  for (const [field, expected, actual] of [
+    [
+      "content_upgrade.packet_id",
+      upgradeCommandId,
+      expectString(context.packet, "packet_id", "ContentPacket"),
+    ],
+    [
+      "content_upgrade.cause_id",
+      migrationId,
+      expectString(context.packet, "cause_id", "ContentPacket"),
+    ],
+    [
+      "content_upgrade.authorization.command_id",
+      upgradeCommandId,
+      expectString(
+        authorization,
+        "upgrade_command_id",
+        "UpgradeAuthorization",
+      ),
+    ],
+    [
+      "content_upgrade.authorization.migration_id",
+      migrationId,
+      expectString(authorization, "migration_id", "UpgradeAuthorization"),
+    ],
+    [
+      "content_upgrade.input.migration_id",
+      migrationId,
+      expectString(input, "migration_id", "ContentUpgradeInput"),
+    ],
+    [
+      "content_upgrade.output.migration_id",
+      migrationId,
+      expectString(output, "migration_id", "ContentUpgradeOutput"),
+    ],
+    [
+      "content_upgrade.source_save_digest",
+      sourceSaveDigest,
+      context.dependencies.digest.sha256(sourceSave),
+    ],
+    [
+      "content_upgrade.authorization.source_save_digest",
+      sourceSaveDigest,
+      expectString(
+        authorization,
+        "source_save_digest",
+        "UpgradeAuthorization",
+      ),
+    ],
+    [
+      "content_upgrade.authorization_digest",
+      authorizationDigest,
+      expectString(
+        authorization,
+        "authorization_digest",
+        "UpgradeAuthorization",
+      ),
+    ],
+    [
+      "content_upgrade.output.authorization_digest",
+      authorizationDigest,
+      expectString(output, "authorization_digest", "ContentUpgradeOutput"),
+    ],
+    [
+      "content_upgrade.result_digest",
+      resultDigest,
+      expectString(output, "result_digest", "ContentUpgradeOutput"),
+    ],
+    [
+      "content_upgrade.result_digest.recomputed",
+      resultDigest,
+      context.dependencies.digest.sha256(omitField(output, "result_digest")),
+    ],
+    [
+      "content_upgrade.world_id",
+      context.worldId,
+      expectString(sourceSave, "world_id", "SaveEnvelope"),
+    ],
+    [
+      "content_upgrade.authorization.world_id",
+      context.worldId,
+      expectString(authorization, "world_id", "UpgradeAuthorization"),
+    ],
+  ] as const) {
+    assertEqual(field, expected, actual);
+  }
+  assertEqual(
+    "content_upgrade.source_revision",
+    context.worldRevision,
+    expectInteger(sourceSave, "world_revision", "SaveEnvelope"),
+  );
+  assertEqual(
+    "content_upgrade.authorization.source_revision",
+    context.worldRevision,
+    expectInteger(
+      authorization,
+      "source_world_revision",
+      "UpgradeAuthorization",
+    ),
+  );
+  assertJsonEqual(
+    "content_upgrade.authorization.input",
+    authorization,
+    expectProperty(input, "authorization", "ContentUpgradeInput"),
+  );
+  assertJsonEqual(
+    "content_upgrade.source_world_state",
+    context.worldState,
+    expectProperty(sourceSave, "world_state", "SaveEnvelope"),
+  );
+  assertJsonEqual(
+    "content_upgrade.readonly_world",
+    context.snapshot,
+    expectProperty(request, "readonly_world", "RulePluginRequest"),
+  );
+  assertJsonEqual(
+    "content_upgrade.deterministic_context",
+    expectProperty(
+      context.packet,
+      "deterministic_context",
+      "ContentPacket",
+    ),
+    expectProperty(request, "deterministic_context", "RulePluginRequest"),
+  );
+  assertRulePluginRequestResponseIdentity(request, response);
+
+  const preconditions = asObjectArray(
+    expectProperty(context.packet, "preconditions", "ContentPacket"),
+    "ContentPacket.preconditions",
+  );
+  if (preconditions.length !== 0) {
+    throw fault(
+      "world.packet.content_upgrade_preconditions_forbidden",
+      "Content Upgrade packet preconditions must be empty; its exact basis and authorization are closed by the special source",
+      {
+        upgrade_command_id: upgradeCommandId,
+        precondition_count: preconditions.length,
+      },
+    );
+  }
+  const ops = asObjectArray(
+    expectProperty(context.packet, "ops", "ContentPacket"),
+    "ContentPacket.ops",
+  );
+  if (
+    ops.length !== 1 ||
+    expectString(ops[0] as JsonObject, "op", "EffectOp") !==
+      "content_upgrade.apply" ||
+    !jsonEquals(
+      expectProperty(
+        ops[0] as JsonObject,
+        "candidate_save",
+        "ContentUpgradeApplyOp",
+      ),
+      candidateSave,
+    )
+  ) {
+    throw fault(
+      "world.packet.content_upgrade_ops_mismatch",
+      "Content Upgrade packet must contain only the exact verified candidate SaveEnvelope",
+      { upgrade_command_id: upgradeCommandId },
+    );
+  }
+}
+
+function assertRulePluginRequestResponseIdentity(
+  request: JsonObject,
+  response: JsonObject,
+): void {
+  for (const [field, expected, actual] of [
+    [
+      "content_upgrade.response.request_id",
+      expectString(request, "request_id", "RulePluginRequest"),
+      expectString(response, "request_id", "RulePluginResponse"),
+    ],
+    [
+      "content_upgrade.response.operation_id",
+      expectString(request, "operation_id", "RulePluginRequest"),
+      expectString(response, "operation_id", "RulePluginResponse"),
+    ],
+    [
+      "content_upgrade.response.operation_kind",
+      expectString(request, "operation_kind", "RulePluginRequest"),
+      expectString(response, "operation_kind", "RulePluginResponse"),
+    ],
+    [
+      "content_upgrade.response.basis_revision",
+      expectInteger(request, "basis_revision", "RulePluginRequest"),
+      expectInteger(response, "basis_revision", "RulePluginResponse"),
+    ],
+  ] as const) {
+    assertEqual(field, expected, actual);
+  }
+  assertJsonEqual(
+    "content_upgrade.response.plugin_lock",
+    expectProperty(request, "plugin_lock", "RulePluginRequest"),
+    expectProperty(response, "plugin_lock", "RulePluginResponse"),
+  );
+  const deterministicContext = expectJsonObject(
+    expectProperty(request, "deterministic_context", "RulePluginRequest"),
+    "RulePluginRequest.deterministic_context",
+  );
+  assertEqual(
+    "content_upgrade.response.deterministic_context_id",
+    expectString(
+      deterministicContext,
+      "context_id",
+      "DeterministicContext",
+    ),
+    expectString(
+      response,
+      "deterministic_context_id",
+      "RulePluginResponse",
+    ),
+  );
+  assertEqual(
+    "content_upgrade.response.deterministic_context_digest",
+    expectString(
+      deterministicContext,
+      "context_digest",
+      "DeterministicContext",
+    ),
+    expectString(
+      response,
+      "deterministic_context_digest",
+      "RulePluginResponse",
+    ),
+  );
 }
 
 async function assertSealedEventResultSource(
@@ -763,6 +1237,275 @@ async function assertSealedEventResultSource(
       event_card_id: eventCardId,
       op_count: packetOps.length,
     },
+  );
+}
+
+async function assertAssetAcceptanceSource(
+  source: JsonObject,
+  context: EvaluationContext,
+): Promise<void> {
+  const acceptanceId = expectString(
+    source,
+    "acceptance_id",
+    "PacketSource",
+  );
+  const authorization =
+    await context.dependencies.assetAcceptanceLookup.findByAcceptanceId(
+      acceptanceId,
+    );
+  if (authorization === undefined) {
+    throw fault(
+      "world.packet.asset_acceptance_missing",
+      "No authoritative AssetAcceptance record exists for this packet source",
+      {
+        source_kind: "asset_acceptance",
+        acceptance_id: acceptanceId,
+      },
+    );
+  }
+
+  const request = context.dependencies.contracts.assertObject(
+    CONTRACT_REF.materializationRequest,
+    authorization.request,
+  ).value;
+  const candidate = context.dependencies.contracts.assertObject(
+    CONTRACT_REF.assetCandidate,
+    authorization.candidate,
+  ).value;
+  const review = context.dependencies.contracts.assertObject(
+    CONTRACT_REF.reviewReceipt,
+    authorization.review,
+  ).value;
+  const acceptance = context.dependencies.contracts.assertObject(
+    CONTRACT_REF.assetAcceptance,
+    authorization.acceptance,
+  ).value;
+
+  assertEqual(
+    "asset_acceptance.acceptance_id",
+    acceptanceId,
+    expectString(acceptance, "acceptance_id", "AssetAcceptance"),
+  );
+  assertEqual(
+    "asset_acceptance.packet_id",
+    acceptanceId,
+    expectString(context.packet, "packet_id", "ContentPacket"),
+  );
+
+  const requestId = expectString(
+    acceptance,
+    "request_id",
+    "AssetAcceptance",
+  );
+  const candidateId = expectString(
+    acceptance,
+    "candidate_id",
+    "AssetAcceptance",
+  );
+  const reviewId = expectString(acceptance, "review_id", "AssetAcceptance");
+  assertEqual(
+    "asset_acceptance.request_id",
+    requestId,
+    expectString(request, "request_id", "MaterializationRequest"),
+  );
+  assertEqual(
+    "asset_acceptance.cause_id",
+    requestId,
+    expectString(context.packet, "cause_id", "ContentPacket"),
+  );
+  assertEqual(
+    "asset_acceptance.world_id",
+    expectString(request, "world_id", "MaterializationRequest"),
+    expectString(context.packet, "world_id", "ContentPacket"),
+  );
+  assertEqual(
+    "asset_acceptance.candidate_id",
+    candidateId,
+    expectString(candidate, "candidate_id", "AssetCandidate"),
+  );
+  assertEqual(
+    "asset_acceptance.candidate_request_id",
+    requestId,
+    expectString(candidate, "request_id", "AssetCandidate"),
+  );
+  assertEqual(
+    "asset_acceptance.review_id",
+    reviewId,
+    expectString(review, "review_id", "ReviewReceipt"),
+  );
+  assertEqual(
+    "asset_acceptance.review_candidate_id",
+    candidateId,
+    expectString(review, "candidate_id", "ReviewReceipt"),
+  );
+  assertEqual(
+    "asset_acceptance.review_verdict",
+    "accepted",
+    expectString(review, "verdict", "ReviewReceipt"),
+  );
+  assertEqual(
+    "asset_acceptance.request_status",
+    "accepted",
+    expectString(request, "status", "MaterializationRequest"),
+  );
+
+  const subjectRevision = expectInteger(
+    acceptance,
+    "subject_revision",
+    "AssetAcceptance",
+  );
+  assertEqual(
+    "asset_acceptance.request_subject_revision",
+    subjectRevision,
+    expectInteger(request, "subject_revision", "MaterializationRequest"),
+  );
+  assertEqual(
+    "asset_acceptance.candidate_subject_revision",
+    subjectRevision,
+    expectInteger(candidate, "subject_revision", "AssetCandidate"),
+  );
+  assertEqual(
+    "asset_acceptance.generation_spec_digest",
+    expectString(
+      request,
+      "generation_spec_digest",
+      "MaterializationRequest",
+    ),
+    expectString(
+      candidate,
+      "generation_spec_digest",
+      "AssetCandidate",
+    ),
+  );
+  assertJsonEqual(
+    "asset_acceptance.asset",
+    expectProperty(acceptance, "asset", "AssetAcceptance"),
+    expectProperty(candidate, "asset", "AssetCandidate"),
+  );
+  assertJsonEqual(
+    "asset_acceptance.deterministic_context",
+    expectProperty(acceptance, "deterministic_context", "AssetAcceptance"),
+    expectProperty(
+      context.packet,
+      "deterministic_context",
+      "ContentPacket",
+    ),
+  );
+
+  const expectedPreconditions = buildAssetAcceptancePreconditions(
+    request,
+    subjectRevision,
+  );
+  assertJsonEqual(
+    "asset_acceptance.preconditions",
+    expectedPreconditions,
+    expectProperty(context.packet, "preconditions", "ContentPacket"),
+  );
+
+  const expectedOp: JsonObject = {
+    op: "visual_binding.upsert",
+    binding: {
+      binding_id: expectString(
+        acceptance,
+        "binding_id",
+        "AssetAcceptance",
+      ),
+      world_id: expectString(request, "world_id", "MaterializationRequest"),
+      subject: expectProperty(request, "subject", "MaterializationRequest"),
+      subject_revision: subjectRevision,
+      slot_id: expectString(request, "slot_id", "MaterializationRequest"),
+      asset: expectProperty(acceptance, "asset", "AssetAcceptance"),
+      source_request_id: requestId,
+      acceptance_id: acceptanceId,
+      scope: "session",
+      state: "active",
+    },
+  };
+  assertJsonEqual(
+    "asset_acceptance.ops",
+    [expectedOp],
+    expectProperty(context.packet, "ops", "ContentPacket"),
+  );
+}
+
+function buildAssetAcceptancePreconditions(
+  request: JsonObject,
+  subjectRevision: number,
+): JsonObject[] {
+  const subject = expectJsonObject(
+    expectProperty(request, "subject", "MaterializationRequest"),
+    "MaterializationRequest.subject",
+  );
+  const subjectKind = expectString(subject, "kind", "SubjectRef");
+  if (subjectKind === "entity") {
+    const entity = expectJsonObject(
+      expectProperty(subject, "entity", "SubjectRef"),
+      "SubjectRef.entity",
+    );
+    if (
+      entity.expected_revision !== undefined &&
+      expectInteger(entity, "expected_revision", "EntityRef") !==
+        subjectRevision
+    ) {
+      throw fault(
+        "world.packet.asset_acceptance_subject_revision_mismatch",
+        "MaterializationRequest EntityRef.expected_revision must match subject_revision",
+        {
+          request_id: expectString(
+            request,
+            "request_id",
+            "MaterializationRequest",
+          ),
+        },
+      );
+    }
+    return [
+      {
+        kind: "entity.revision_is",
+        entity_id: expectString(entity, "entity_id", "EntityRef"),
+        revision: subjectRevision,
+      },
+    ];
+  }
+  if (subjectKind === "definition") {
+    const definition = expectJsonObject(
+      expectProperty(subject, "definition", "SubjectRef"),
+      "SubjectRef.definition",
+    );
+    if (expectString(definition, "kind", "DefinitionRef") !== "dynamic") {
+      throw fault(
+        "world.packet.asset_acceptance_subject_immutable",
+        "AssetAcceptance can bind only runtime Entity or DynamicDefinition subjects",
+        {
+          request_id: expectString(
+            request,
+            "request_id",
+            "MaterializationRequest",
+          ),
+        },
+      );
+    }
+    assertEqual(
+      "asset_acceptance.definition_revision",
+      subjectRevision,
+      expectInteger(definition, "revision", "DynamicDefinitionRef"),
+    );
+    return [
+      {
+        kind: "definition.revision_is",
+        definition_id: expectString(
+          definition,
+          "definition_id",
+          "DynamicDefinitionRef",
+        ),
+        revision: subjectRevision,
+      },
+    ];
+  }
+  throw fault(
+    "world.packet.asset_acceptance_subject_kind",
+    "AssetAcceptance references an unsupported Materialization subject kind",
+    { subject_kind: subjectKind },
   );
 }
 
@@ -1275,5 +2018,7 @@ const _sourceExhaustive: {
 } = {
   rule_plugin: true,
   sealed_event_result: true,
+  asset_acceptance: true,
+  content_upgrade: true,
 };
 void _sourceExhaustive;

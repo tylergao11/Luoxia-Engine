@@ -2,14 +2,20 @@ import type {
   ContractValidator,
   JsonDigest,
 } from "@luoxia/contracts-runtime";
-import type { DeterministicContextAuthority } from "@luoxia/world-core";
+import type {
+  ContentUpgradeAuthorizationAuthority,
+  DeterministicContextAuthority,
+} from "@luoxia/world-core";
 
 import {
   RulePluginGateway,
   type RulePluginAdapter,
 } from "./rule-plugin-gateway.js";
 import type { ModelInvocationProvenanceVerifier } from "./model-gateway.js";
-import { createRulePluginSemanticGate } from "./rule-plugin-semantic-gate.js";
+import {
+  createRulePluginSemanticGate,
+  type RulePluginContentUpgradeClock,
+} from "./rule-plugin-semantic-gate.js";
 
 export interface RulePluginGatewayDependencies {
   readonly contracts: ContractValidator;
@@ -17,6 +23,9 @@ export interface RulePluginGatewayDependencies {
   readonly adapter: RulePluginAdapter;
   readonly modelProvenance: ModelInvocationProvenanceVerifier;
   readonly deterministicContextAuthority: DeterministicContextAuthority;
+  readonly contentUpgradeAuthorizationAuthority:
+    ContentUpgradeAuthorizationAuthority;
+  readonly contentUpgradeClock: RulePluginContentUpgradeClock;
 }
 
 /**
@@ -32,7 +41,13 @@ export function createRulePluginGateway(
     dependencies.contracts,
     dependencies.digest,
     dependencies.adapter,
-    createRulePluginSemanticGate(dependencies.digest),
+    createRulePluginSemanticGate({
+      contracts: dependencies.contracts,
+      digest: dependencies.digest,
+      contentUpgradeAuthorizations:
+        dependencies.contentUpgradeAuthorizationAuthority,
+      contentUpgradeClock: dependencies.contentUpgradeClock,
+    }),
     dependencies.modelProvenance,
     dependencies.deterministicContextAuthority,
   );

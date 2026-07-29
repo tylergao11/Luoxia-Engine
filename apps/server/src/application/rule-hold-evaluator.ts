@@ -162,7 +162,7 @@ class ProductionRuleHoldEvaluator implements RuleHoldEvaluator {
     if (outputKind !== "validation") {
       throw new EngineFault(
         "runtime.rule_hold.non_boolean_result",
-        "rule.holds requires rule.evaluate ValidationOutput; reject and choice.required are not boolean holds",
+        "rule.holds requires rule.evaluate ValidationOutput; reject is not a boolean hold",
         {
           rule_id: ruleId,
           output_kind: outputKind,

@@ -4,13 +4,16 @@ import {
   type JsonDigest,
 } from "@luoxia/contracts-runtime";
 import {
+  createContentUpgradeAuthorizationAuthority,
   createDeterministicContextAuthority,
   createPacketSemanticGate,
   createPacketStateTransition,
+  createRulePluginChoiceAuthority,
   createSessionViewProjector,
   createWorldCore,
   type ContentRuntimeCatalog,
   type ContentRuntimeIdentityMapper,
+  type ContentUpgradeAuthorizationAuthority,
   type DeterministicContextAuthority,
   type DeterministicContextDocument,
   type DeterministicContextIdFactory,
@@ -21,10 +24,17 @@ import {
 import type { Pool } from "pg";
 
 import { createNodeCommandExecutionIdFactory } from "../adapters/crypto/command-execution-id-factory.js";
+import {
+  createHmacContentUpgradeTokenCodec,
+  type ContentUpgradeHmacKeyring,
+} from "../adapters/crypto/content-upgrade-hmac-token-codec.js";
 import { createNodeDayCycleExecutionIdFactory } from "../adapters/crypto/day-cycle-execution-id-factory.js";
 import { createNodeDialogueCommitmentIdFactory } from "../adapters/crypto/dialogue-commitment-id-factory.js";
 import { createNodeEngineSessionIdFactory } from "../adapters/crypto/engine-session-id-factory.js";
+import { createNodeMaterializationIdentityFactory } from "../adapters/crypto/materialization-identity-factory.js";
 import { createNodeRuleHoldRequestIdFactory } from "../adapters/crypto/rule-hold-request-id-factory.js";
+import { createNodeRulePluginChoiceContinuationIdFactory } from "../adapters/crypto/rule-plugin-choice-continuation-id-factory.js";
+import { createNodeRulePluginChoiceEntropySource } from "../adapters/crypto/rule-plugin-choice-entropy-source.js";
 import { createNodeRuntimeWorldCreationIdFactory } from "../adapters/crypto/runtime-world-creation-id-factory.js";
 import { createNodeServerEnvelopeIdFactory } from "../adapters/crypto/server-envelope-id-factory.js";
 import { createNodeWorldExtensionExecutionIdentityFactory } from "../adapters/crypto/world-extension-execution-id-factory.js";
@@ -34,10 +44,12 @@ import {
 } from "../adapters/crypto/session-basis-hmac-authority.js";
 import { createPostgresAtomicPacketStore } from "../adapters/postgres/atomic-packet-store.js";
 import { createPostgresCommandJournal } from "../adapters/postgres/command-journal.js";
+import { createPostgresContentUpgradeAuthorizationLedger } from "../adapters/postgres/content-upgrade-authorization-ledger.js";
 import { createPostgresDayCycleExecutionIdentityJournal } from "../adapters/postgres/day-cycle-execution-identity.js";
 import { createPostgresDialogueDirectorRunJournal } from "../adapters/postgres/dialogue-director-run.js";
 import { createPostgresCommandFinalizer } from "../adapters/postgres/command-finalizer.js";
 import { createPostgresEngineSessionRepository } from "../adapters/postgres/engine-session-repository.js";
+import { createPostgresMaterializationLedger } from "../adapters/postgres/materialization-ledger.js";
 import { createPostgresPlayerDayEndRunJournal } from "../adapters/postgres/player-day-end-run.js";
 import { createPostgresSessionSynchronization } from "../adapters/postgres/session-synchronization.js";
 import {
@@ -52,18 +64,26 @@ import {
   type PostgresRuntimeReaders,
 } from "../adapters/postgres/runtime-readers.js";
 import { createPostgresRuntimeSaveRepository } from "../adapters/postgres/runtime-save-repository.js";
+import { createPostgresRuntimeSaveMigrationRepository } from "../adapters/postgres/runtime-save-migration-repository.js";
 import { createSystemRuntimeSaveClock } from "../adapters/system/runtime-save-clock.js";
+import { createSystemContentUpgradeClock } from "../adapters/system/content-upgrade-clock.js";
+import { createSystemMaterializationClock } from "../adapters/system/materialization-clock.js";
 import { createSystemRuntimeWorldCreationClock } from "../adapters/system/runtime-world-creation-clock.js";
 import { createSystemWorldExtensionProvenanceClock } from "../adapters/system/world-extension-provenance-clock.js";
 import {
   createAuthoritativePacketBuilder,
   type AuthoritativePacketBuilder,
 } from "./authoritative-packet-builder.js";
+import type { AssetProviderRegistry } from "./asset-provider-registry.js";
 import {
   createClientCommandRouter,
   type ClientCommandRouter,
 } from "./client-command-router.js";
 import type { CommandJournal } from "./command-journal.js";
+import {
+  createContentUpgradeOrchestrator,
+  type ContentUpgradeOrchestrator,
+} from "./content-upgrade-orchestrator.js";
 import {
   createDayCycleOrchestrator,
   type DayCycleOrchestrator,
@@ -92,6 +112,10 @@ import {
   createMapMoveCommandOrchestrator,
   type MapMoveCommandOrchestrator,
 } from "./map-move-command-orchestrator.js";
+import {
+  createMaterializationOrchestrator,
+  type MaterializationOrchestrator,
+} from "./materialization-orchestrator.js";
 import { createModelInvocationAuthorizationChannel } from "./model-dispatch-authorization.js";
 import {
   ModelGateway,
@@ -122,6 +146,11 @@ import {
   type RulePluginModuleV1,
 } from "./rule-plugin-abi.js";
 import type { RulePluginOperationRequirement } from "./rule-plugin-operation-requirement.js";
+import {
+  createSaveSchemaMigrationRegistry,
+  type SaveSchemaMigrationModuleV1,
+} from "./save-schema-migration-abi.js";
+import { createSaveSchemaMigrationService } from "./save-schema-migration.js";
 import { createRulePluginGateway } from "./rule-plugin-composition.js";
 import type { VerifiedRulePluginInvocationReceipt } from "./rule-plugin-gateway.js";
 import {
@@ -141,6 +170,8 @@ import {
   type RulePluginExecutor,
 } from "./rule-plugin-executor.js";
 import type { StageModuleRegistry } from "./stage-module-registry.js";
+import { createStageContractAuthority } from "./stage-contract-authority.js";
+import { createStageOpenMessageProjector } from "./stage-open-message-projector.js";
 import {
   createStageOutcomeCommandOrchestrator,
   type StageOutcomeCommandOrchestrator,
@@ -166,6 +197,11 @@ export interface RuntimeExecutionKernelDependencies {
    * rule.holds journals while the world row is locked.
    */
   readonly rulePluginJournalPool: Pool;
+  /**
+   * Dedicated same-database Pool for Materialization authorization lookups
+   * made while apply_packet holds a world row lock.
+   */
+  readonly materializationLedgerPool: Pool;
   readonly contracts: ContractValidator;
   readonly digest: JsonDigest;
   readonly modelProvider: ModelProvider;
@@ -185,8 +221,14 @@ export interface RuntimeExecutionKernelDependencies {
   readonly contentRuntimeCatalog: ContentRuntimeCatalog;
   /** Sole RFC 9562 content-local identity mapper shared with the Catalog. */
   readonly contentRuntimeIdentityMapper: ContentRuntimeIdentityMapper;
+  /** Activation-owned exact AssetProvider registry; no default provider. */
+  readonly assetProviders: AssetProviderRegistry;
   /** Explicit SaveEnvelope version support; no package-version inference. */
   readonly saveSchemaVersion: string;
+  /** Explicit trusted pure modules; an empty array means no old version is accepted. */
+  readonly saveSchemaMigrationModules: readonly SaveSchemaMigrationModuleV1[];
+  /** Explicit untrusted plan manifests; no inferred or default migration chain. */
+  readonly saveSchemaMigrationPlanCandidates: readonly unknown[];
   readonly engineContractVersion: string;
   /** Validated activation records used only to derive exact save lock sets. */
   readonly activatedBundles: readonly RuntimeActivatedBundleDescriptor[];
@@ -201,6 +243,10 @@ export interface RuntimeExecutionKernelDependencies {
   readonly deterministicContextIdFactory: DeterministicContextIdFactory;
   /** Independent, explicit basis_token keyring; never reused for contexts. */
   readonly sessionBasisHmacKeyring: SessionBasisHmacKeyring;
+  /** Independent keyring for World Core Content Upgrade authorization. */
+  readonly contentUpgradeHmacKeyring: ContentUpgradeHmacKeyring;
+  /** Explicit lifetime for a player-approved upgrade authorization. */
+  readonly contentUpgradeAuthorizationLifetimeSeconds: number;
   /** Explicit deployment selection for CharacterMind dialogue calls. */
   readonly characterDialogueModelProfileId: string;
   /** Explicit deployment selection for Director daily settlement calls. */
@@ -238,6 +284,10 @@ export interface RuntimeExecutionKernel {
   readonly packets: AuthoritativePacketBuilder;
   /** Authoritative applyPacket paths only (RulePlugin receipt / EventCard click). */
   readonly mutations: WorldMutationOrchestrator;
+  /** Recoverable outbox -> provider -> review -> acceptance -> binding path. */
+  readonly materializations: MaterializationOrchestrator;
+  /** Recoverable player-authorized Content Upgrade commit path. */
+  readonly contentUpgrades: ContentUpgradeOrchestrator;
   /**
    * Closed model invocation surfaces only. No arbitrary ModelRequest candidate bypass.
    */
@@ -288,6 +338,16 @@ export function createRuntimeExecutionKernel(
       "RulePlugin Journal requires a dedicated Pool to avoid world-lock connection starvation",
     );
   }
+  if (
+    dependencies.materializationLedgerPool === dependencies.pool ||
+    dependencies.materializationLedgerPool ===
+      dependencies.rulePluginJournalPool
+  ) {
+    throw new EngineFault(
+      "runtime.composition.materialization_ledger_pool_shared",
+      "Materialization Ledger requires a dedicated Pool to avoid world-lock connection starvation",
+    );
+  }
   const channel = createModelInvocationAuthorizationChannel();
 
   const modelGateway = new ModelGateway(
@@ -315,10 +375,36 @@ export function createRuntimeExecutionKernel(
     tokenCodec: dependencies.deterministicContextTokenCodec,
     contextIdFactory: dependencies.deterministicContextIdFactory,
   });
+  const rulePluginChoiceAuthority = createRulePluginChoiceAuthority({
+    contracts: dependencies.contracts,
+    digest: dependencies.digest,
+    deterministicContexts: deterministicContextAuthority,
+  });
+  const contentUpgradeClock = createSystemContentUpgradeClock(
+    dependencies.contentUpgradeAuthorizationLifetimeSeconds,
+  );
+  const contentUpgradeAuthorizationAuthority:
+    ContentUpgradeAuthorizationAuthority =
+      createContentUpgradeAuthorizationAuthority({
+        contracts: dependencies.contracts,
+        digest: dependencies.digest,
+        tokenCodec: createHmacContentUpgradeTokenCodec({
+          keyring: dependencies.contentUpgradeHmacKeyring,
+        }),
+      });
   const sessionBasisTokens = createHmacSessionBasisTokenAuthority({
     contracts: dependencies.contracts,
     digest: dependencies.digest,
     keyring: dependencies.sessionBasisHmacKeyring,
+  });
+  const stageContracts = createStageContractAuthority({
+    catalog: dependencies.contentRuntimeCatalog,
+    stageModules: dependencies.stageModuleRegistry,
+  });
+  const stageOpens = createStageOpenMessageProjector({
+    contracts: dependencies.contracts,
+    identityMapper: dependencies.contentRuntimeIdentityMapper,
+    stageContracts,
   });
   const sessionViews = createSessionViewAssembler({
     contracts: dependencies.contracts,
@@ -387,6 +473,19 @@ export function createRuntimeExecutionKernel(
     rulePlugins: rulePluginAbi,
     stageModules: dependencies.stageModuleRegistry,
   });
+  const saveSchemaMigrationRegistry =
+    createSaveSchemaMigrationRegistry({
+      contracts: dependencies.contracts,
+      modules: dependencies.saveSchemaMigrationModules,
+      planCandidates: dependencies.saveSchemaMigrationPlanCandidates,
+      currentSaveSchemaVersion: dependencies.saveSchemaVersion,
+    });
+  const saveSchemaMigrations = createSaveSchemaMigrationService({
+    contracts: dependencies.contracts,
+    digest: dependencies.digest,
+    registry: saveSchemaMigrationRegistry,
+    currentSaveSchemaVersion: dependencies.saveSchemaVersion,
+  });
   const saves = createRuntimeSaveService({
     contracts: dependencies.contracts,
     compatibility: saveCompatibility,
@@ -394,6 +493,12 @@ export function createRuntimeExecutionKernel(
       pool: dependencies.pool,
       contracts: dependencies.contracts,
     }),
+    migrationRepository:
+      createPostgresRuntimeSaveMigrationRepository({
+        pool: dependencies.pool,
+        contracts: dependencies.contracts,
+      }),
+    migrations: saveSchemaMigrations,
     clock: createSystemRuntimeSaveClock(),
   });
   const worldCreation = createRuntimeWorldCreationService({
@@ -412,6 +517,8 @@ export function createRuntimeExecutionKernel(
     adapter: rulePluginAdapter,
     modelProvenance: modelGateway.provenance,
     deterministicContextAuthority,
+    contentUpgradeAuthorizationAuthority,
+    contentUpgradeClock,
   });
 
   const rulePluginJournal: RulePluginInvocationJournal =
@@ -425,7 +532,16 @@ export function createRuntimeExecutionKernel(
   const rulePluginExecutor: RulePluginExecutor = createRulePluginExecutor({
     gateway: rulePluginGateway,
     journal: rulePluginJournal,
+    choices: rulePluginChoiceAuthority,
+    entropySource: createNodeRulePluginChoiceEntropySource(),
+    continuationIds:
+      createNodeRulePluginChoiceContinuationIdFactory(),
   });
+  const contentUpgradeAuthorizationLedger =
+    createPostgresContentUpgradeAuthorizationLedger({
+      pool: dependencies.rulePluginJournalPool,
+      contracts: dependencies.contracts,
+    });
 
   const postgresReaders: PostgresRuntimeReaders = createPostgresRuntimeReaders({
     pool: dependencies.pool,
@@ -452,6 +568,7 @@ export function createRuntimeExecutionKernel(
   const store = createPostgresAtomicPacketStore({
     pool: dependencies.pool,
     contracts: dependencies.contracts,
+    digest: dependencies.digest,
   });
 
   const ruleHoldEvaluator = createRuleHoldEvaluator({
@@ -463,6 +580,10 @@ export function createRuntimeExecutionKernel(
 
   const decimalComparer = createDecimalAmountComparer();
   const ledgerArithmetic = createLedgerPostArithmetic();
+  const materializationLedger = createPostgresMaterializationLedger({
+    pool: dependencies.materializationLedgerPool,
+    contracts: dependencies.contracts,
+  });
 
   const semanticGate = createPacketSemanticGate({
     contracts: dependencies.contracts,
@@ -470,7 +591,13 @@ export function createRuntimeExecutionKernel(
     decimalComparer,
     ruleHoldEvaluator,
     proposalReceiptLookup: readers.proposalReceipts,
+    assetAcceptanceLookup: materializationLedger,
+    contentUpgradeAuthorizationLookup:
+      contentUpgradeAuthorizationLedger,
+    contentUpgradeAuthorizationAuthority,
+    contentUpgradeClock,
     staticComponentDigestLookup: dependencies.contentRuntimeCatalog,
+    stageOpenContractLookup: stageContracts,
     deterministicContextAuthority,
   });
   const stateTransition = createPacketStateTransition({
@@ -487,6 +614,18 @@ export function createRuntimeExecutionKernel(
     packets,
     committedPackets: readers.packets,
     rulePluginProvenance: rulePluginGateway.provenance,
+  });
+  const materializations = createMaterializationOrchestrator({
+    contracts: dependencies.contracts,
+    digest: dependencies.digest,
+    catalog: dependencies.contentRuntimeCatalog,
+    providers: dependencies.assetProviders,
+    ledger: materializationLedger,
+    worlds: readers.worlds,
+    deterministicContexts: deterministicContextAuthority,
+    identities: createNodeMaterializationIdentityFactory(),
+    clock: createSystemMaterializationClock(),
+    mutations,
   });
 
   const worldBindingResolver = createRuntimeWorldBindingResolver({
@@ -545,6 +684,7 @@ export function createRuntimeExecutionKernel(
     views: sessionViews,
     envelopes: serverEnvelopes,
     idFactory: serverEnvelopeIds,
+    stageOpens,
   });
   const dialogues = createDialogueCommandOrchestrator({
     contracts: dependencies.contracts,
@@ -618,12 +758,30 @@ export function createRuntimeExecutionKernel(
     mutations,
     finalizer: commandFinalizer,
   });
+  const contentUpgrades = createContentUpgradeOrchestrator({
+    contracts: dependencies.contracts,
+    digest: dependencies.digest,
+    commands,
+    worlds: worldBindingResolver,
+    saves,
+    saveCompatibility,
+    catalog: dependencies.contentRuntimeCatalog,
+    rulePluginAbi,
+    rulePlugins: rulePluginExecutor,
+    deterministicContexts: deterministicContextAuthority,
+    authorizations: contentUpgradeAuthorizationAuthority,
+    authorizationLedger: contentUpgradeAuthorizationLedger,
+    clock: contentUpgradeClock,
+    mutations,
+    finalizer: commandFinalizer,
+  });
   const sessionSynchronization =
     createPostgresSessionSynchronization({
       pool: dependencies.pool,
       contracts: dependencies.contracts,
       views: sessionViews,
       envelopes: serverEnvelopes,
+      stageOpens,
     });
   const clientCommands = createClientCommandRouter({
     contracts: dependencies.contracts,
@@ -633,6 +791,7 @@ export function createRuntimeExecutionKernel(
     mapMoves,
     playerDays,
     stageOutcomes,
+    contentUpgrades,
     sessionSynchronization,
   });
 
@@ -648,6 +807,8 @@ export function createRuntimeExecutionKernel(
     readers,
     packets,
     mutations,
+    materializations,
+    contentUpgrades,
     models,
     deterministicContexts,
     sessions,

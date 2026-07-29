@@ -24,6 +24,7 @@ import type {
   ServerEnvelopeIdFactory,
 } from "../../application/server-envelope.js";
 import type { SessionViewAssembler } from "../../application/session-view-assembler.js";
+import type { StageOpenMessageProjector } from "../../application/stage-open-message-projector.js";
 import {
   readEngineSessionContext,
   type LockedEngineSessionContext,
@@ -43,6 +44,7 @@ export interface PostgresCommandFinalizerDependencies {
   readonly pool: Pool;
   readonly contracts: ContractValidator;
   readonly views: SessionViewAssembler;
+  readonly stageOpens: StageOpenMessageProjector;
   readonly envelopes: ServerEnvelopeFactory;
   readonly idFactory: ServerEnvelopeIdFactory;
 }
@@ -70,6 +72,8 @@ interface FinalizationCommandRow {
   readonly navigation_rule_request_id: string | null;
   readonly stage_outcome_rule_request_id: string | null;
   readonly dialogue_close_rule_request_id: string | null;
+  readonly content_upgrade_command_id: string | null;
+  readonly content_upgrade_rule_request_id: string | null;
   readonly event_card_committed_event_document: unknown | null;
   readonly command_status: string;
   readonly result_document: unknown | null;
@@ -85,7 +89,8 @@ interface ValidatedFinalizationCommand {
     | "player_day.end"
     | "event_card.trigger"
     | "map.move"
-    | "stage.outcome_proposal";
+    | "stage.outcome_proposal"
+    | "content_upgrade.accept";
   readonly requestMessageId: string;
   readonly acceptedSession: EngineSessionRecord;
   readonly dialogueId: string | undefined;
@@ -101,6 +106,7 @@ interface ValidatedFinalizationCommand {
   readonly eventCardId: string | undefined;
   readonly eventCardPacketId: string | undefined;
   readonly eventCardBranch: EventCardCompletionBranch | undefined;
+  readonly eventCardOpenedStageIds: readonly string[];
   readonly navigationRuleRequestId: string | undefined;
   readonly navigationDestination: JsonObject | undefined;
   readonly stageOutcomeRuleRequestId: string | undefined;
@@ -111,6 +117,11 @@ interface ValidatedFinalizationCommand {
   readonly stageOutcomeEvidenceDigest: string | undefined;
   readonly dialogueCloseRuleRequestId: string | undefined;
   readonly dialogueCloseId: string | undefined;
+  readonly contentUpgradeCommandId: string | undefined;
+  readonly contentUpgradeRuleRequestId: string | undefined;
+  readonly contentUpgradeMigrationId: string | undefined;
+  readonly contentUpgradeTargetBundle: JsonObject | undefined;
+  readonly contentUpgradeConsentTextDigest: string | undefined;
   readonly status: "received" | "completed";
   readonly result: JsonObject | undefined;
 }
@@ -144,11 +155,40 @@ interface NavigationRejectionRow {
   readonly proposal_id: string | null;
 }
 
+interface StageOutcomeCompletionRow extends NavigationCompletionRow {
+  readonly terminal_request_id: string;
+}
+
+interface StageOutcomeRejectionRow extends NavigationRejectionRow {
+  readonly terminal_request_id: string;
+}
+
 interface DialogueCloseCompletionRow {
   readonly operation_kind: string;
   readonly invocation_status: string;
   readonly request_document: unknown;
   readonly proposal_id: string | null;
+  readonly revision_after_text: string | null;
+  readonly event_document: unknown | null;
+}
+
+interface ContentUpgradeCompletionRow {
+  readonly upgrade_command_id: string;
+  readonly session_id: string;
+  readonly client_command_id: string;
+  readonly rule_request_id: string;
+  readonly world_id: string;
+  readonly migration_id: string;
+  readonly source_world_revision_text: string;
+  readonly source_save_digest: string;
+  readonly authorization_digest: string;
+  readonly authorization_document: unknown;
+  readonly authorization_status: string;
+  readonly result_digest: string | null;
+  readonly operation_kind: string | null;
+  readonly invocation_status: string | null;
+  readonly request_document: unknown | null;
+  readonly response_document: unknown | null;
   readonly revision_after_text: string | null;
   readonly event_document: unknown | null;
 }
@@ -176,6 +216,7 @@ class PostgresCommandFinalizer
   readonly #pool: Pool;
   readonly #contracts: ContractValidator;
   readonly #views: SessionViewAssembler;
+  readonly #stageOpens: StageOpenMessageProjector;
   readonly #envelopes: ServerEnvelopeFactory;
   readonly #idFactory: ServerEnvelopeIdFactory;
 
@@ -185,6 +226,7 @@ class PostgresCommandFinalizer
     this.#pool = dependencies.pool;
     this.#contracts = dependencies.contracts;
     this.#views = dependencies.views;
+    this.#stageOpens = dependencies.stageOpens;
     this.#envelopes = dependencies.envelopes;
     this.#idFactory = dependencies.idFactory;
   }
@@ -441,6 +483,16 @@ class PostgresCommandFinalizer
               ),
             });
           }
+          if (command.commandKind === "content_upgrade.accept") {
+            await assertContentUpgradeCompletionHistory({
+              client,
+              contracts: this.#contracts,
+              command,
+              finalWorldRevision: input.finalWorldRevision,
+              finalWorldState: sessionContext.worldState,
+              finalWorldContentLock: sessionContext.worldContentLock.value,
+            });
+          }
 
           if (
             command.acceptedSession.viewRevision ===
@@ -476,11 +528,16 @@ class PostgresCommandFinalizer
           const messages = createAcceptedMessages({
             contracts: this.#contracts,
             idFactory: this.#idFactory,
+            stageOpens: this.#stageOpens,
             command,
             eventCard: input.eventCard,
             stageInstanceId: input.stageInstanceId,
             view,
             worldState: sessionContext.worldState,
+            worldContentLock: sessionContext.worldContentLock,
+            stageModuleLocks: sessionContext.stageModuleLocks.map(
+              (lock) => lock.value,
+            ),
             result: result.value,
           });
           const envelopes = this.#envelopes.createBatch({
@@ -627,6 +684,7 @@ class PostgresCommandFinalizer
 function createAcceptedMessages(input: {
   readonly contracts: ContractValidator;
   readonly idFactory: ServerEnvelopeIdFactory;
+  readonly stageOpens: StageOpenMessageProjector;
   readonly command: ValidatedFinalizationCommand;
   readonly eventCard:
     | {
@@ -637,6 +695,8 @@ function createAcceptedMessages(input: {
   readonly stageInstanceId: string | undefined;
   readonly view: SessionViewDocument;
   readonly worldState: JsonObject;
+  readonly worldContentLock: LockedEngineSessionContext["worldContentLock"];
+  readonly stageModuleLocks: readonly JsonObject[];
   readonly result: JsonObject;
 }): readonly JsonObject[] {
   const viewMessage = Object.freeze({
@@ -666,6 +726,9 @@ function createAcceptedMessages(input: {
   if (input.command.commandKind === "dialogue.close") {
     return Object.freeze([viewMessage, input.result]);
   }
+  if (input.command.commandKind === "content_upgrade.accept") {
+    return Object.freeze([viewMessage, input.result]);
+  }
   if (input.command.commandKind === "stage.outcome_proposal") {
     return Object.freeze([
       viewMessage,
@@ -688,7 +751,20 @@ function createAcceptedMessages(input: {
     worldState: input.worldState,
     eventCardId: completion.eventCardId,
   });
-  return Object.freeze([viewMessage, presentation, input.result]);
+  const stageMessages = input.stageOpens.project({
+    worldId: input.command.acceptedSession.worldId,
+    worldContentLock: input.worldContentLock,
+    stageModuleLocks: input.stageModuleLocks,
+    worldState: input.worldState,
+    playerEntityId: input.command.acceptedSession.playerEntityId,
+    stageInstanceIds: input.command.eventCardOpenedStageIds,
+  });
+  return Object.freeze([
+    viewMessage,
+    ...stageMessages.map((message) => message.value),
+    presentation,
+    input.result,
+  ]);
 }
 
 function createEventCardPresentationFrame(input: {
@@ -1204,6 +1280,41 @@ function assertAcceptedCompletionIdentity(
     }
     return;
   }
+  if (command.commandKind === "content_upgrade.accept") {
+    const expectedFinalRevision =
+      command.acceptedSession.worldRevision + 1;
+    if (
+      responseTurnId !== undefined ||
+      eventCard !== undefined ||
+      stageInstanceId !== undefined ||
+      command.contentUpgradeCommandId === undefined ||
+      command.contentUpgradeRuleRequestId === undefined ||
+      command.contentUpgradeMigrationId === undefined ||
+      command.contentUpgradeTargetBundle === undefined ||
+      command.contentUpgradeConsentTextDigest === undefined ||
+      !Number.isSafeInteger(expectedFinalRevision) ||
+      finalWorldRevision !== expectedFinalRevision
+    ) {
+      throw new EngineFault(
+        "command.finalizer.completion_identity_mismatch",
+        "Accepted Content Upgrade completion must match its single authorized migration packet",
+        {
+          session_id: command.sessionId,
+          command_id: command.commandId,
+          accepted_world_revision:
+            command.acceptedSession.worldRevision,
+          expected_final_world_revision: expectedFinalRevision,
+          actual_final_world_revision: finalWorldRevision,
+          upgrade_command_id:
+            command.contentUpgradeCommandId ?? null,
+          content_upgrade_rule_request_id:
+            command.contentUpgradeRuleRequestId ?? null,
+          migration_id: command.contentUpgradeMigrationId ?? null,
+        },
+      );
+    }
+    return;
+  }
   const minimumFinalRevision =
     command.acceptedSession.worldRevision + DIALOGUE_PACKET_COUNT;
   if (
@@ -1685,6 +1796,516 @@ async function assertDialogueCloseCompletionHistory(input: {
   }
 }
 
+async function assertContentUpgradeCompletionHistory(input: {
+  readonly client: PoolClient;
+  readonly contracts: ContractValidator;
+  readonly command: ValidatedFinalizationCommand;
+  readonly finalWorldRevision: number;
+  readonly finalWorldState: JsonObject;
+  readonly finalWorldContentLock: JsonObject;
+}): Promise<void> {
+  const upgradeCommandId = input.command.contentUpgradeCommandId;
+  const ruleRequestId = input.command.contentUpgradeRuleRequestId;
+  const migrationId = input.command.contentUpgradeMigrationId;
+  const targetBundle = input.command.contentUpgradeTargetBundle;
+  const consentTextDigest =
+    input.command.contentUpgradeConsentTextDigest;
+  if (
+    upgradeCommandId === undefined ||
+    ruleRequestId === undefined ||
+    migrationId === undefined ||
+    targetBundle === undefined ||
+    consentTextDigest === undefined
+  ) {
+    throw new EngineFault(
+      "command.finalizer.content_upgrade_identity_missing",
+      "Content Upgrade completion requires its persisted authorization and transformer identities",
+      {
+        session_id: input.command.sessionId,
+        command_id: input.command.commandId,
+      },
+    );
+  }
+
+  const query = await input.client.query<ContentUpgradeCompletionRow>(
+    `SELECT authorization.upgrade_command_id::text
+              AS upgrade_command_id,
+            authorization.session_id::text AS session_id,
+            authorization.client_command_id::text AS client_command_id,
+            authorization.rule_request_id::text AS rule_request_id,
+            authorization.world_id::text AS world_id,
+            authorization.migration_id,
+            authorization.source_world_revision::text
+              AS source_world_revision_text,
+            authorization.source_save_digest,
+            authorization.authorization_digest,
+            authorization.authorization_document,
+            authorization.authorization_status,
+            authorization.result_digest,
+            invocation.operation_kind,
+            invocation.invocation_status,
+            invocation.request_document,
+            invocation.response_document,
+            committed.revision_after::text AS revision_after_text,
+            committed.event_document
+       FROM luoxia_engine.content_upgrade_authorizations
+              AS authorization
+       LEFT JOIN luoxia_engine.rule_plugin_invocations AS invocation
+         ON invocation.request_id = authorization.rule_request_id
+       LEFT JOIN luoxia_engine.committed_events AS committed
+         ON committed.packet_id = authorization.upgrade_command_id
+      WHERE authorization.upgrade_command_id = $1::uuid`,
+    [upgradeCommandId],
+  );
+  const row = requireAtMostOne(
+    query.rows,
+    "command.finalizer.database_corrupt",
+    "Content Upgrade completion lookup returned more than one authorization",
+    {
+      session_id: input.command.sessionId,
+      command_id: input.command.commandId,
+      upgrade_command_id: upgradeCommandId,
+    },
+  );
+  if (
+    row === undefined ||
+    row.upgrade_command_id !== upgradeCommandId ||
+    row.session_id !== input.command.sessionId ||
+    row.client_command_id !== input.command.commandId ||
+    row.rule_request_id !== ruleRequestId ||
+    row.world_id !== input.command.acceptedSession.worldId ||
+    row.migration_id !== migrationId ||
+    row.authorization_status !== "commit_ready" ||
+    row.result_digest === null ||
+    row.operation_kind !== "content_upgrade.transform" ||
+    row.invocation_status !== "resolved" ||
+    row.request_document === null ||
+    row.response_document === null ||
+    row.revision_after_text === null ||
+    row.event_document === null
+  ) {
+    throw new EngineFault(
+      "command.finalizer.content_upgrade_history_incomplete",
+      "Accepted Content Upgrade requires one commit-ready authorization, one resolved transformer result, and one committed packet",
+      {
+        session_id: input.command.sessionId,
+        command_id: input.command.commandId,
+        upgrade_command_id: upgradeCommandId,
+        rule_request_id: ruleRequestId,
+      },
+    );
+  }
+
+  const sourceWorldRevision = parseSafeUnsignedInteger(
+    row.source_world_revision_text,
+    "command.finalizer.database_corrupt",
+    "Content Upgrade source world revision",
+    {
+      session_id: input.command.sessionId,
+      command_id: input.command.commandId,
+      upgrade_command_id: upgradeCommandId,
+    },
+  );
+  const revisionAfter = parseSafeUnsignedInteger(
+    row.revision_after_text,
+    "command.finalizer.database_corrupt",
+    "Content Upgrade committed event revision",
+    {
+      session_id: input.command.sessionId,
+      command_id: input.command.commandId,
+      upgrade_command_id: upgradeCommandId,
+    },
+  );
+  const authorization = input.contracts.assertObject(
+    CONTRACT_REF.upgradeAuthorization,
+    row.authorization_document,
+  ).value;
+  const request = input.contracts.assertObject(
+    CONTRACT_REF.rulePluginRequest,
+    row.request_document,
+  ).value;
+  const response = input.contracts.assertObject(
+    CONTRACT_REF.rulePluginResponse,
+    row.response_document,
+  ).value;
+  const requestInput = expectJsonObject(
+    expectProperty(request, "input", "RulePluginRequest"),
+    "RulePluginRequest.input",
+  );
+  const readonlyWorld = expectJsonObject(
+    expectProperty(request, "readonly_world", "RulePluginRequest"),
+    "RulePluginRequest.readonly_world",
+  );
+  const deterministicContext = expectJsonObject(
+    expectProperty(
+      request,
+      "deterministic_context",
+      "RulePluginRequest",
+    ),
+    "RulePluginRequest.deterministic_context",
+  );
+  const requestAuthorization = expectJsonObject(
+    expectProperty(
+      requestInput,
+      "authorization",
+      "ContentUpgradeInput",
+    ),
+    "ContentUpgradeInput.authorization",
+  );
+  const sourceSave = input.contracts.assertObject(
+    CONTRACT_REF.saveEnvelope,
+    expectProperty(requestInput, "source_save", "ContentUpgradeInput"),
+  ).value;
+  const sourceBundle = expectJsonObject(
+    expectProperty(
+      requestInput,
+      "source_bundle",
+      "ContentUpgradeInput",
+    ),
+    "ContentUpgradeInput.source_bundle",
+  );
+  const requestTargetBundle = expectJsonObject(
+    expectProperty(
+      requestInput,
+      "target_bundle",
+      "ContentUpgradeInput",
+    ),
+    "ContentUpgradeInput.target_bundle",
+  );
+  const output = expectJsonObject(
+    expectProperty(response, "output", "RulePluginResponse"),
+    "RulePluginResponse.output",
+  );
+  const unresolved = expectProperty(
+    output,
+    "unresolved",
+    "ContentUpgradeOutput",
+  );
+  const candidateSave = input.contracts.assertObject(
+    CONTRACT_REF.saveEnvelope,
+    expectProperty(output, "candidate_save", "ContentUpgradeOutput"),
+  ).value;
+  const candidateContentLock = expectJsonObject(
+    expectProperty(
+      candidateSave,
+      "world_content_lock",
+      "SaveEnvelope",
+    ),
+    "SaveEnvelope.world_content_lock",
+  );
+  const candidateRootBundle = expectJsonObject(
+    expectProperty(
+      candidateContentLock,
+      "root_bundle_lock",
+      "WorldContentLock",
+    ),
+    "WorldContentLock.root_bundle_lock",
+  );
+  const sourceHistory = asObjectArray(
+    expectProperty(sourceSave, "migration_history", "SaveEnvelope"),
+    "SaveEnvelope.migration_history",
+  );
+  const candidateHistory = asObjectArray(
+    expectProperty(candidateSave, "migration_history", "SaveEnvelope"),
+    "SaveEnvelope.migration_history",
+  );
+  const historyEntry = candidateHistory.at(-1);
+  const pluginLock = expectJsonObject(
+    expectProperty(request, "plugin_lock", "RulePluginRequest"),
+    "RulePluginRequest.plugin_lock",
+  );
+  const event = input.contracts.assertObject(
+    CONTRACT_REF.committedEvent,
+    row.event_document,
+  ).value;
+  const packet = expectJsonObject(
+    expectProperty(event, "packet", "CommittedEvent"),
+    "CommittedEvent.packet",
+  );
+  const source = expectJsonObject(
+    expectProperty(packet, "source", "ContentPacket"),
+    "ContentPacket.source",
+  );
+  const preconditions = asObjectArray(
+    expectProperty(packet, "preconditions", "ContentPacket"),
+    "ContentPacket.preconditions",
+  );
+  const ops = asObjectArray(
+    expectProperty(packet, "ops", "ContentPacket"),
+    "ContentPacket.ops",
+  );
+  const op = ops.length === 1 ? ops[0] : undefined;
+
+  if (
+    sourceWorldRevision !== input.command.acceptedSession.worldRevision ||
+    revisionAfter !== input.finalWorldRevision ||
+    expectString(
+      authorization,
+      "upgrade_command_id",
+      "UpgradeAuthorization",
+    ) !== upgradeCommandId ||
+    expectString(authorization, "world_id", "UpgradeAuthorization") !==
+      input.command.acceptedSession.worldId ||
+    expectString(
+      authorization,
+      "migration_id",
+      "UpgradeAuthorization",
+    ) !== migrationId ||
+    expectString(
+      authorization,
+      "requested_by_actor_id",
+      "UpgradeAuthorization",
+    ) !== input.command.acceptedSession.playerEntityId ||
+    expectInteger(
+      authorization,
+      "source_world_revision",
+      "UpgradeAuthorization",
+    ) !== sourceWorldRevision ||
+    expectString(
+      authorization,
+      "source_save_digest",
+      "UpgradeAuthorization",
+    ) !== row.source_save_digest ||
+    expectString(
+      authorization,
+      "authorization_digest",
+      "UpgradeAuthorization",
+    ) !== row.authorization_digest ||
+    expectString(
+      authorization,
+      "consent_text_digest",
+      "UpgradeAuthorization",
+    ) !== consentTextDigest ||
+    expectString(
+      authorization,
+      "source_bundle_digest",
+      "UpgradeAuthorization",
+    ) !== expectString(sourceBundle, "bundle_digest", "PackLock") ||
+    expectString(
+      authorization,
+      "target_bundle_digest",
+      "UpgradeAuthorization",
+    ) !== expectString(targetBundle, "bundle_digest", "PackLock") ||
+    !jsonEquals(requestAuthorization, authorization) ||
+    expectString(request, "request_id", "RulePluginRequest") !==
+      ruleRequestId ||
+    expectString(request, "operation_kind", "RulePluginRequest") !==
+      "content_upgrade.transform" ||
+    expectInteger(request, "basis_revision", "RulePluginRequest") !==
+      sourceWorldRevision ||
+    expectString(readonlyWorld, "world_id", "WorldSnapshot") !==
+      input.command.acceptedSession.worldId ||
+    expectInteger(
+      readonlyWorld,
+      "world_revision",
+      "WorldSnapshot",
+    ) !== sourceWorldRevision ||
+    expectString(
+      requestInput,
+      "migration_id",
+      "ContentUpgradeInput",
+    ) !== migrationId ||
+    !jsonEquals(requestTargetBundle, targetBundle) ||
+    expectString(sourceSave, "world_id", "SaveEnvelope") !==
+      input.command.acceptedSession.worldId ||
+    expectInteger(sourceSave, "world_revision", "SaveEnvelope") !==
+      sourceWorldRevision ||
+    expectString(response, "request_id", "RulePluginResponse") !==
+      ruleRequestId ||
+    expectString(
+      response,
+      "operation_kind",
+      "RulePluginResponse",
+    ) !== "content_upgrade.transform" ||
+    expectInteger(
+      response,
+      "basis_revision",
+      "RulePluginResponse",
+    ) !== sourceWorldRevision ||
+    !jsonEquals(
+      expectProperty(response, "plugin_lock", "RulePluginResponse"),
+      pluginLock,
+    ) ||
+    expectString(
+      response,
+      "operation_id",
+      "RulePluginResponse",
+    ) !== expectString(request, "operation_id", "RulePluginRequest") ||
+    expectString(
+      response,
+      "deterministic_context_id",
+      "RulePluginResponse",
+    ) !==
+      expectString(
+        deterministicContext,
+        "context_id",
+        "DeterministicContext",
+      ) ||
+    expectString(
+      response,
+      "deterministic_context_digest",
+      "RulePluginResponse",
+    ) !==
+      expectString(
+        deterministicContext,
+        "context_digest",
+        "DeterministicContext",
+      ) ||
+    expectString(output, "output_kind", "ContentUpgradeOutput") !==
+      "content_upgrade.candidate" ||
+    expectString(output, "migration_id", "ContentUpgradeOutput") !==
+      migrationId ||
+    expectString(
+      output,
+      "upgrade_command_id",
+      "ContentUpgradeOutput",
+    ) !== upgradeCommandId ||
+    expectString(
+      output,
+      "source_bundle_digest",
+      "ContentUpgradeOutput",
+    ) !== expectString(sourceBundle, "bundle_digest", "PackLock") ||
+    expectString(
+      output,
+      "target_bundle_digest",
+      "ContentUpgradeOutput",
+    ) !== expectString(targetBundle, "bundle_digest", "PackLock") ||
+    expectString(
+      output,
+      "authorization_digest",
+      "ContentUpgradeOutput",
+    ) !== row.authorization_digest ||
+    expectString(output, "result_digest", "ContentUpgradeOutput") !==
+      row.result_digest ||
+    !Array.isArray(unresolved) ||
+    unresolved.length !== 0 ||
+    expectString(event, "world_id", "CommittedEvent") !==
+      input.command.acceptedSession.worldId ||
+    expectInteger(event, "revision_before", "CommittedEvent") !==
+      sourceWorldRevision ||
+    expectInteger(event, "revision_after", "CommittedEvent") !==
+      input.finalWorldRevision ||
+    expectString(packet, "packet_id", "ContentPacket") !==
+      upgradeCommandId ||
+    expectString(packet, "cause_id", "ContentPacket") !== migrationId ||
+    expectString(packet, "world_id", "ContentPacket") !==
+      input.command.acceptedSession.worldId ||
+    expectInteger(packet, "basis_revision", "ContentPacket") !==
+      sourceWorldRevision ||
+    preconditions.length !== 0 ||
+    !jsonEquals(
+      expectProperty(
+        packet,
+        "deterministic_context",
+        "ContentPacket",
+      ),
+      deterministicContext,
+    ) ||
+    expectString(source, "source_kind", "PacketSource") !==
+      "content_upgrade" ||
+    expectString(
+      source,
+      "upgrade_command_id",
+      "PacketSource",
+    ) !== upgradeCommandId ||
+    expectString(source, "migration_id", "PacketSource") !==
+      migrationId ||
+    expectString(source, "source_save_digest", "PacketSource") !==
+      row.source_save_digest ||
+    expectString(source, "authorization_digest", "PacketSource") !==
+      row.authorization_digest ||
+    expectString(source, "result_digest", "PacketSource") !==
+      row.result_digest ||
+    op === undefined ||
+    expectString(op, "op", "ContentUpgradeApplyOp") !==
+      "content_upgrade.apply" ||
+    !jsonEquals(
+      expectProperty(
+        op,
+        "candidate_save",
+        "ContentUpgradeApplyOp",
+      ),
+      candidateSave,
+    ) ||
+    expectString(candidateSave, "world_id", "SaveEnvelope") !==
+      input.command.acceptedSession.worldId ||
+    expectInteger(candidateSave, "world_revision", "SaveEnvelope") !==
+      input.finalWorldRevision ||
+    !jsonEquals(
+      expectProperty(candidateSave, "world_state", "SaveEnvelope"),
+      input.finalWorldState,
+    ) ||
+    !jsonEquals(candidateContentLock, input.finalWorldContentLock) ||
+    !jsonEquals(candidateRootBundle, targetBundle) ||
+    candidateHistory.length !== sourceHistory.length + 1 ||
+    !sourceHistory.every((entry, index) =>
+      jsonEquals(entry, candidateHistory[index] as JsonObject),
+    ) ||
+    historyEntry === undefined ||
+    expectString(
+      historyEntry,
+      "migration_kind",
+      "MigrationHistoryEntry",
+    ) !== "content_upgrade" ||
+    expectString(historyEntry, "source", "MigrationHistoryEntry") !==
+      expectString(sourceBundle, "bundle_digest", "PackLock") ||
+    expectString(historyEntry, "target", "MigrationHistoryEntry") !==
+      expectString(targetBundle, "bundle_digest", "PackLock") ||
+    expectString(
+      historyEntry,
+      "implementation_digest",
+      "MigrationHistoryEntry",
+    ) !==
+      expectString(
+        pluginLock,
+        "implementation_digest",
+        "PluginLock",
+      ) ||
+    expectString(
+      historyEntry,
+      "upgrade_command_id",
+      "MigrationHistoryEntry",
+    ) !== upgradeCommandId ||
+    expectString(
+      historyEntry,
+      "migration_id",
+      "MigrationHistoryEntry",
+    ) !== migrationId ||
+    expectString(
+      historyEntry,
+      "source_save_digest",
+      "MigrationHistoryEntry",
+    ) !== row.source_save_digest ||
+    expectString(
+      historyEntry,
+      "authorization_digest",
+      "MigrationHistoryEntry",
+    ) !== row.authorization_digest ||
+    expectString(
+      historyEntry,
+      "deterministic_context_digest",
+      "MigrationHistoryEntry",
+    ) !==
+      expectString(
+        deterministicContext,
+        "context_digest",
+        "DeterministicContext",
+      )
+  ) {
+    throw new EngineFault(
+      "command.finalizer.content_upgrade_history_mismatch",
+      "Content Upgrade authorization, transformer receipt, committed packet, and final world do not form one closed migration result",
+      {
+        session_id: input.command.sessionId,
+        command_id: input.command.commandId,
+        upgrade_command_id: upgradeCommandId,
+        rule_request_id: ruleRequestId,
+        migration_id: migrationId,
+      },
+    );
+  }
+}
+
 function requireUniqueDialogueRecord(
   worldState: JsonObject,
   dialogueId: string,
@@ -1766,17 +2387,35 @@ async function assertNavigationCompletionHistory(input: {
       },
     );
   }
-  const query = await input.client.query<NavigationCompletionRow>(
-    `SELECT invocation.operation_kind,
+  const query = await input.client.query<StageOutcomeCompletionRow>(
+    `WITH RECURSIVE invocation_chain AS (
+       SELECT invocation.*,
+              0 AS choice_depth
+         FROM luoxia_engine.rule_plugin_invocations AS invocation
+        WHERE invocation.request_id = $1::uuid
+       UNION ALL
+       SELECT child.*,
+              parent.choice_depth + 1
+         FROM luoxia_engine.rule_plugin_invocations AS child
+         JOIN invocation_chain AS parent
+           ON child.parent_request_id = parent.request_id
+        WHERE parent.choice_depth < 64
+     )
+     SELECT invocation.request_id::text AS terminal_request_id,
+            invocation.operation_kind,
             invocation.invocation_status,
             invocation.request_document,
             invocation.proposal_id::text AS proposal_id,
             committed.revision_after::text AS revision_after_text,
             committed.event_document
-       FROM luoxia_engine.rule_plugin_invocations AS invocation
+       FROM invocation_chain AS invocation
        LEFT JOIN luoxia_engine.committed_events AS committed
          ON committed.packet_id = invocation.proposal_id
-      WHERE invocation.request_id = $1::uuid`,
+      WHERE NOT EXISTS (
+        SELECT 1
+          FROM luoxia_engine.rule_plugin_invocations AS child
+         WHERE child.parent_request_id = invocation.request_id
+      )`,
     [requestId],
   );
   const row = requireAtMostOne(
@@ -1838,7 +2477,7 @@ async function assertNavigationCompletionHistory(input: {
   );
   if (
     expectString(request, "request_id", "RulePluginRequest") !==
-      requestId ||
+      row.terminal_request_id ||
     expectString(request, "operation_kind", "RulePluginRequest") !==
       "navigation.resolve" ||
     expectInteger(request, "basis_revision", "RulePluginRequest") !==
@@ -1862,7 +2501,8 @@ async function assertNavigationCompletionHistory(input: {
       {
         session_id: input.command.sessionId,
         command_id: input.command.commandId,
-        request_id: requestId,
+        root_request_id: requestId,
+        terminal_request_id: row.terminal_request_id,
       },
     );
   }
@@ -1968,13 +2608,31 @@ async function assertNavigationRejectionHistory(input: {
       },
     );
   }
-  const query = await input.client.query<NavigationRejectionRow>(
-    `SELECT operation_kind,
-            invocation_status,
-            response_document,
-            proposal_id::text AS proposal_id
-       FROM luoxia_engine.rule_plugin_invocations
-      WHERE request_id = $1::uuid`,
+  const query = await input.client.query<StageOutcomeRejectionRow>(
+    `WITH RECURSIVE invocation_chain AS (
+       SELECT invocation.*,
+              0 AS choice_depth
+         FROM luoxia_engine.rule_plugin_invocations AS invocation
+        WHERE invocation.request_id = $1::uuid
+       UNION ALL
+       SELECT child.*,
+              parent.choice_depth + 1
+         FROM luoxia_engine.rule_plugin_invocations AS child
+         JOIN invocation_chain AS parent
+           ON child.parent_request_id = parent.request_id
+        WHERE parent.choice_depth < 64
+     )
+     SELECT invocation.request_id::text AS terminal_request_id,
+            invocation.operation_kind,
+            invocation.invocation_status,
+            invocation.response_document,
+            invocation.proposal_id::text AS proposal_id
+       FROM invocation_chain AS invocation
+      WHERE NOT EXISTS (
+        SELECT 1
+          FROM luoxia_engine.rule_plugin_invocations AS child
+         WHERE child.parent_request_id = invocation.request_id
+      )`,
     [requestId],
   );
   const row = requireAtMostOne(
@@ -2014,7 +2672,7 @@ async function assertNavigationRejectionHistory(input: {
   );
   if (
     expectString(response, "request_id", "RulePluginResponse") !==
-      requestId ||
+      row.terminal_request_id ||
     expectString(
       response,
       "operation_kind",
@@ -2033,7 +2691,8 @@ async function assertNavigationRejectionHistory(input: {
       {
         session_id: input.command.sessionId,
         command_id: input.command.commandId,
-        request_id: requestId,
+        root_request_id: requestId,
+        terminal_request_id: row.terminal_request_id,
         rejection_code: input.code,
       },
     );
@@ -3090,6 +3749,10 @@ async function readFinalizationCommandRow(
               AS stage_outcome_rule_request_id,
             command.dialogue_close_rule_request_id::text
               AS dialogue_close_rule_request_id,
+            command.content_upgrade_command_id::text
+              AS content_upgrade_command_id,
+            command.content_upgrade_rule_request_id::text
+              AS content_upgrade_rule_request_id,
             event_card_commit.event_document
               AS event_card_committed_event_document,
             command.command_status,
@@ -3147,7 +3810,8 @@ function validateFinalizationCommandRow(
     row.command_kind !== "player_day.end" &&
     row.command_kind !== "event_card.trigger" &&
     row.command_kind !== "map.move" &&
-    row.command_kind !== "stage.outcome_proposal"
+    row.command_kind !== "stage.outcome_proposal" &&
+    row.command_kind !== "content_upgrade.accept"
   ) {
     throw new EngineFault(
       "command.finalizer.command_kind_invalid",
@@ -3189,6 +3853,8 @@ function validateFinalizationCommandRow(
   const isStageOutcome =
     row.command_kind === "stage.outcome_proposal";
   const isDialogueClose = row.command_kind === "dialogue.close";
+  const isContentUpgrade =
+    row.command_kind === "content_upgrade.accept";
   if (
     (isDialogue &&
       (row.dialogue_id === null ||
@@ -3216,7 +3882,17 @@ function validateFinalizationCommandRow(
       (row.dialogue_close_rule_request_id === null ||
         row.dialogue_close_rule_request_id === commandId)) ||
     (!isDialogueClose &&
-      row.dialogue_close_rule_request_id !== null)
+      row.dialogue_close_rule_request_id !== null) ||
+    (isContentUpgrade &&
+      (row.content_upgrade_command_id === null ||
+        row.content_upgrade_rule_request_id === null ||
+        row.content_upgrade_command_id === commandId ||
+        row.content_upgrade_rule_request_id === commandId ||
+        row.content_upgrade_command_id ===
+          row.content_upgrade_rule_request_id)) ||
+    (!isContentUpgrade &&
+      (row.content_upgrade_command_id !== null ||
+        row.content_upgrade_rule_request_id !== null))
   ) {
     throw new EngineFault(
       "command.finalizer.database_corrupt",
@@ -3373,6 +4049,7 @@ function validateFinalizationCommandRow(
     eventCardId: eventCard.eventCardId,
     eventCardPacketId: eventCard.packetId,
     eventCardBranch: eventCard.branch,
+    eventCardOpenedStageIds: eventCard.openedStageInstanceIds,
     navigationRuleRequestId:
       row.navigation_rule_request_id === null
         ? undefined
@@ -3445,6 +4122,41 @@ function validateFinalizationCommandRow(
       ? assertUuid(
           contracts,
           expectString(message, "dialogue_id", "DialogueClose"),
+        )
+      : undefined,
+    contentUpgradeCommandId:
+      row.content_upgrade_command_id === null
+        ? undefined
+        : assertUuid(contracts, row.content_upgrade_command_id),
+    contentUpgradeRuleRequestId:
+      row.content_upgrade_rule_request_id === null
+        ? undefined
+        : assertUuid(
+            contracts,
+            row.content_upgrade_rule_request_id,
+          ),
+    contentUpgradeMigrationId: isContentUpgrade
+      ? expectString(
+          message,
+          "migration_id",
+          "ContentUpgradeAccept",
+        )
+      : undefined,
+    contentUpgradeTargetBundle: isContentUpgrade
+      ? expectJsonObject(
+          expectProperty(
+            message,
+            "target_bundle",
+            "ContentUpgradeAccept",
+          ),
+          "ContentUpgradeAccept.target_bundle",
+        )
+      : undefined,
+    contentUpgradeConsentTextDigest: isContentUpgrade
+      ? expectString(
+          message,
+          "consent_text_digest",
+          "ContentUpgradeAccept",
         )
       : undefined,
     status: row.command_status,
@@ -3542,6 +4254,7 @@ function readEventCardCommitIdentity(
   readonly eventCardId: string | undefined;
   readonly packetId: string | undefined;
   readonly branch: EventCardCompletionBranch | undefined;
+  readonly openedStageInstanceIds: readonly string[];
 } {
   if (commandKind !== "event_card.trigger") {
     if (row.event_card_committed_event_document !== null) {
@@ -3559,6 +4272,7 @@ function readEventCardCommitIdentity(
       eventCardId: undefined,
       packetId: undefined,
       branch: undefined,
+      openedStageInstanceIds: Object.freeze([]),
     });
   }
 
@@ -3580,6 +4294,7 @@ function readEventCardCommitIdentity(
       eventCardId,
       packetId,
       branch: undefined,
+      openedStageInstanceIds: Object.freeze([]),
     });
   }
 
@@ -3683,7 +4398,48 @@ function readEventCardCommitIdentity(
       },
     );
   }
-  return Object.freeze({ eventCardId, packetId, branch });
+  const openedStageInstanceIds =
+    branch === "trigger"
+      ? Object.freeze(
+          ops
+            .slice(0, -1)
+            .filter(
+              (op) =>
+                expectString(op, "op", "EventOutcomeOp") ===
+                  "stage.open" &&
+                stageOpenIncludesPlayer(
+                  op,
+                  acceptedSession.worldId,
+                  acceptedSession.playerEntityId,
+                ),
+            )
+            .map((op) =>
+              expectString(op, "stage_instance_id", "StageOpenOp"),
+            ),
+        )
+      : Object.freeze([]);
+  return Object.freeze({
+    eventCardId,
+    packetId,
+    branch,
+    openedStageInstanceIds,
+  });
+}
+
+function stageOpenIncludesPlayer(
+  op: JsonObject,
+  worldId: string,
+  playerEntityId: string,
+): boolean {
+  return asObjectArray(
+    expectProperty(op, "participants", "StageOpenOp"),
+    "StageOpenOp.participants",
+  ).some(
+    (participant) =>
+      expectString(participant, "world_id", "EntityRef") === worldId &&
+      expectString(participant, "entity_id", "EntityRef") ===
+        playerEntityId,
+  );
 }
 
 function requireTextColumn(
@@ -3846,7 +4602,10 @@ async function readCompletedEnvelopes(
         "ServerEnvelope",
       ) !== command.requestMessageId ||
       row.message_type !== messageType ||
-      messageType !== expectedTypes[index]
+      !matchesExpectedCompletedMessageType(
+        messageType,
+        expectedTypes[index] as string,
+      )
     ) {
       throw new EngineFault(
         "dialogue.finalizer.database_corrupt",
@@ -3904,9 +4663,26 @@ function expectedCompletedMessageTypes(
   if (command.commandKind === "dialogue.close") {
     return ["session.view", "command.result"];
   }
+  if (command.commandKind === "content_upgrade.accept") {
+    return ["session.view", "command.result"];
+  }
+  if (command.commandKind === "stage.outcome_proposal") {
+    if (command.stageOutcomeId === undefined) {
+      throw new EngineFault(
+        "command.finalizer.database_corrupt",
+        "Accepted Stage outcome command is missing its Stage identity",
+        {
+          session_id: command.sessionId,
+          command_id: command.commandId,
+        },
+      );
+    }
+    return ["session.view", "stage.outcome", "command.result"];
+  }
   if (command.eventCardBranch === "trigger") {
     return [
       "session.view",
+      ...command.eventCardOpenedStageIds.map(() => "stage.open"),
       "presentation.frame",
       "command.result",
     ];
@@ -3922,6 +4698,15 @@ function expectedCompletedMessageTypes(
       command_id: command.commandId,
     },
   );
+}
+
+function matchesExpectedCompletedMessageType(
+  actual: string,
+  expected: string,
+): boolean {
+  return expected === "stage.outcome"
+    ? actual === "stage.update" || actual === "stage.close"
+    : actual === expected;
 }
 
 function asObjectArray(

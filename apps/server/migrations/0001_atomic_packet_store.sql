@@ -99,6 +99,8 @@ CREATE TABLE luoxia_engine.command_journal (
   event_card_packet_id uuid,
   navigation_rule_request_id uuid,
   stage_outcome_rule_request_id uuid,
+  content_upgrade_command_id uuid,
+  content_upgrade_rule_request_id uuid,
   command_status text NOT NULL,
   result_document jsonb,
   received_at timestamptz NOT NULL,
@@ -120,6 +122,10 @@ CREATE TABLE luoxia_engine.command_journal (
     UNIQUE (navigation_rule_request_id),
   CONSTRAINT command_journal_stage_outcome_rule_request_id_unique
     UNIQUE (stage_outcome_rule_request_id),
+  CONSTRAINT command_journal_content_upgrade_command_id_unique
+    UNIQUE (content_upgrade_command_id),
+  CONSTRAINT command_journal_content_upgrade_rule_request_id_unique
+    UNIQUE (content_upgrade_rule_request_id),
   CONSTRAINT command_journal_request_digest_sha256 CHECK (
     request_digest ~ '^[0-9a-f]{64}$'
   ),
@@ -246,6 +252,23 @@ CREATE TABLE luoxia_engine.command_journal (
     OR (
       command_kind <> 'stage.outcome_proposal'
       AND stage_outcome_rule_request_id IS NULL
+    )
+  ),
+  CONSTRAINT command_journal_content_upgrade_identity_shape CHECK (
+    (
+      command_kind = 'content_upgrade.accept'
+      AND content_upgrade_command_id IS NOT NULL
+      AND content_upgrade_rule_request_id IS NOT NULL
+      AND content_upgrade_command_id <> command_id
+      AND content_upgrade_rule_request_id <> command_id
+      AND content_upgrade_command_id <> content_upgrade_rule_request_id
+      AND request_document #>> '{message,migration_id}' IS NOT NULL
+      AND request_document #>> '{message,target_bundle}' IS NOT NULL
+    )
+    OR (
+      command_kind <> 'content_upgrade.accept'
+      AND content_upgrade_command_id IS NULL
+      AND content_upgrade_rule_request_id IS NULL
     )
   ),
   CONSTRAINT command_journal_result_identity CHECK (
@@ -454,6 +477,7 @@ CREATE TABLE luoxia_engine.materialization_requests (
   ordinal integer NOT NULL,
   request_document jsonb NOT NULL,
   inserted_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL,
   CONSTRAINT materialization_requests_event_foreign_key FOREIGN KEY (world_id, requested_by_event_id)
     REFERENCES luoxia_engine.committed_events(world_id, event_id),
   CONSTRAINT materialization_requests_event_ordinal_unique UNIQUE (requested_by_event_id, ordinal),
@@ -476,6 +500,76 @@ CREATE TABLE luoxia_engine.materialization_requests (
 
 CREATE INDEX materialization_requests_status_index
   ON luoxia_engine.materialization_requests ((request_document ->> 'status'));
+
+CREATE TABLE luoxia_engine.asset_candidates (
+  candidate_id uuid PRIMARY KEY,
+  request_id uuid NOT NULL UNIQUE
+    REFERENCES luoxia_engine.materialization_requests(request_id),
+  candidate_document jsonb NOT NULL,
+  inserted_at timestamptz NOT NULL,
+  CONSTRAINT asset_candidates_identity_unique
+    UNIQUE (candidate_id, request_id),
+  CONSTRAINT asset_candidates_document_object CHECK (
+    jsonb_typeof(candidate_document) = 'object'
+  ),
+  CONSTRAINT asset_candidates_document_identity CHECK (
+    candidate_document ? 'candidate_id'
+    AND candidate_document ? 'request_id'
+    AND candidate_document #>> '{candidate_id}' = candidate_id::text
+    AND candidate_document #>> '{request_id}' = request_id::text
+  )
+);
+
+CREATE TABLE luoxia_engine.asset_reviews (
+  review_id uuid PRIMARY KEY,
+  candidate_id uuid NOT NULL UNIQUE
+    REFERENCES luoxia_engine.asset_candidates(candidate_id),
+  review_document jsonb NOT NULL,
+  inserted_at timestamptz NOT NULL,
+  CONSTRAINT asset_reviews_identity_unique
+    UNIQUE (review_id, candidate_id),
+  CONSTRAINT asset_reviews_document_object CHECK (
+    jsonb_typeof(review_document) = 'object'
+  ),
+  CONSTRAINT asset_reviews_document_identity CHECK (
+    review_document ? 'review_id'
+    AND review_document ? 'candidate_id'
+    AND review_document #>> '{review_id}' = review_id::text
+    AND review_document #>> '{candidate_id}' = candidate_id::text
+  )
+);
+
+CREATE TABLE luoxia_engine.asset_acceptances (
+  acceptance_id uuid PRIMARY KEY,
+  binding_id uuid NOT NULL UNIQUE,
+  request_id uuid NOT NULL UNIQUE
+    REFERENCES luoxia_engine.materialization_requests(request_id),
+  candidate_id uuid NOT NULL UNIQUE,
+  review_id uuid NOT NULL UNIQUE,
+  acceptance_document jsonb NOT NULL,
+  inserted_at timestamptz NOT NULL,
+  CONSTRAINT asset_acceptances_candidate_foreign_key
+    FOREIGN KEY (candidate_id, request_id)
+    REFERENCES luoxia_engine.asset_candidates(candidate_id, request_id),
+  CONSTRAINT asset_acceptances_review_foreign_key
+    FOREIGN KEY (review_id, candidate_id)
+    REFERENCES luoxia_engine.asset_reviews(review_id, candidate_id),
+  CONSTRAINT asset_acceptances_document_object CHECK (
+    jsonb_typeof(acceptance_document) = 'object'
+  ),
+  CONSTRAINT asset_acceptances_document_identity CHECK (
+    acceptance_document ? 'acceptance_id'
+    AND acceptance_document ? 'binding_id'
+    AND acceptance_document ? 'request_id'
+    AND acceptance_document ? 'candidate_id'
+    AND acceptance_document ? 'review_id'
+    AND acceptance_document #>> '{acceptance_id}' = acceptance_id::text
+    AND acceptance_document #>> '{binding_id}' = binding_id::text
+    AND acceptance_document #>> '{request_id}' = request_id::text
+    AND acceptance_document #>> '{candidate_id}' = candidate_id::text
+    AND acceptance_document #>> '{review_id}' = review_id::text
+  )
+);
 
 CREATE TABLE luoxia_engine.model_invocations (
   request_id uuid PRIMARY KEY,
@@ -598,6 +692,7 @@ CREATE INDEX model_invocations_world_revision_index
 -- readonly_world snapshot and the identity constraints below bind the request.
 CREATE TABLE luoxia_engine.rule_plugin_invocations (
   request_id uuid PRIMARY KEY,
+  parent_request_id uuid,
   world_id uuid NOT NULL,
   basis_revision bigint NOT NULL,
   plugin_id text NOT NULL,
@@ -608,11 +703,17 @@ CREATE TABLE luoxia_engine.rule_plugin_invocations (
   request_digest text NOT NULL,
   invocation_status text NOT NULL,
   request_document jsonb NOT NULL,
+  choice_resolution_document jsonb,
   response_document jsonb,
   proposal_id uuid,
   proposal_document jsonb,
   prepared_at timestamptz NOT NULL,
   resolved_at timestamptz,
+  CONSTRAINT rule_plugin_invocations_parent_request_unique
+    UNIQUE (parent_request_id),
+  CONSTRAINT rule_plugin_invocations_parent_request_fk
+    FOREIGN KEY (parent_request_id)
+    REFERENCES luoxia_engine.rule_plugin_invocations (request_id),
   CONSTRAINT rule_plugin_invocations_proposal_id_unique
     UNIQUE (proposal_id),
   CONSTRAINT rule_plugin_invocations_basis_revision_safe CHECK (
@@ -627,12 +728,43 @@ CREATE TABLE luoxia_engine.rule_plugin_invocations (
   CONSTRAINT rule_plugin_invocations_documents_object CHECK (
     jsonb_typeof(request_document) = 'object'
     AND (
+      choice_resolution_document IS NULL
+      OR jsonb_typeof(choice_resolution_document) = 'object'
+    )
+    AND (
       response_document IS NULL
       OR jsonb_typeof(response_document) = 'object'
     )
     AND (
       proposal_document IS NULL
       OR jsonb_typeof(proposal_document) = 'object'
+    )
+  ),
+  CONSTRAINT rule_plugin_invocations_choice_lineage_shape CHECK (
+    (
+      parent_request_id IS NULL
+      AND choice_resolution_document IS NULL
+    )
+    OR (
+      parent_request_id IS NOT NULL
+      AND parent_request_id <> request_id
+      AND choice_resolution_document IS NOT NULL
+      AND choice_resolution_document #>> '{contract_version}'
+        = 'rule-plugin.v1'
+      AND choice_resolution_document #>> '{record_type}'
+        = 'rule_plugin.choice_resolution'
+      AND choice_resolution_document #>> '{algorithm}'
+        = 'sha256_rejection_v1'
+      AND choice_resolution_document #>> '{parent_request_id}'
+        = parent_request_id::text
+      AND choice_resolution_document #>> '{continuation_request_id}'
+        = request_id::text
+      AND choice_resolution_document #>> '{deterministic_context,context_id}'
+        = deterministic_context_id::text
+      AND choice_resolution_document #>> '{deterministic_context,context_digest}'
+        = deterministic_context_digest
+      AND choice_resolution_document -> 'deterministic_context'
+        = request_document -> 'deterministic_context'
     )
   ),
   CONSTRAINT rule_plugin_invocations_status_shape CHECK (
@@ -736,6 +868,76 @@ CREATE TABLE luoxia_engine.rule_plugin_invocations (
 
 CREATE INDEX rule_plugin_invocations_world_revision_index
   ON luoxia_engine.rule_plugin_invocations (world_id, basis_revision);
+
+-- Content Upgrade authorization is persisted before its deterministic
+-- RulePlugin invocation is dispatched. The commit_ready phase only points at
+-- a resolved invocation; the adapter joins the journal and revalidates every
+-- document before World Core can authorize content_upgrade.apply.
+CREATE TABLE luoxia_engine.content_upgrade_authorizations (
+  upgrade_command_id uuid PRIMARY KEY,
+  session_id uuid NOT NULL,
+  client_command_id uuid NOT NULL,
+  rule_request_id uuid NOT NULL UNIQUE,
+  world_id uuid NOT NULL,
+  migration_id text NOT NULL,
+  source_world_revision bigint NOT NULL,
+  source_save_digest text NOT NULL,
+  authorization_digest text NOT NULL UNIQUE,
+  authorization_document jsonb NOT NULL,
+  authorization_status text NOT NULL,
+  result_digest text,
+  created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL,
+  CONSTRAINT content_upgrade_authorizations_command_foreign_key
+    FOREIGN KEY (session_id, client_command_id)
+    REFERENCES luoxia_engine.command_journal (session_id, command_id),
+  CONSTRAINT content_upgrade_authorizations_source_revision_safe CHECK (
+    source_world_revision >= 0
+    AND source_world_revision < 9007199254740991
+  ),
+  CONSTRAINT content_upgrade_authorizations_digests CHECK (
+    source_save_digest ~ '^[0-9a-f]{64}$'
+    AND authorization_digest ~ '^[0-9a-f]{64}$'
+    AND (
+      result_digest IS NULL
+      OR result_digest ~ '^[0-9a-f]{64}$'
+    )
+  ),
+  CONSTRAINT content_upgrade_authorizations_status_closed CHECK (
+    authorization_status IN ('authorized', 'commit_ready')
+  ),
+  CONSTRAINT content_upgrade_authorizations_status_shape CHECK (
+    (
+      authorization_status = 'authorized'
+      AND result_digest IS NULL
+    )
+    OR (
+      authorization_status = 'commit_ready'
+      AND result_digest IS NOT NULL
+    )
+  ),
+  CONSTRAINT content_upgrade_authorizations_document_object CHECK (
+    jsonb_typeof(authorization_document) = 'object'
+  ),
+  CONSTRAINT content_upgrade_authorizations_identity CHECK (
+    authorization_document #>> '{upgrade_command_id}'
+      = upgrade_command_id::text
+    AND authorization_document #>> '{world_id}' = world_id::text
+    AND authorization_document #>> '{migration_id}' = migration_id
+    AND authorization_document #>> '{source_world_revision}'
+      = source_world_revision::text
+    AND authorization_document #>> '{source_save_digest}'
+      = source_save_digest
+    AND authorization_document #>> '{authorization_digest}'
+      = authorization_digest
+  )
+);
+
+CREATE INDEX content_upgrade_authorizations_world_revision_index
+  ON luoxia_engine.content_upgrade_authorizations (
+    world_id,
+    source_world_revision
+  );
 
 CREATE TABLE luoxia_engine.daily_settlement_runs (
   run_id uuid PRIMARY KEY,

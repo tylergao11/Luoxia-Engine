@@ -6,6 +6,8 @@ import {
   expectProperty,
   expectString,
   type ContractValidator,
+  type PackLockDocument,
+  type StageModuleLockDocument,
   type WorldContentLockDocument,
 } from "@luoxia/contracts-runtime/portable";
 import type { CommittedEventDocument } from "@luoxia/world-core";
@@ -250,6 +252,8 @@ interface WorldRow {
   readonly event_log_floor_revision_text: string;
   readonly state_document: unknown;
   readonly world_content_lock_document: unknown;
+  readonly dependency_bundle_locks_document: unknown;
+  readonly stage_module_locks_document: unknown;
 }
 
 interface CommittedEventRow {
@@ -282,7 +286,9 @@ async function readWorldRecord(
             event_log_floor_revision::text
               AS event_log_floor_revision_text,
             state_document,
-            world_content_lock_document
+            world_content_lock_document,
+            dependency_bundle_locks_document,
+            stage_module_locks_document
        FROM luoxia_engine.worlds
       WHERE world_id = $1::uuid`,
     [worldId],
@@ -369,12 +375,60 @@ async function readWorldRecord(
     CONTRACT_REF.worldContentLock,
     row.world_content_lock_document,
   );
+  const dependencyBundleLocks = validatePackLocks(
+    contracts,
+    row.dependency_bundle_locks_document,
+    worldId,
+  );
+  const stageModuleLocks = validateStageModuleLocks(
+    contracts,
+    row.stage_module_locks_document,
+    worldId,
+  );
 
   return Object.freeze({
     snapshot,
     worldContentLock,
+    dependencyBundleLocks,
+    stageModuleLocks,
     eventHistoryFloorRevision,
   });
+}
+
+function validatePackLocks(
+  contracts: ContractValidator,
+  candidate: unknown,
+  worldId: string,
+): readonly PackLockDocument[] {
+  if (!Array.isArray(candidate)) {
+    throw new EngineFault(
+      "runtime.world.database_corrupt",
+      "World dependency_bundle_locks_document must be an array",
+      { world_id: worldId },
+    );
+  }
+  const documents = candidate.map((entry: unknown) =>
+    contracts.assertObject(CONTRACT_REF.packLock, entry),
+  );
+  return Object.freeze(documents);
+}
+
+function validateStageModuleLocks(
+  contracts: ContractValidator,
+  candidate: unknown,
+  worldId: string,
+): readonly StageModuleLockDocument[] {
+  if (!Array.isArray(candidate)) {
+    throw new EngineFault(
+      "runtime.world.database_corrupt",
+      "World stage_module_locks_document must be an array",
+      { world_id: worldId },
+    );
+  }
+  const documents = candidate.map((entry: unknown) =>
+    contracts.assertObject(CONTRACT_REF.stageModuleLock, entry),
+  );
+  return Object.freeze(documents);
 }
 
 function validateCommittedEventRow(

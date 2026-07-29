@@ -22,6 +22,8 @@ export interface AssetProviderDependencyIdentity {
 
 export interface AssetProviderInvocation {
   readonly request: MaterializationRequestDocument;
+  /** Exact active EntityState or DynamicDefinitionState from the same read. */
+  readonly subject: JsonObject;
   readonly materializationProfile: JsonObject;
   readonly artProfile: JsonObject;
 }

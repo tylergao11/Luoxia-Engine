@@ -12,6 +12,8 @@ export const CONTRACT_ID = Object.freeze({
     "https://schemas.luoxia.engine/contracts/model-protocol.v1.schema.json",
   rulePlugin:
     "https://schemas.luoxia.engine/contracts/rule-plugin.v1.schema.json",
+  saveSchemaMigration:
+    "https://schemas.luoxia.engine/contracts/save-schema-migration.v1.schema.json",
   worldRuntime:
     "https://schemas.luoxia.engine/contracts/world-runtime.v1.schema.json",
 } as const);
@@ -43,10 +45,26 @@ export const CONTRACT_REF = Object.freeze({
     "DeterministicContext",
   ),
   contentBundle: CONTRACT_ID.contentBundle,
+  contentUpgrade: definitionRef(
+    CONTRACT_ID.contentBundle,
+    "ContentUpgrade",
+  ),
+  contentUpgradeIdMapping: definitionRef(
+    CONTRACT_ID.contentBundle,
+    "ContentUpgradeIdMapping",
+  ),
   worldState: definitionRef(CONTRACT_ID.worldRuntime, "WorldState"),
   worldSnapshot: definitionRef(CONTRACT_ID.worldRuntime, "WorldSnapshot"),
   worldContentLock: definitionRef(CONTRACT_ID.worldRuntime, "WorldContentLock"),
   saveEnvelope: definitionRef(CONTRACT_ID.worldRuntime, "SaveEnvelope"),
+  migrationHistoryEntry: definitionRef(
+    CONTRACT_ID.worldRuntime,
+    "MigrationHistoryEntry",
+  ),
+  contentUpgradeApplyOp: definitionRef(
+    CONTRACT_ID.worldRuntime,
+    "ContentUpgradeApplyOp",
+  ),
   contentPacket: definitionRef(CONTRACT_ID.worldRuntime, "ContentPacket"),
   packetProposal: definitionRef(CONTRACT_ID.worldRuntime, "PacketProposal"),
   packetCommitIdentity: definitionRef(
@@ -79,9 +97,46 @@ export const CONTRACT_REF = Object.freeze({
     CONTRACT_ID.rulePlugin,
     "RulePluginResponse",
   ),
+  choiceSpec: definitionRef(CONTRACT_ID.rulePlugin, "ChoiceSpec"),
+  rulePluginChoiceResolution: definitionRef(
+    CONTRACT_ID.rulePlugin,
+    "ChoiceResolutionEvidence",
+  ),
+  upgradeAuthorization: definitionRef(
+    CONTRACT_ID.rulePlugin,
+    "UpgradeAuthorization",
+  ),
+  contentUpgradeInput: definitionRef(
+    CONTRACT_ID.rulePlugin,
+    "ContentUpgradeInput",
+  ),
+  contentUpgradeOutput: definitionRef(
+    CONTRACT_ID.rulePlugin,
+    "ContentUpgradeOutput",
+  ),
+  saveSchemaMigrationModuleManifest: definitionRef(
+    CONTRACT_ID.saveSchemaMigration,
+    "ModuleManifest",
+  ),
+  saveSchemaMigrationPlan: definitionRef(
+    CONTRACT_ID.saveSchemaMigration,
+    "MigrationPlan",
+  ),
+  saveSchemaImportRequest: definitionRef(
+    CONTRACT_ID.saveSchemaMigration,
+    "ImportRequest",
+  ),
+  storedSaveSchemaMigrationRequest: definitionRef(
+    CONTRACT_ID.saveSchemaMigration,
+    "StoredMigrationRequest",
+  ),
   clientEnvelope: definitionRef(CONTRACT_ID.clientBridge, "ClientEnvelope"),
   serverEnvelope: definitionRef(CONTRACT_ID.clientBridge, "ServerEnvelope"),
   commandResult: definitionRef(CONTRACT_ID.clientBridge, "CommandResult"),
+  contentUpgradeAccept: definitionRef(
+    CONTRACT_ID.clientBridge,
+    "ContentUpgradeAccept",
+  ),
   stageModuleManifest: definitionRef(
     CONTRACT_ID.clientBridge,
     "StageModuleManifest",
@@ -94,12 +149,65 @@ export const CONTRACT_REF = Object.freeze({
     CONTRACT_ID.materialization,
     "MaterializationRequest",
   ),
+  assetCandidate: definitionRef(CONTRACT_ID.materialization, "AssetCandidate"),
+  reviewReceipt: definitionRef(CONTRACT_ID.materialization, "ReviewReceipt"),
+  assetAcceptance: definitionRef(
+    CONTRACT_ID.materialization,
+    "AssetAcceptance",
+  ),
+  visualBinding: definitionRef(CONTRACT_ID.materialization, "VisualBinding"),
 } as const);
 
 export type WorldContentLockDocument = ValidatedJsonObject<
   typeof CONTRACT_REF.worldContentLock
 >;
 
+export type PackLockDocument = ValidatedJsonObject<typeof CONTRACT_REF.packLock>;
+
+export type StageModuleLockDocument = ValidatedJsonObject<
+  typeof CONTRACT_REF.stageModuleLock
+>;
+
 export type SaveEnvelopeDocument = ValidatedJsonObject<
   typeof CONTRACT_REF.saveEnvelope
+>;
+
+export type ContentUpgradeDocument = ValidatedJsonObject<
+  typeof CONTRACT_REF.contentUpgrade
+>;
+
+export type UpgradeAuthorizationDocument = ValidatedJsonObject<
+  typeof CONTRACT_REF.upgradeAuthorization
+>;
+
+export type ContentUpgradeOutputDocument = ValidatedJsonObject<
+  typeof CONTRACT_REF.contentUpgradeOutput
+>;
+
+export type ChoiceSpecDocument = ValidatedJsonObject<
+  typeof CONTRACT_REF.choiceSpec
+>;
+
+export type RulePluginChoiceResolutionDocument = ValidatedJsonObject<
+  typeof CONTRACT_REF.rulePluginChoiceResolution
+>;
+
+export type ContentUpgradeApplyOpDocument = ValidatedJsonObject<
+  typeof CONTRACT_REF.contentUpgradeApplyOp
+>;
+
+export type SaveSchemaMigrationModuleManifestDocument = ValidatedJsonObject<
+  typeof CONTRACT_REF.saveSchemaMigrationModuleManifest
+>;
+
+export type SaveSchemaMigrationPlanDocument = ValidatedJsonObject<
+  typeof CONTRACT_REF.saveSchemaMigrationPlan
+>;
+
+export type SaveSchemaImportRequestDocument = ValidatedJsonObject<
+  typeof CONTRACT_REF.saveSchemaImportRequest
+>;
+
+export type StoredSaveSchemaMigrationRequestDocument = ValidatedJsonObject<
+  typeof CONTRACT_REF.storedSaveSchemaMigrationRequest
 >;

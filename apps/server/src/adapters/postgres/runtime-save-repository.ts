@@ -1,11 +1,13 @@
 import {
   CONTRACT_REF,
   EngineFault,
+  assertJsonValue,
   expectInteger,
   expectProperty,
   expectString,
   jsonEquals,
   type ContractValidator,
+  type JsonObject,
   type SaveEnvelopeDocument,
 } from "@luoxia/contracts-runtime";
 import type { Pool } from "pg";
@@ -24,7 +26,7 @@ export interface PostgresRuntimeSaveRepositoryDependencies {
   readonly contracts: ContractValidator;
 }
 
-interface SaveWorldRow {
+export interface SaveWorldRow {
   readonly world_id: string;
   readonly revision_text: string;
   readonly state_document: unknown;
@@ -263,10 +265,26 @@ class PostgresRuntimeSaveRepository implements RuntimeSaveRepository {
   }
 }
 
-function assembleSaveEnvelope(
+export function assembleSaveEnvelope(
   contracts: ContractValidator,
   row: SaveWorldRow,
 ): SaveEnvelopeDocument {
+  const envelope = contracts.assertObject(
+    CONTRACT_REF.saveEnvelope,
+    assembleSaveEnvelopeCandidate(row),
+  );
+  assertSaveEnvelopeRelationships(contracts, envelope);
+  return envelope;
+}
+
+/**
+ * Reconstructs the column-owned save candidate without selecting a Schema.
+ * Save Schema migration validates this object against its explicit source ref
+ * while the world row remains locked.
+ */
+export function assembleSaveEnvelopeCandidate(
+  row: SaveWorldRow,
+): JsonObject {
   const revision = parseSafeUnsignedInteger(
     row.revision_text,
     "runtime.save.database_corrupt",
@@ -301,7 +319,30 @@ function assembleSaveEnvelope(
     );
   }
 
-  const envelope = contracts.assertObject(CONTRACT_REF.saveEnvelope, {
+  assertJsonValue(row.state_document, "Save world state_document");
+  assertJsonValue(
+    row.world_content_lock_document,
+    "Save world world_content_lock_document",
+  );
+  assertJsonValue(
+    row.dependency_bundle_locks_document,
+    "Save world dependency_bundle_locks_document",
+  );
+  assertJsonValue(
+    row.rule_plugin_locks_document,
+    "Save world rule_plugin_locks_document",
+  );
+  assertJsonValue(
+    row.stage_module_locks_document,
+    "Save world stage_module_locks_document",
+  );
+  assertJsonValue(row.asset_hashes_document, "Save world asset_hashes_document");
+  assertJsonValue(
+    row.migration_history_document,
+    "Save world migration_history_document",
+  );
+
+  return Object.freeze({
     contract_version: "world-runtime.v1",
     record_type: "save.envelope",
     save_schema_version: row.save_schema_version,
@@ -317,11 +358,9 @@ function assembleSaveEnvelope(
     asset_hashes: row.asset_hashes_document,
     migration_history: row.migration_history_document,
   });
-  assertSaveEnvelopeRelationships(contracts, envelope);
-  return envelope;
 }
 
-function selectSaveWorldColumns(): string {
+export function selectSaveWorldColumns(): string {
   return `SELECT world_id::text AS world_id,
                  revision::text AS revision_text,
                  state_document,

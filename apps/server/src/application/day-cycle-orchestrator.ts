@@ -558,6 +558,7 @@ class DefaultDayCycleOrchestrator implements DayCycleOrchestrator {
         });
       },
     });
+    this.#rulePlugins.assertExecutionRoot(receipt, input.requestId);
     const current = await this.#readState(input.worldId);
     const invocation = resolveRulePluginInvocationBinding({
       binding: current.binding.contentBinding,
@@ -676,8 +677,6 @@ function assertRecoveredRulePluginIdentity(
   );
   if (
     receipt.worldId !== input.worldId ||
-    expectString(request, "request_id", "RulePluginRequest") !==
-      input.requestId ||
     expectString(request, "operation_kind", "RulePluginRequest") !==
       input.operationKind ||
     expectString(request, "operation_id", "RulePluginRequest") !==
@@ -697,7 +696,12 @@ function assertRecoveredRulePluginIdentity(
       "Recovered RulePlugin invocation differs from its day-cycle execution identity",
       {
         world_id: input.worldId,
-        request_id: input.requestId,
+        root_request_id: input.requestId,
+        terminal_request_id: expectString(
+          request,
+          "request_id",
+          "RulePluginRequest",
+        ),
         operation_kind: input.operationKind,
       },
     );

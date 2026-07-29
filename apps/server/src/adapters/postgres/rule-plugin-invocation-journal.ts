@@ -8,6 +8,7 @@ import {
   jsonEquals,
   type ContractValidator,
   type JsonObject,
+  type RulePluginChoiceResolutionDocument,
 } from "@luoxia/contracts-runtime/portable";
 import type { JsonDigest } from "@luoxia/contracts-runtime";
 import type { Pool } from "pg";
@@ -152,7 +153,8 @@ class PostgresRulePluginInvocationJournal
           );
           if (
             row.request_digest !== requestDigest ||
-            !jsonEquals(stored.request.value, request.value)
+            !jsonEquals(stored.request.value, request.value) ||
+            stored.continuation !== undefined
           ) {
             throw new EngineFault(
               "rule_plugin.journal.request_id_conflict",
@@ -160,6 +162,203 @@ class PostgresRulePluginInvocationJournal
               { request_id: identity.requestId },
             );
           }
+          return stored;
+        },
+      );
+    } catch (error: unknown) {
+      throw normalizeJournalError(error);
+    }
+  }
+
+  public async persistChoiceContinuation(
+    input: Parameters<
+      RulePluginInvocationJournal["persistChoiceContinuation"]
+    >[0],
+  ): Promise<StoredRulePluginInvocation> {
+    if (!this.#invocationProvenance.isVerified(input.parent)) {
+      throw new EngineFault(
+        "rule_plugin.journal.verified_parent_required",
+        "RulePlugin choice continuation requires this Gateway's verified parent receipt",
+      );
+    }
+    if (!this.#preparationProvenance.isPrepared(input.invocation)) {
+      throw new EngineFault(
+        "rule_plugin.journal.prepared_invocation_required",
+        "RulePlugin choice continuation requires this Gateway's prepared invocation",
+      );
+    }
+
+    const parentRequest = this.#contracts.assertObject(
+      CONTRACT_REF.rulePluginRequest,
+      input.parent.request.value,
+    );
+    const parentResponse = this.#contracts.assertObject(
+      CONTRACT_REF.rulePluginResponse,
+      input.parent.response.value,
+    );
+    const request = this.#contracts.assertObject(
+      CONTRACT_REF.rulePluginRequest,
+      input.invocation.request.value,
+    );
+    const resolution = this.#contracts.assertObject(
+      CONTRACT_REF.rulePluginChoiceResolution,
+      input.resolution.value,
+    );
+    const parentIdentity = extractRequestIdentity(parentRequest.value);
+    const identity = extractRequestIdentity(request.value);
+    assertReceiptIdentity(input.parent, parentIdentity);
+    assertPreparedIdentity(input.invocation, identity);
+    assertResponseDocuments(
+      parentRequest,
+      parentResponse,
+      input.parent.proposal,
+    );
+    assertChoiceContinuationDocuments({
+      contracts: this.#contracts,
+      digest: this.#digest,
+      parentRequest,
+      parentResponse,
+      request,
+      resolution,
+    });
+    const requestDigest = this.#digest.sha256(request.value);
+
+    try {
+      return await withPostgresTransaction(
+        this.#pool,
+        "BEGIN ISOLATION LEVEL READ COMMITTED",
+        async (client) => {
+          const parentQuery = await client.query<RulePluginInvocationRow>(
+            `${INVOCATION_SELECT}
+              WHERE request_id = $1::uuid
+              FOR UPDATE`,
+            [parentIdentity.requestId],
+          );
+          const parentRow = requireAtMostOne(
+            parentQuery.rows,
+            "rule_plugin.journal.database_corrupt",
+            "Choice parent request lookup returned more than one row",
+            { request_id: parentIdentity.requestId },
+          );
+          if (parentRow === undefined) {
+            throw new EngineFault(
+              "rule_plugin.journal.choice_parent_missing",
+              "RulePlugin choice continuation cannot be prepared before its parent response is durable",
+              { parent_request_id: parentIdentity.requestId },
+            );
+          }
+          const storedParent = validateInvocationRow(
+            this.#contracts,
+            this.#digest,
+            parentRow,
+          );
+          if (
+            storedParent.phase !== "resolved" ||
+            !jsonEquals(
+              storedParent.request.value,
+              parentRequest.value,
+            ) ||
+            !jsonEquals(
+              storedParent.response.value,
+              parentResponse.value,
+            ) ||
+            !sameOptionalProposal(
+              storedParent.proposal,
+              input.parent.proposal,
+            )
+          ) {
+            throw new EngineFault(
+              "rule_plugin.journal.choice_parent_conflict",
+              "RulePlugin choice parent receipt differs from its durable resolved row",
+              { parent_request_id: parentIdentity.requestId },
+            );
+          }
+
+          await client.query(
+            `INSERT INTO luoxia_engine.rule_plugin_invocations (
+               request_id,
+               parent_request_id,
+               world_id,
+               basis_revision,
+               plugin_id,
+               operation_id,
+               operation_kind,
+               deterministic_context_id,
+               deterministic_context_digest,
+               request_digest,
+               invocation_status,
+               request_document,
+               choice_resolution_document,
+               prepared_at
+             ) VALUES (
+               $1::uuid,
+               $2::uuid,
+               $3::uuid,
+               $4::bigint,
+               $5,
+               $6,
+               $7,
+               $8::uuid,
+               $9,
+               $10,
+               'prepared',
+               $11::jsonb,
+               $12::jsonb,
+               clock_timestamp()
+             )
+             ON CONFLICT (parent_request_id) DO NOTHING`,
+            [
+              identity.requestId,
+              parentIdentity.requestId,
+              identity.worldId,
+              identity.basisRevision.toString(),
+              identity.pluginId,
+              identity.operationId,
+              identity.operationKind,
+              identity.deterministicContextId,
+              identity.deterministicContextDigest,
+              requestDigest,
+              JSON.stringify(request.value),
+              JSON.stringify(resolution.value),
+            ],
+          );
+
+          const query = await client.query<RulePluginInvocationRow>(
+            `${INVOCATION_SELECT}
+              WHERE parent_request_id = $1::uuid
+              FOR UPDATE`,
+            [parentIdentity.requestId],
+          );
+          const row = requireExactlyOne(
+            query.rows,
+            "rule_plugin.journal.database_corrupt",
+            "Choice parent did not resolve to exactly one continuation row",
+            { parent_request_id: parentIdentity.requestId },
+          );
+          const stored = validateInvocationRow(
+            this.#contracts,
+            this.#digest,
+            row,
+          );
+          if (
+            stored.continuation === undefined ||
+            stored.continuation.parentRequestId !==
+              parentIdentity.requestId
+          ) {
+            throw new EngineFault(
+              "rule_plugin.journal.database_corrupt",
+              "Choice continuation row lost its parent identity",
+              { parent_request_id: parentIdentity.requestId },
+            );
+          }
+          assertChoiceContinuationDocuments({
+            contracts: this.#contracts,
+            digest: this.#digest,
+            parentRequest: storedParent.request,
+            parentResponse: storedParent.response,
+            request: stored.request,
+            resolution: stored.continuation.resolution,
+          });
           return stored;
         },
       );
@@ -339,6 +538,35 @@ class PostgresRulePluginInvocationJournal
     }
   }
 
+  public async readChoiceContinuation(
+    parentRequestId: string,
+  ): Promise<StoredRulePluginInvocation | undefined> {
+    const verifiedParentRequestId = assertUuid(
+      this.#contracts,
+      parentRequestId,
+    );
+    try {
+      return await withPostgresClient(this.#pool, async (client) => {
+        const query = await client.query<RulePluginInvocationRow>(
+          `${INVOCATION_SELECT}
+            WHERE parent_request_id = $1::uuid`,
+          [verifiedParentRequestId],
+        );
+        const row = requireAtMostOne(
+          query.rows,
+          "rule_plugin.journal.database_corrupt",
+          "Choice parent request resolved to more than one continuation",
+          { parent_request_id: verifiedParentRequestId },
+        );
+        return row === undefined
+          ? undefined
+          : validateInvocationRow(this.#contracts, this.#digest, row);
+      });
+    } catch (error: unknown) {
+      throw normalizeJournalError(error);
+    }
+  }
+
   public async findByProposalId(
     proposalId: string,
   ): Promise<unknown | undefined> {
@@ -389,6 +617,7 @@ class PostgresRulePluginInvocationJournal
 
 const INVOCATION_SELECT = `SELECT
   request_id::text AS request_id,
+  parent_request_id::text AS parent_request_id,
   world_id::text AS world_id,
   basis_revision::text AS basis_revision_text,
   plugin_id,
@@ -399,6 +628,7 @@ const INVOCATION_SELECT = `SELECT
   request_digest,
   invocation_status,
   request_document,
+  choice_resolution_document,
   response_document,
   proposal_id::text AS proposal_id,
   proposal_document
@@ -406,6 +636,7 @@ FROM luoxia_engine.rule_plugin_invocations`;
 
 interface RulePluginInvocationRow {
   readonly request_id: string;
+  readonly parent_request_id: string | null;
   readonly world_id: string;
   readonly basis_revision_text: string;
   readonly plugin_id: string;
@@ -416,6 +647,7 @@ interface RulePluginInvocationRow {
   readonly request_digest: string;
   readonly invocation_status: string;
   readonly request_document: unknown;
+  readonly choice_resolution_document: unknown | null;
   readonly response_document: unknown | null;
   readonly proposal_id: string | null;
   readonly proposal_document: unknown | null;
@@ -467,6 +699,11 @@ function validateInvocationRow(
     );
   }
 
+  const continuation = validateChoiceContinuationRow(
+    contracts,
+    row,
+    request,
+  );
   if (row.invocation_status === "prepared") {
     if (
       row.response_document !== null ||
@@ -479,7 +716,7 @@ function validateInvocationRow(
         { request_id: row.request_id },
       );
     }
-    return Object.freeze({ phase: "prepared", request });
+    return Object.freeze({ phase: "prepared", request, continuation });
   }
   if (row.invocation_status !== "resolved" || row.response_document === null) {
     throw new EngineFault(
@@ -542,6 +779,82 @@ function validateInvocationRow(
     request,
     response,
     proposal,
+    continuation,
+  });
+}
+
+function validateChoiceContinuationRow(
+  contracts: ContractValidator,
+  row: RulePluginInvocationRow,
+  request: RulePluginRequestDocument,
+):
+  | {
+      readonly parentRequestId: string;
+      readonly resolution: RulePluginChoiceResolutionDocument;
+    }
+  | undefined {
+  if (
+    row.parent_request_id === null &&
+    row.choice_resolution_document === null
+  ) {
+    return undefined;
+  }
+  if (
+    row.parent_request_id === null ||
+    row.choice_resolution_document === null
+  ) {
+    throw new EngineFault(
+      "rule_plugin.journal.database_corrupt",
+      "RulePlugin choice lineage columns must occur together",
+      { request_id: row.request_id },
+    );
+  }
+  const resolution = contracts.assertObject(
+    CONTRACT_REF.rulePluginChoiceResolution,
+    row.choice_resolution_document,
+  );
+  const context = expectJsonObject(
+    expectProperty(
+      request.value,
+      "deterministic_context",
+      "RulePluginRequest",
+    ),
+    "RulePluginRequest.deterministic_context",
+  );
+  const resolutionContext = expectJsonObject(
+    expectProperty(
+      resolution.value,
+      "deterministic_context",
+      "ChoiceResolutionEvidence",
+    ),
+    "ChoiceResolutionEvidence.deterministic_context",
+  );
+  if (
+    row.parent_request_id === row.request_id ||
+    expectString(
+      resolution.value,
+      "parent_request_id",
+      "ChoiceResolutionEvidence",
+    ) !== row.parent_request_id ||
+    expectString(
+      resolution.value,
+      "continuation_request_id",
+      "ChoiceResolutionEvidence",
+    ) !== row.request_id ||
+    !jsonEquals(context, resolutionContext)
+  ) {
+    throw new EngineFault(
+      "rule_plugin.journal.database_corrupt",
+      "RulePlugin choice lineage does not match its continuation request",
+      {
+        request_id: row.request_id,
+        parent_request_id: row.parent_request_id,
+      },
+    );
+  }
+  return Object.freeze({
+    parentRequestId: row.parent_request_id,
+    resolution,
   });
 }
 
@@ -757,6 +1070,99 @@ function assertResponseDocuments(
   }
 }
 
+function assertChoiceContinuationDocuments(input: {
+  readonly contracts: ContractValidator;
+  readonly digest: JsonDigest;
+  readonly parentRequest: RulePluginRequestDocument;
+  readonly parentResponse: RulePluginResponseDocument;
+  readonly request: RulePluginRequestDocument;
+  readonly resolution: RulePluginChoiceResolutionDocument;
+}): void {
+  const parentOutput = expectJsonObject(
+    expectProperty(
+      input.parentResponse.value,
+      "output",
+      "RulePluginResponse",
+    ),
+    "RulePluginResponse.output",
+  );
+  if (
+    expectString(
+      parentOutput,
+      "output_kind",
+      "RulePluginResponse.output",
+    ) !== "choice.required"
+  ) {
+    throw new EngineFault(
+      "rule_plugin.journal.choice_parent_not_required",
+      "RulePlugin continuation parent must resolve to ChoiceSpec",
+      {
+        parent_request_id: expectString(
+          input.parentRequest.value,
+          "request_id",
+          "RulePluginRequest",
+        ),
+      },
+    );
+  }
+  const choiceSpec = input.contracts.assertObject(
+    CONTRACT_REF.choiceSpec,
+    parentOutput,
+  );
+  const parentRequestId = expectString(
+    input.parentRequest.value,
+    "request_id",
+    "RulePluginRequest",
+  );
+  const requestId = expectString(
+    input.request.value,
+    "request_id",
+    "RulePluginRequest",
+  );
+  const resolutionContext = expectProperty(
+    input.resolution.value,
+    "deterministic_context",
+    "ChoiceResolutionEvidence",
+  );
+  const expectedRequest = Object.freeze({
+    ...input.parentRequest.value,
+    request_id: requestId,
+    deterministic_context: resolutionContext,
+  });
+  if (
+    expectString(
+      input.resolution.value,
+      "parent_request_id",
+      "ChoiceResolutionEvidence",
+    ) !== parentRequestId ||
+    expectString(
+      input.resolution.value,
+      "continuation_request_id",
+      "ChoiceResolutionEvidence",
+    ) !== requestId ||
+    expectString(
+      input.resolution.value,
+      "choice_spec_digest",
+      "ChoiceResolutionEvidence",
+    ) !== input.digest.sha256(choiceSpec.value) ||
+    expectString(
+      input.resolution.value,
+      "choice_id",
+      "ChoiceResolutionEvidence",
+    ) !== expectString(choiceSpec.value, "choice_id", "ChoiceSpec") ||
+    !jsonEquals(input.request.value, expectedRequest)
+  ) {
+    throw new EngineFault(
+      "rule_plugin.journal.choice_continuation_mismatch",
+      "RulePlugin continuation request does not exactly preserve its parent request and choice evidence",
+      {
+        parent_request_id: parentRequestId,
+        continuation_request_id: requestId,
+      },
+    );
+  }
+}
+
 function sameOptionalProposal(
   left: PacketProposalDocument | undefined,
   right: PacketProposalDocument | undefined,
@@ -784,6 +1190,8 @@ function normalizeJournalError(error: unknown): Error {
     typeof error.constraint === "string" ? error.constraint : "";
   if (
     constraint === "rule_plugin_invocations_pkey" ||
+    constraint ===
+      "rule_plugin_invocations_parent_request_unique" ||
     constraint === "rule_plugin_invocations_proposal_id_unique"
   ) {
     return new EngineFault(

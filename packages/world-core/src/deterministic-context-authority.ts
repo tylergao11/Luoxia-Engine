@@ -98,6 +98,7 @@ class DefaultDeterministicContextAuthority
     input: DeterministicContextIssueInput,
   ): DeterministicContextDocument {
     const contextId = this.#contextIdFactory.createContextId();
+    assertRandomChoiceIdsUnique(input.randomChoices, "issue");
     assertExternalResultsDigests(
       input.externalResults,
       this.#digest,
@@ -158,6 +159,11 @@ class DefaultDeterministicContextAuthority
       "external_results",
       "DeterministicContext",
     );
+    const randomChoices = expectProperty(
+      value,
+      "random_choices",
+      "DeterministicContext",
+    );
     const claimedDigest = expectString(
       value,
       "context_digest",
@@ -169,6 +175,7 @@ class DefaultDeterministicContextAuthority
       "DeterministicContext",
     );
 
+    assertRandomChoiceIdsUnique(randomChoices, "verify");
     assertExternalResultsDigests(externalResults, this.#digest, "verify");
 
     const digestBody = contextDigestBodyFromValidatedContext(value);
@@ -190,6 +197,39 @@ class DefaultDeterministicContextAuthority
     });
 
     return document;
+  }
+}
+
+function assertRandomChoiceIdsUnique(
+  randomChoices: JsonValue,
+  phase: "issue" | "verify",
+): void {
+  if (!Array.isArray(randomChoices)) {
+    throw new EngineFault(
+      "deterministic_context.random_choices_shape",
+      "DeterministicContext.random_choices must be an array",
+      { phase },
+    );
+  }
+  const seen = new Set<string>();
+  for (const [index, entry] of randomChoices.entries()) {
+    const choice = expectJsonObject(
+      entry as JsonValue,
+      `DeterministicContext.random_choices[${index}]`,
+    );
+    const choiceId = expectString(
+      choice,
+      "choice_id",
+      `DeterministicContext.random_choices[${index}]`,
+    );
+    if (seen.has(choiceId)) {
+      throw new EngineFault(
+        "deterministic_context.random_choice_duplicate",
+        "DeterministicContext.random_choices cannot repeat a choice_id",
+        { phase, choice_id: choiceId },
+      );
+    }
+    seen.add(choiceId);
   }
 }
 

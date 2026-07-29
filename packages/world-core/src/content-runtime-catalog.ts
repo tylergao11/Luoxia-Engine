@@ -94,6 +94,25 @@ export interface BundleLockRef {
   readonly bundle_digest: string;
 }
 
+export interface PresentationProfileRefLike extends BundleLockRef {
+  readonly profile_id: string;
+}
+
+export interface MaterializationContentBinding {
+  readonly materializationProfile: JsonObject;
+  readonly artProfile: JsonObject;
+  readonly fallbackAsset: JsonObject;
+  readonly assetProviderDependency: JsonObject;
+}
+
+export interface ContentUpgradeContentBinding {
+  readonly packId: string;
+  readonly packVersion: string;
+  readonly bundleDigest: string;
+  readonly upgrade: JsonObject;
+  readonly transformer: ContentRulePluginOperationBinding;
+}
+
 export type { WorldContentLockDocument };
 
 /**
@@ -163,9 +182,26 @@ export interface ContentRuntimeCatalog extends StaticComponentDigestLookup {
   resolveWorldContentBinding(
     lock: WorldContentLockDocument,
   ): WorldContentBinding;
+  /**
+   * Resolve a StageRef dependency_id within the exact locked root bundle.
+   * Returns the original required stage_module DependencyLock and never
+   * searches another bundle or guesses by module/display name.
+   */
+  resolveRequiredStageModuleDependency(
+    lock: WorldContentLockDocument,
+    dependencyId: string,
+  ): JsonObject;
   findPromptFragment(
     ref: BundleLockRef & { readonly prompt_id: string },
   ): JsonObject | undefined;
+  /**
+   * Resolves one request's exact materialization/art profiles and the required
+   * asset_provider DependencyLock. No default profile or provider selection.
+   */
+  resolveMaterializationContent(
+    materializationProfile: PresentationProfileRefLike,
+    artProfile: PresentationProfileRefLike,
+  ): MaterializationContentBinding | undefined;
   findCharacterMindForRuntimeEntity(
     ref: BundleLockRef & {
       readonly world_id: string;
@@ -180,6 +216,16 @@ export interface ContentRuntimeCatalog extends StaticComponentDigestLookup {
    * Missing bundle returns undefined; does not pick a default world.
    */
   listWorldDefinitions(ref: BundleLockRef): readonly JsonObject[] | undefined;
+  /**
+   * Resolves one exact migration declared by the target bundle. The target
+   * PackLock and migration_id are both mandatory; no single-item inference.
+   */
+  resolveContentUpgrade(
+    ref: BundleLockRef & {
+      readonly pack_version: string;
+      readonly migration_id: string;
+    },
+  ): ContentUpgradeContentBinding | undefined;
   /**
    * Enumerates every v1 content-owned RulePlugin operation binding for one
    * digest-locked bundle. Missing bundle returns undefined; illegal ownership,
@@ -221,9 +267,16 @@ interface IndexedBundle {
   readonly capabilities: ReadonlyMap<string, JsonObject>;
   readonly capabilitiesOrdered: readonly JsonObject[];
   readonly generationArchetypes: ReadonlyMap<string, JsonObject>;
+  readonly presentationArtProfiles: ReadonlyMap<string, JsonObject>;
+  readonly presentationAssetMap: ReadonlyMap<string, JsonObject>;
   readonly presentationAssets: readonly JsonObject[];
+  readonly presentationMaterializationProfileMap: ReadonlyMap<
+    string,
+    JsonObject
+  >;
   readonly presentationMaterializationProfiles: readonly JsonObject[];
   readonly presentationBindings: readonly JsonObject[];
+  readonly contentUpgrades: ReadonlyMap<string, JsonObject>;
 }
 
 export function createContentRuntimeCatalog(
@@ -511,9 +564,29 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
       expectProperty(bundle, "presentation", "bundle"),
       "bundle.presentation",
     );
+    const presentationArtProfilesList = asObjectArray(
+      expectProperty(presentation, "art_profiles", "presentation"),
+      "presentation.art_profiles",
+    );
+    const presentationArtProfiles = uniqueIdMap(
+      presentationArtProfilesList,
+      "art_profile_id",
+      "ArtProfile",
+      packId,
+      bundleDigest,
+      "content.catalog.duplicate_art_profile",
+    );
     const presentationAssets = asObjectArray(
       expectProperty(presentation, "assets", "presentation"),
       "presentation.assets",
+    );
+    const presentationAssetMap = uniqueIdMap(
+      presentationAssets,
+      "asset_id",
+      "PackAsset",
+      packId,
+      bundleDigest,
+      "content.catalog.duplicate_asset",
     );
     const presentationMaterializationProfiles = asObjectArray(
       expectProperty(
@@ -523,9 +596,28 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
       ),
       "presentation.materialization_profiles",
     );
+    const presentationMaterializationProfileMap = uniqueIdMap(
+      presentationMaterializationProfiles,
+      "materialization_profile_id",
+      "MaterializationProfile",
+      packId,
+      bundleDigest,
+      "content.catalog.duplicate_materialization_profile",
+    );
     const presentationBindings = asObjectArray(
       expectProperty(presentation, "bindings", "presentation"),
       "presentation.bindings",
+    );
+    const contentUpgrades = uniqueIdMap(
+      asObjectArray(
+        expectProperty(bundle, "content_upgrades", "bundle"),
+        "bundle.content_upgrades",
+      ),
+      "migration_id",
+      "ContentUpgrade",
+      packId,
+      bundleDigest,
+      "content.catalog.duplicate_content_upgrade",
     );
 
     const worldsList = asObjectArray(
@@ -581,17 +673,181 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
         capabilities,
         capabilitiesOrdered: Object.freeze([...capabilitiesOrdered]),
         generationArchetypes,
+        presentationArtProfiles,
+        presentationAssetMap,
         presentationAssets: Object.freeze([...presentationAssets]),
+        presentationMaterializationProfileMap,
         presentationMaterializationProfiles: Object.freeze([
           ...presentationMaterializationProfiles,
         ]),
         presentationBindings: Object.freeze([...presentationBindings]),
+        contentUpgrades,
       }),
     );
   }
 
   public hasBundle(bundleId: string, bundleDigest: string): boolean {
     return this.#bundles.has(bundleKey(bundleId, bundleDigest));
+  }
+
+  public resolveContentUpgrade(
+    ref: BundleLockRef & {
+      readonly pack_version: string;
+      readonly migration_id: string;
+    },
+  ): ContentUpgradeContentBinding | undefined {
+    const indexed = this.#bundles.get(
+      bundleKey(ref.bundle_id, ref.bundle_digest),
+    );
+    if (indexed === undefined) {
+      return undefined;
+    }
+    if (indexed.packVersion !== ref.pack_version) {
+      throw new EngineFault(
+        "content.catalog.content_upgrade_pack_version_mismatch",
+        "Content Upgrade target PackLock version does not match its registered ContentBundle",
+        {
+          pack_id: ref.bundle_id,
+          bundle_digest: ref.bundle_digest,
+          requested_pack_version: ref.pack_version,
+          registered_pack_version: indexed.packVersion,
+          migration_id: ref.migration_id,
+        },
+      );
+    }
+    const upgrade = indexed.contentUpgrades.get(ref.migration_id);
+    if (upgrade === undefined) {
+      return undefined;
+    }
+    const transformerOperation = expectJsonObject(
+      expectProperty(upgrade, "transformer", "ContentUpgrade"),
+      "ContentUpgrade.transformer",
+    );
+    return Object.freeze({
+      packId: indexed.packId,
+      packVersion: indexed.packVersion,
+      bundleDigest: indexed.bundleDigest,
+      upgrade,
+      transformer: createContentRulePluginOperationBinding(
+        indexed,
+        transformerOperation,
+        "content_upgrade.transform",
+        contentOperationSource(indexed, {
+          owner_kind: "content_upgrade",
+          owner_id: ref.migration_id,
+          owner_field: "transformer",
+        }),
+      ),
+    });
+  }
+
+  public resolveMaterializationContent(
+    materializationProfile: PresentationProfileRefLike,
+    artProfile: PresentationProfileRefLike,
+  ): MaterializationContentBinding | undefined {
+    const materializationBundle = this.#bundles.get(
+      bundleKey(
+        materializationProfile.bundle_id,
+        materializationProfile.bundle_digest,
+      ),
+    );
+    const artBundle = this.#bundles.get(
+      bundleKey(artProfile.bundle_id, artProfile.bundle_digest),
+    );
+    if (materializationBundle === undefined || artBundle === undefined) {
+      return undefined;
+    }
+    const profile =
+      materializationBundle.presentationMaterializationProfileMap.get(
+        materializationProfile.profile_id,
+      );
+    const art = artBundle.presentationArtProfiles.get(artProfile.profile_id);
+    if (profile === undefined || art === undefined) {
+      return undefined;
+    }
+    if (
+      expectString(
+        profile,
+        "generation_policy",
+        "MaterializationProfile",
+      ) !== "on_demand"
+    ) {
+      throw new EngineFault(
+        "content.catalog.materialization_generation_disabled",
+        "MaterializationRequest references a profile whose generation_policy is disabled",
+        {
+          bundle_id: materializationProfile.bundle_id,
+          bundle_digest: materializationProfile.bundle_digest,
+          materialization_profile_id: materializationProfile.profile_id,
+        },
+      );
+    }
+    if (
+      profile.art_profile_id !== undefined &&
+      (
+        materializationProfile.bundle_id !== artProfile.bundle_id ||
+        materializationProfile.bundle_digest !== artProfile.bundle_digest ||
+        expectString(
+          profile,
+          "art_profile_id",
+          "MaterializationProfile",
+        ) !== artProfile.profile_id
+      )
+    ) {
+      throw new EngineFault(
+        "content.catalog.materialization_art_profile_mismatch",
+        "MaterializationRequest art profile does not match the selected MaterializationProfile",
+        {
+          bundle_id: materializationProfile.bundle_id,
+          bundle_digest: materializationProfile.bundle_digest,
+          materialization_profile_id: materializationProfile.profile_id,
+          art_profile_id: artProfile.profile_id,
+        },
+      );
+    }
+    const dependencyId = expectString(
+      profile,
+      "asset_provider_dependency_id",
+      "MaterializationProfile",
+    );
+    const dependency = materializationBundle.dependencies.get(dependencyId);
+    if (dependency === undefined) {
+      throw new EngineFault(
+        "content.catalog.materialization_provider_dependency_missing",
+        "MaterializationProfile asset_provider dependency is unavailable",
+        {
+          bundle_id: materializationProfile.bundle_id,
+          bundle_digest: materializationProfile.bundle_digest,
+          materialization_profile_id: materializationProfile.profile_id,
+          dependency_id: dependencyId,
+        },
+      );
+    }
+    const fallbackAssetId = expectString(
+      profile,
+      "fallback_asset_id",
+      "MaterializationProfile",
+    );
+    const fallbackAsset =
+      materializationBundle.presentationAssetMap.get(fallbackAssetId);
+    if (fallbackAsset === undefined) {
+      throw new EngineFault(
+        "content.catalog.materialization_fallback_missing",
+        "MaterializationProfile fallback asset is unavailable",
+        {
+          bundle_id: materializationProfile.bundle_id,
+          bundle_digest: materializationProfile.bundle_digest,
+          materialization_profile_id: materializationProfile.profile_id,
+          fallback_asset_id: fallbackAssetId,
+        },
+      );
+    }
+    return Object.freeze({
+      materializationProfile: profile,
+      artProfile: art,
+      fallbackAsset,
+      assetProviderDependency: dependency,
+    });
   }
 
   public findStaticDefinition(
@@ -865,6 +1121,67 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
       presentation,
       rulePluginOperations,
     });
+  }
+
+  public resolveRequiredStageModuleDependency(
+    lock: WorldContentLockDocument,
+    dependencyId: string,
+  ): JsonObject {
+    const content = this.resolveWorldContentBinding(lock);
+    const indexed = this.#bundles.get(
+      bundleKey(content.packId, content.bundleDigest),
+    );
+    if (indexed === undefined) {
+      throw new EngineFault(
+        "content.catalog.world_bundle_missing",
+        "WorldContentLock root bundle is not registered in ContentRuntimeCatalog",
+        {
+          pack_id: content.packId,
+          bundle_digest: content.bundleDigest,
+        },
+      );
+    }
+    const dependency = indexed.dependencies.get(dependencyId);
+    if (dependency === undefined) {
+      throw new EngineFault(
+        "content.catalog.stage_dependency_missing",
+        "StageRef dependency_id is not present in the locked root ContentBundle",
+        {
+          pack_id: content.packId,
+          bundle_digest: content.bundleDigest,
+          dependency_id: dependencyId,
+        },
+      );
+    }
+    const dependencyKind = expectString(
+      dependency,
+      "dependency_kind",
+      "DependencyLock",
+    );
+    if (dependencyKind !== "stage_module") {
+      throw new EngineFault(
+        "content.catalog.stage_dependency_kind_mismatch",
+        "StageRef dependency must have dependency_kind=stage_module",
+        {
+          pack_id: content.packId,
+          bundle_digest: content.bundleDigest,
+          dependency_id: dependencyId,
+          dependency_kind: dependencyKind,
+        },
+      );
+    }
+    if (dependency["required"] !== true) {
+      throw new EngineFault(
+        "content.catalog.stage_dependency_not_required",
+        "StageRef dependency must be required by the locked ContentBundle",
+        {
+          pack_id: content.packId,
+          bundle_digest: content.bundleDigest,
+          dependency_id: dependencyId,
+        },
+      );
+    }
+    return dependency;
   }
 
   public findPromptFragment(

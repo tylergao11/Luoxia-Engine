@@ -3,13 +3,16 @@ import {
   expectJsonObject,
   expectProperty,
   expectString,
+  jsonEquals,
   type JsonObject,
   type JsonValue,
 } from "@luoxia/contracts-runtime";
 import type { ApplyPacketResultDocument, WorldAuthority } from "@luoxia/world-core";
 
 import type {
+  AssetAcceptancePacketInput,
   AuthoritativePacketBuilder,
+  ContentUpgradePacketInput,
   EventCardClickPacketInput,
 } from "./authoritative-packet-builder.js";
 import type {
@@ -45,6 +48,14 @@ export interface WorldMutationOrchestrator {
   commitEventCardClick(
     input: EventCardClickPacketInput,
   ): Promise<EventCardClickCommitResult>;
+
+  commitAssetAcceptance(
+    input: AssetAcceptancePacketInput,
+  ): Promise<ApplyPacketResultDocument>;
+
+  commitContentUpgrade(
+    input: ContentUpgradePacketInput,
+  ): Promise<ApplyPacketResultDocument>;
 }
 
 export interface WorldMutationOrchestratorDependencies {
@@ -116,6 +127,141 @@ class DefaultWorldMutationOrchestrator implements WorldMutationOrchestrator {
       });
     }
   }
+
+  public async commitAssetAcceptance(
+    input: AssetAcceptancePacketInput,
+  ): Promise<ApplyPacketResultDocument> {
+    const acceptanceId = expectString(
+      input.acceptance.value,
+      "acceptance_id",
+      "AssetAcceptance",
+    );
+    const duplicate =
+      await this.#committedPackets.readByPacketId(acceptanceId);
+    if (duplicate !== undefined) {
+      return recoverAssetAcceptanceResult(duplicate, input);
+    }
+
+    const packet = await this.#packets.buildAssetAcceptance(input);
+    return this.#world.applyPacket(packet.value);
+  }
+
+  public async commitContentUpgrade(
+    input: ContentUpgradePacketInput,
+  ): Promise<ApplyPacketResultDocument> {
+    if (!this.#rulePluginProvenance.isVerified(input.receipt)) {
+      throw new EngineFault(
+        "runtime.mutation.rule_plugin_receipt_required",
+        "Content Upgrade commit requires this runtime's verified RulePlugin receipt",
+      );
+    }
+    const packet = this.#packets.buildContentUpgrade(input);
+    const packetId = expectString(
+      packet.value,
+      "packet_id",
+      "ContentPacket",
+    );
+    const duplicate = await this.#committedPackets.readByPacketId(packetId);
+    if (duplicate !== undefined) {
+      const committedPacket = expectJsonObject(
+        expectProperty(
+          duplicate.event.value,
+          "packet",
+          "CommittedEvent",
+        ),
+        "CommittedEvent.packet",
+      );
+      if (!jsonEquals(committedPacket, packet.value)) {
+        throw new EngineFault(
+          "runtime.mutation.content_upgrade_identity_conflict",
+          "Content Upgrade packet identity is already committed for a different mutation",
+          { upgrade_command_id: packetId },
+        );
+      }
+      return duplicate.result;
+    }
+    return this.#world.applyPacket(packet.value);
+  }
+}
+
+function recoverAssetAcceptanceResult(
+  record: CommittedPacketRecord,
+  input: AssetAcceptancePacketInput,
+): ApplyPacketResultDocument {
+  const acceptance = input.acceptance.value;
+  const request = input.request.value;
+  const acceptanceId = expectString(
+    acceptance,
+    "acceptance_id",
+    "AssetAcceptance",
+  );
+  const requestId = expectString(
+    request,
+    "request_id",
+    "MaterializationRequest",
+  );
+  const worldId = expectString(
+    request,
+    "world_id",
+    "MaterializationRequest",
+  );
+  const bindingId = expectString(
+    acceptance,
+    "binding_id",
+    "AssetAcceptance",
+  );
+  const packet = expectJsonObject(
+    expectProperty(record.event.value, "packet", "CommittedEvent"),
+    "CommittedEvent.packet",
+  );
+  const source = expectJsonObject(
+    expectProperty(packet, "source", "ContentPacket"),
+    "ContentPacket.source",
+  );
+  const ops = asObjectArray(
+    expectProperty(packet, "ops", "ContentPacket"),
+    "ContentPacket.ops",
+  );
+  const binding =
+    ops.length === 1
+      ? expectJsonObject(
+          expectProperty(ops[0] as JsonObject, "binding", "EffectOp"),
+          "VisualBindingUpsertOp.binding",
+        )
+      : undefined;
+
+  if (
+    expectString(packet, "packet_id", "ContentPacket") !== acceptanceId ||
+    expectString(packet, "cause_id", "ContentPacket") !== requestId ||
+    expectString(packet, "world_id", "ContentPacket") !== worldId ||
+    expectString(source, "source_kind", "PacketSource") !==
+      "asset_acceptance" ||
+    expectString(source, "acceptance_id", "PacketSource") !== acceptanceId ||
+    ops.length !== 1 ||
+    expectString(ops[0] as JsonObject, "op", "EffectOp") !==
+      "visual_binding.upsert" ||
+    binding === undefined ||
+    expectString(binding, "binding_id", "VisualBindingDraft") !== bindingId ||
+    expectString(
+      binding,
+      "source_request_id",
+      "VisualBindingDraft",
+    ) !== requestId ||
+    expectString(binding, "acceptance_id", "VisualBindingDraft") !==
+      acceptanceId
+  ) {
+    throw new EngineFault(
+      "runtime.mutation.asset_acceptance_identity_conflict",
+      "AssetAcceptance packet identity is already committed for a different world mutation",
+      {
+        acceptance_id: acceptanceId,
+        request_id: requestId,
+        world_id: worldId,
+        binding_id: bindingId,
+      },
+    );
+  }
+  return record.result;
 }
 
 function recoverEventCardClickResult(
