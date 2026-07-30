@@ -14,7 +14,7 @@ import {
 import type {
   ContentRulePluginOperationBinding,
   DeterministicContextAuthority,
-} from "@luoxia/world-core/composition";
+} from "@luoxia/world-core";
 
 import type { RulePluginAbiRegistry } from "./rule-plugin-abi.js";
 import type { VerifiedRulePluginInvocationReceipt } from "./rule-plugin-gateway.js";
@@ -754,7 +754,7 @@ function requireWorldExtensionProposal(
     "RulePluginResponse.output",
   );
   throw new EngineFault(
-    "day_cycle.orchestration.stage_unresolved",
+    "day_cycle.orchestration.required_operation_unresolved",
     "Required WorldExtension resolution did not produce a ContentPacket proposal",
     {
       operation_kind: "world_extension.resolve",

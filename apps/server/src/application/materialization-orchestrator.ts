@@ -14,7 +14,7 @@ import {
 import type {
   ContentRuntimeCatalog,
   DeterministicContextAuthority,
-} from "@luoxia/world-core/composition";
+} from "@luoxia/world-core";
 import type { ApplyPacketResultDocument } from "@luoxia/world-core";
 
 import type { AssetProviderRegistry } from "./asset-provider-registry.js";

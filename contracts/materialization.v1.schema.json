@@ -173,7 +173,6 @@
         "status": {
           "enum": [
             "pending",
-            "searching",
             "generating",
             "reviewing",
             "accepted",
@@ -388,9 +387,7 @@
         "slot_id",
         "asset",
         "source_request_id",
-        "acceptance_id",
-        "scope",
-        "state"
+        "acceptance_id"
       ],
       "properties": {
         "binding_id": {
@@ -417,12 +414,6 @@
         },
         "acceptance_id": {
           "$ref": "common.v1.schema.json#/$defs/Uuid"
-        },
-        "scope": {
-          "const": "session"
-        },
-        "state": {
-          "const": "active"
         }
       }
     },
@@ -440,9 +431,7 @@
         "asset",
         "source_request_id",
         "acceptance_id",
-        "scope",
-        "created_by_event_id",
-        "state"
+        "created_by_event_id"
       ],
       "properties": {
         "contract_version": {
@@ -476,17 +465,8 @@
         "acceptance_id": {
           "$ref": "common.v1.schema.json#/$defs/Uuid"
         },
-        "scope": {
-          "const": "session"
-        },
         "created_by_event_id": {
           "$ref": "common.v1.schema.json#/$defs/Uuid"
-        },
-        "state": {
-          "enum": [
-            "active",
-            "retired"
-          ]
         }
       }
     },

@@ -18,6 +18,7 @@ import type {
   ContentPacketDocument,
   DeterministicContextAuthority,
   PacketSemanticGate,
+  StateMachineContractAuthority,
   WorldSnapshotDocument,
 } from "./composition.js";
 
@@ -146,6 +147,7 @@ export interface PacketSemanticGateDependencies {
   readonly contentUpgradeClock: ContentUpgradeAuthorizationClock;
   readonly staticComponentDigestLookup: StaticComponentDigestLookup;
   readonly stageOpenContractLookup: StageOpenContractLookup;
+  readonly stateMachineContracts: StateMachineContractAuthority;
   /** Sole DeterministicContext authenticity authority for this composition. */
   readonly deterministicContextAuthority: DeterministicContextAuthority;
 }
@@ -256,7 +258,167 @@ class DefaultPacketSemanticGate implements PacketSemanticGate {
       ),
       context,
     );
+    assertStateMachineContracts(context);
     assertStageOpenContracts(context);
+  }
+}
+
+function assertStateMachineContracts(context: EvaluationContext): void {
+  const ops = asObjectArray(
+    expectProperty(context.packet, "ops", "ContentPacket"),
+    "ContentPacket.ops",
+  );
+  if (
+    !ops.some((op) =>
+      expectString(op, "op", "EffectOp").startsWith("state_machine."),
+    )
+  ) {
+    return;
+  }
+  const worldContentLock = context.dependencies.contracts.assertObject(
+    CONTRACT_REF.worldContentLock,
+    expectProperty(
+      context.authorityEnvelope,
+      "world_content_lock",
+      "SaveEnvelope",
+    ),
+  );
+  const preconditions = asObjectArray(
+    expectProperty(context.packet, "preconditions", "ContentPacket"),
+    "ContentPacket.preconditions",
+  );
+  const shadowInstances = new Map(
+    asObjectArray(
+      expectProperty(context.worldState, "state_machines", "WorldState"),
+      "WorldState.state_machines",
+    ).map((instance) => [
+      expectString(
+        instance,
+        "instance_id",
+        "StateMachineInstanceState",
+      ),
+      instance,
+    ]),
+  );
+
+  for (const op of ops) {
+    const opName = expectString(op, "op", "EffectOp");
+    if (opName === "state_machine.create") {
+      const machineRef = expectJsonObject(
+        expectProperty(op, "machine", "StateMachineCreateOp"),
+        "StateMachineCreateOp.machine",
+      );
+      const machine =
+        context.dependencies.stateMachineContracts.resolveLockedMachine({
+          worldContentLock,
+          machine: machineRef,
+        });
+      const instanceId = expectString(
+        op,
+        "instance_id",
+        "StateMachineCreateOp",
+      );
+      if (shadowInstances.has(instanceId)) {
+        throw fault(
+          "world.packet.state_machine_instance_duplicate",
+          "State machine create reuses an existing instance ID",
+          { instance_id: instanceId },
+        );
+      }
+      const instance: JsonObject = {
+        instance_id: instanceId,
+        machine: machineRef,
+        owner: expectJsonObject(
+          expectProperty(op, "owner", "StateMachineCreateOp"),
+          "StateMachineCreateOp.owner",
+        ),
+        state_id: expectString(
+          machine.initialState,
+          "state_id",
+          "MachineStateDefinition",
+        ),
+        entered_day: expectInteger(
+          expectJsonObject(
+            expectProperty(context.worldState, "day_cycle", "WorldState"),
+            "WorldState.day_cycle",
+          ),
+          "day",
+          "DayCycleState",
+        ),
+      };
+      context.dependencies.stateMachineContracts.assertLockedInstance({
+        worldContentLock,
+        worldId: context.worldId,
+        instance,
+      });
+      shadowInstances.set(instanceId, instance);
+      continue;
+    }
+    if (opName !== "state_machine.transition") {
+      continue;
+    }
+
+    const instanceId = expectString(
+      op,
+      "machine_instance_id",
+      "StateMachineTransitionOp",
+    );
+    const instance = shadowInstances.get(instanceId);
+    if (instance === undefined) {
+      throw fault(
+        "world.packet.state_machine_instance_missing",
+        "State machine transition references an absent instance",
+        { instance_id: instanceId },
+      );
+    }
+    const transitionId = expectString(
+      op,
+      "transition_id",
+      "StateMachineTransitionOp",
+    );
+    const resolved =
+      context.dependencies.stateMachineContracts.resolveLockedTransition({
+        worldContentLock,
+        worldId: context.worldId,
+        instance,
+        transitionId,
+      });
+    shadowInstances.set(instanceId, {
+      ...instance,
+      state_id: expectString(
+        resolved.toState,
+        "state_id",
+        "MachineStateDefinition",
+      ),
+    });
+    const guard = resolved.transition["guard"];
+    if (guard === undefined) {
+      continue;
+    }
+    const guardRule = expectJsonObject(
+      guard,
+      "MachineTransitionDefinition.guard",
+    );
+    const matchingGuardEvidence = preconditions.filter(
+      (precondition) =>
+        expectString(precondition, "kind", "PacketPrecondition") ===
+          "rule.holds" &&
+        jsonEquals(
+          expectProperty(precondition, "rule", "PacketPrecondition"),
+          guardRule,
+        ),
+    );
+    if (matchingGuardEvidence.length !== 1) {
+      throw fault(
+        "world.packet.state_machine_guard_evidence",
+        "Guarded state machine transition requires exactly one matching rule.holds precondition",
+        {
+          instance_id: instanceId,
+          transition_id: transitionId,
+          matching_preconditions: matchingGuardEvidence.length,
+        },
+      );
+    }
   }
 }
 
@@ -1422,8 +1584,6 @@ async function assertAssetAcceptanceSource(
       asset: expectProperty(acceptance, "asset", "AssetAcceptance"),
       source_request_id: requestId,
       acceptance_id: acceptanceId,
-      scope: "session",
-      state: "active",
     },
   };
   assertJsonEqual(

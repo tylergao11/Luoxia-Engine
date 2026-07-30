@@ -779,7 +779,6 @@ function resolveCandidateAsset(input: {
     );
     const matches = input.visualBindings.filter(
       (binding) =>
-        expectString(binding, "state", "VisualBinding") === "active" &&
         expectString(binding, "world_id", "VisualBinding") ===
           input.worldId &&
         expectString(binding, "slot_id", "VisualBinding") ===
@@ -794,7 +793,7 @@ function resolveCandidateAsset(input: {
     if (matches.length > 1) {
       throw new EngineFault(
         "session.render_node.visual_binding_ambiguous",
-        "Multiple active VisualBindings target the same entity revision and slot",
+        "Multiple VisualBindings target the same entity revision and slot",
         {
           binding_id: input.candidate.bindingId,
           entity_id: entityId,

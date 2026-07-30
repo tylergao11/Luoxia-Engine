@@ -3,8 +3,10 @@ import type {
   JsonDigest,
 } from "@luoxia/contracts-runtime";
 import type {
+  ContentRuntimeCatalog,
   ContentUpgradeAuthorizationAuthority,
   DeterministicContextAuthority,
+  StateMachineContractAuthority,
 } from "@luoxia/world-core";
 
 import {
@@ -21,6 +23,7 @@ import type { StageContractAuthority } from "./stage-contract-authority.js";
 export interface RulePluginGatewayDependencies {
   readonly contracts: ContractValidator;
   readonly digest: JsonDigest;
+  readonly catalog: ContentRuntimeCatalog;
   readonly adapter: RulePluginAdapter;
   readonly modelProvenance: ModelInvocationProvenanceVerifier;
   readonly deterministicContextAuthority: DeterministicContextAuthority;
@@ -28,6 +31,7 @@ export interface RulePluginGatewayDependencies {
     ContentUpgradeAuthorizationAuthority;
   readonly contentUpgradeClock: RulePluginContentUpgradeClock;
   readonly stageContracts: StageContractAuthority;
+  readonly stateMachineContracts: StateMachineContractAuthority;
 }
 
 /**
@@ -46,10 +50,12 @@ export function createRulePluginGateway(
     createRulePluginSemanticGate({
       contracts: dependencies.contracts,
       digest: dependencies.digest,
+      catalog: dependencies.catalog,
       contentUpgradeAuthorizations:
         dependencies.contentUpgradeAuthorizationAuthority,
       contentUpgradeClock: dependencies.contentUpgradeClock,
       stageContracts: dependencies.stageContracts,
+      stateMachineContracts: dependencies.stateMachineContracts,
     }),
     dependencies.modelProvenance,
     dependencies.deterministicContextAuthority,

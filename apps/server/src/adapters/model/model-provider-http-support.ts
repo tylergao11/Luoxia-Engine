@@ -1,9 +1,16 @@
 import {
   EngineFault,
+  MODEL_OUTPUT_SCHEMA_REF_BY_REQUEST_KIND,
   expectJsonObject,
+  type ContractSchemaExporter,
   type JsonObject,
   type JsonValue,
 } from "@luoxia/contracts-runtime";
+
+export type ProviderTokenCountRead =
+  | { readonly state: "absent" }
+  | { readonly state: "invalid" }
+  | { readonly state: "valid"; readonly value: number };
 
 export async function readBoundedProviderResponseText(input: {
   readonly response: Response;
@@ -100,108 +107,51 @@ export function parseProviderJsonObject(input: {
   return expectJsonObject(candidate as JsonValue, input.message);
 }
 
-export function copyProviderJsonObject(input: {
-  readonly candidate: unknown;
-  readonly field: string;
+/**
+ * Usage telemetry must never invent zero for a missing or malformed provider
+ * field. Callers convert invalid observations into an operational status while
+ * preserving an otherwise valid model output.
+ */
+export function readProviderTokenCount(
+  object: JsonObject,
+  field: string,
+): ProviderTokenCountRead {
+  const candidate = object[field];
+  if (candidate === undefined) {
+    return Object.freeze({ state: "absent" });
+  }
+  if (!Number.isSafeInteger(candidate) || (candidate as number) < 0) {
+    return Object.freeze({ state: "invalid" });
+  }
+  return Object.freeze({
+    state: "valid",
+    value: candidate as number,
+  });
+}
+
+export function deriveProviderOutputSchema(input: {
+  readonly contracts: ContractSchemaExporter;
+  readonly requestKind: string;
   readonly providerLabel: string;
 }): JsonObject {
   if (
-    typeof input.candidate !== "object" ||
-    input.candidate === null ||
-    Array.isArray(input.candidate)
+    !Object.prototype.hasOwnProperty.call(
+      MODEL_OUTPUT_SCHEMA_REF_BY_REQUEST_KIND,
+      input.requestKind,
+    )
   ) {
-    throw providerJsonConfigFault(
-      input,
-      "must be a JSON object",
+    throw new EngineFault(
+      "model.provider.request_kind_not_configured",
+      `${input.providerLabel} has no formal output contract for the configured request kind`,
+      {
+        provider: input.providerLabel,
+        request_kind: input.requestKind,
+      },
     );
   }
-  const copied = copyProviderJsonValue(
-    input.candidate,
-    input.field,
-    input.providerLabel,
-  );
-  if (
-    typeof copied !== "object" ||
-    copied === null ||
-    Array.isArray(copied) ||
-    Object.keys(copied).length === 0
-  ) {
-    throw providerJsonConfigFault(
-      input,
-      "must be a non-empty JSON object",
-    );
-  }
-  return copied as JsonObject;
-}
-
-function copyProviderJsonValue(
-  candidate: unknown,
-  path: string,
-  providerLabel: string,
-): JsonValue {
-  if (
-    candidate === null ||
-    typeof candidate === "string" ||
-    typeof candidate === "boolean"
-  ) {
-    return candidate;
-  }
-  if (typeof candidate === "number") {
-    if (!Number.isFinite(candidate)) {
-      throw providerJsonValueFault(providerLabel, path);
-    }
-    return candidate;
-  }
-  if (Array.isArray(candidate)) {
-    return Object.freeze(
-      candidate.map((entry, index) =>
-        copyProviderJsonValue(
-          entry,
-          `${path}[${index}]`,
-          providerLabel,
-        ),
-      ),
-    );
-  }
-  if (typeof candidate === "object") {
-    const prototype = Object.getPrototypeOf(candidate);
-    if (prototype !== Object.prototype && prototype !== null) {
-      throw providerJsonValueFault(providerLabel, path);
-    }
-    const copied: Record<string, JsonValue> = {};
-    for (const [key, value] of Object.entries(candidate)) {
-      copied[key] = copyProviderJsonValue(
-        value,
-        `${path}.${key}`,
-        providerLabel,
-      );
-    }
-    return Object.freeze(copied);
-  }
-  throw providerJsonValueFault(providerLabel, path);
-}
-
-function providerJsonConfigFault(
-  input: {
-    readonly field: string;
-    readonly providerLabel: string;
-  },
-  reason: string,
-): EngineFault {
-  return new EngineFault(
-    "model.provider.config_invalid",
-    `${input.providerLabel} ${input.field} ${reason}`,
-    { field: input.field },
-  );
-}
-
-function providerJsonValueFault(
-  providerLabel: string,
-  path: string,
-): EngineFault {
-  return new EngineFault(
-    "model.provider.config_invalid",
-    `${providerLabel} output_schema must contain JSON values only`,
-    { field: path },
+  const requestKind =
+    input.requestKind as keyof typeof MODEL_OUTPUT_SCHEMA_REF_BY_REQUEST_KIND;
+  return input.contracts.exportStandaloneSchema(
+    MODEL_OUTPUT_SCHEMA_REF_BY_REQUEST_KIND[requestKind],
   );
 }

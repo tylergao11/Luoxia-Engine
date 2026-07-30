@@ -17,7 +17,7 @@ import type {
   ContentRuntimeCatalog,
   ContentUpgradeAuthorizationAuthority,
   DeterministicContextAuthority,
-} from "@luoxia/world-core/composition";
+} from "@luoxia/world-core";
 import type { ApplyPacketResultDocument } from "@luoxia/world-core";
 
 import type {

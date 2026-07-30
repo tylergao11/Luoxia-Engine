@@ -15,6 +15,7 @@ import {
 } from "@luoxia/contracts-runtime";
 import type {
   ContentRuntimeCatalog,
+  StateMachineContractAuthority,
   WorldSnapshotDocument,
 } from "@luoxia/world-core";
 
@@ -97,6 +98,7 @@ export interface RuntimeSaveCompatibilityDependencies {
   readonly rulePlugins: RulePluginAbiRegistry;
   readonly stageModules: StageModuleRegistry;
   readonly stageContracts: StageContractAuthority;
+  readonly stateMachineContracts: StateMachineContractAuthority;
 }
 
 export interface RuntimeSaveServiceDependencies {
@@ -134,6 +136,7 @@ class DefaultRuntimeSaveCompatibility implements RuntimeSaveCompatibility {
   readonly #rulePlugins: RulePluginAbiRegistry;
   readonly #stageModules: StageModuleRegistry;
   readonly #stageContracts: StageContractAuthority;
+  readonly #stateMachineContracts: StateMachineContractAuthority;
 
   public constructor(dependencies: RuntimeSaveCompatibilityDependencies) {
     dependencies.contracts.assert(
@@ -191,6 +194,7 @@ class DefaultRuntimeSaveCompatibility implements RuntimeSaveCompatibility {
     this.#rulePlugins = dependencies.rulePlugins;
     this.#stageModules = dependencies.stageModules;
     this.#stageContracts = dependencies.stageContracts;
+    this.#stateMachineContracts = dependencies.stateMachineContracts;
   }
 
   public buildInitialEnvelope(input: {
@@ -243,11 +247,18 @@ class DefaultRuntimeSaveCompatibility implements RuntimeSaveCompatibility {
           "WorldSnapshot",
         ),
         event_cursor: worldRevision,
-        asset_hashes: [],
         migration_history: [],
       },
     );
     assertSaveEnvelopeRelationships(this.#contracts, envelope);
+    this.#stateMachineContracts.assertLockedWorldStateInstances({
+      worldContentLock,
+      worldId,
+      worldState: expectJsonObject(
+        expectProperty(envelope.value, "world_state", "SaveEnvelope"),
+        "SaveEnvelope.world_state",
+      ),
+    });
     return envelope;
   }
 
@@ -289,6 +300,14 @@ class DefaultRuntimeSaveCompatibility implements RuntimeSaveCompatibility {
       CONTRACT_REF.worldContentLock,
       expectProperty(value, "world_content_lock", "SaveEnvelope"),
     );
+    this.#stateMachineContracts.assertLockedWorldStateInstances({
+      worldContentLock,
+      worldId: expectString(value, "world_id", "SaveEnvelope"),
+      worldState: expectJsonObject(
+        expectProperty(value, "world_state", "SaveEnvelope"),
+        "SaveEnvelope.world_state",
+      ),
+    });
     const expected = this.#resolveLockProfile(worldContentLock);
     assertLockSetMatches(
       asObjectArray(

@@ -36,9 +36,7 @@ export interface SaveWorldRow {
   readonly dependency_bundle_locks_document: unknown;
   readonly rule_plugin_locks_document: unknown;
   readonly stage_module_locks_document: unknown;
-  readonly event_cursor_text: string;
   readonly event_log_floor_revision_text: string;
-  readonly asset_hashes_document: unknown;
   readonly migration_history_document: unknown;
   readonly updated_at: Date | string;
 }
@@ -113,11 +111,6 @@ class PostgresRuntimeSaveRepository implements RuntimeSaveRepository {
       "world_revision",
       "SaveEnvelope",
     );
-    const eventCursor = expectInteger(
-      value,
-      "event_cursor",
-      "SaveEnvelope",
-    );
     const timestamp = canonicalTimestamp(persistedAt);
 
     try {
@@ -136,9 +129,7 @@ class PostgresRuntimeSaveRepository implements RuntimeSaveRepository {
                dependency_bundle_locks_document,
                rule_plugin_locks_document,
                stage_module_locks_document,
-               event_cursor,
                event_log_floor_revision,
-               asset_hashes_document,
                migration_history_document,
                updated_at
              ) VALUES (
@@ -152,10 +143,8 @@ class PostgresRuntimeSaveRepository implements RuntimeSaveRepository {
                $8::jsonb,
                $9::jsonb,
                $10::bigint,
-               $11::bigint,
-               $12::jsonb,
-               $13::jsonb,
-               $14::timestamptz
+               $11::jsonb,
+               $12::timestamptz
              )
              RETURNING
                world_id::text AS world_id,
@@ -167,10 +156,8 @@ class PostgresRuntimeSaveRepository implements RuntimeSaveRepository {
                dependency_bundle_locks_document,
                rule_plugin_locks_document,
                stage_module_locks_document,
-               event_cursor::text AS event_cursor_text,
                event_log_floor_revision::text
                  AS event_log_floor_revision_text,
-               asset_hashes_document,
                migration_history_document,
                updated_at`,
             [
@@ -217,11 +204,7 @@ class PostgresRuntimeSaveRepository implements RuntimeSaveRepository {
                   "SaveEnvelope",
                 ),
               ),
-              eventCursor.toString(),
-              eventCursor.toString(),
-              JSON.stringify(
-                expectProperty(value, "asset_hashes", "SaveEnvelope"),
-              ),
+              worldRevision.toString(),
               JSON.stringify(
                 expectProperty(
                   value,
@@ -291,12 +274,6 @@ export function assembleSaveEnvelopeCandidate(
     "Save world revision",
     { world_id: row.world_id, revision: row.revision_text },
   );
-  const eventCursor = parseSafeUnsignedInteger(
-    row.event_cursor_text,
-    "runtime.save.database_corrupt",
-    "Save event cursor",
-    { world_id: row.world_id, event_cursor: row.event_cursor_text },
-  );
   const eventHistoryFloor = parseSafeUnsignedInteger(
     row.event_log_floor_revision_text,
     "runtime.save.database_corrupt",
@@ -306,14 +283,13 @@ export function assembleSaveEnvelopeCandidate(
       event_log_floor_revision: row.event_log_floor_revision_text,
     },
   );
-  if (eventCursor !== revision || eventHistoryFloor > eventCursor) {
+  if (eventHistoryFloor > revision) {
     throw new EngineFault(
       "runtime.save.database_corrupt",
-      "PostgreSQL save cursor relationships are invalid",
+      "PostgreSQL event history floor exceeds the world revision",
       {
         world_id: row.world_id,
         world_revision: revision,
-        event_cursor: eventCursor,
         event_log_floor_revision: eventHistoryFloor,
       },
     );
@@ -336,7 +312,6 @@ export function assembleSaveEnvelopeCandidate(
     row.stage_module_locks_document,
     "Save world stage_module_locks_document",
   );
-  assertJsonValue(row.asset_hashes_document, "Save world asset_hashes_document");
   assertJsonValue(
     row.migration_history_document,
     "Save world migration_history_document",
@@ -354,8 +329,7 @@ export function assembleSaveEnvelopeCandidate(
     rule_plugin_locks: row.rule_plugin_locks_document,
     stage_module_locks: row.stage_module_locks_document,
     world_state: row.state_document,
-    event_cursor: eventCursor,
-    asset_hashes: row.asset_hashes_document,
+    event_cursor: revision,
     migration_history: row.migration_history_document,
   });
 }
@@ -370,10 +344,8 @@ export function selectSaveWorldColumns(): string {
                  dependency_bundle_locks_document,
                  rule_plugin_locks_document,
                  stage_module_locks_document,
-                 event_cursor::text AS event_cursor_text,
                  event_log_floor_revision::text
                    AS event_log_floor_revision_text,
-                 asset_hashes_document,
                  migration_history_document,
                  updated_at`;
 }

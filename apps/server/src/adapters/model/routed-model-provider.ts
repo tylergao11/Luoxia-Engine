@@ -1,9 +1,7 @@
-import {
-  EngineFault,
-  expectString,
-} from "@luoxia/contracts-runtime";
+import { EngineFault } from "@luoxia/contracts-runtime";
 
 import type {
+  ModelProviderInvocationResult,
   ModelProvider,
   ResolvedModelInvocation,
 } from "../../application/model-gateway.js";
@@ -88,21 +86,10 @@ class RoutedModelProvider implements ModelProvider {
 
   public invoke(
     resolved: ResolvedModelInvocation,
-  ): Promise<unknown> {
-    const request = resolved.request.value;
-    const modelProfileId = expectString(
-      request,
-      "model_profile_id",
-      "ModelRequest",
-    );
-    const requestKind = expectString(
-      request,
-      "request_kind",
-      "ModelRequest",
-    );
+  ): Promise<ModelProviderInvocationResult> {
     return this.#requireBinding(
-      modelProfileId,
-      requestKind,
+      resolved.modelProfileId,
+      resolved.requestKind,
     ).provider.invoke(resolved);
   }
 

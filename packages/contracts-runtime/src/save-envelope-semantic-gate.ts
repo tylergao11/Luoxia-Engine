@@ -55,6 +55,7 @@ export function assertSaveEnvelopeRelationships(
     world_revision: worldRevision,
     world_state: worldState,
   });
+  assertStateMachineRelationships(worldState, worldId);
   assertStageInstanceRelationships(worldState, worldId);
   assertVisualBindingRelationships(worldState, worldId);
   const worldContentLock = expectJsonObject(
@@ -106,6 +107,185 @@ export function assertSaveEnvelopeRelationships(
     "StageModuleLock",
     "runtime.save.stage_module_lock_duplicate",
   );
+}
+
+function assertStateMachineRelationships(
+  worldState: JsonObject,
+  worldId: string,
+): void {
+  const entitiesById = new Map<string, JsonObject[]>();
+  for (const entity of asObjectArray(
+    expectProperty(worldState, "entities", "WorldState"),
+    "WorldState.entities",
+  )) {
+    const entityId = expectString(entity, "entity_id", "EntityState");
+    const matches = entitiesById.get(entityId) ?? [];
+    matches.push(entity);
+    entitiesById.set(entityId, matches);
+  }
+
+  const dayCycle = expectJsonObject(
+    expectProperty(worldState, "day_cycle", "WorldState"),
+    "WorldState.day_cycle",
+  );
+  const currentDay = expectInteger(dayCycle, "day", "DayCycleState");
+  if (!Number.isSafeInteger(currentDay)) {
+    throw new EngineFault(
+      "runtime.save.day_unsafe",
+      "SaveEnvelope DayCycleState.day must be a safe integer",
+      { world_id: worldId, day: currentDay },
+    );
+  }
+
+  const instanceIds = new Set<string>();
+  const characterOwners = new Set<string>();
+  const worldMachineOwners = new Set<string>();
+  for (const instance of asObjectArray(
+    expectProperty(worldState, "state_machines", "WorldState"),
+    "WorldState.state_machines",
+  )) {
+    const instanceId = expectString(
+      instance,
+      "instance_id",
+      "StateMachineInstanceState",
+    );
+    if (instanceIds.has(instanceId)) {
+      throw new EngineFault(
+        "runtime.save.state_machine_instance_id_duplicate",
+        "SaveEnvelope StateMachineInstanceState identities must be unique",
+        { world_id: worldId, machine_instance_id: instanceId },
+      );
+    }
+    instanceIds.add(instanceId);
+
+    const enteredDay = expectInteger(
+      instance,
+      "entered_day",
+      "StateMachineInstanceState",
+    );
+    if (!Number.isSafeInteger(enteredDay)) {
+      throw new EngineFault(
+        "runtime.save.state_machine_entered_day_unsafe",
+        "StateMachineInstanceState.entered_day must be a safe integer",
+        {
+          world_id: worldId,
+          machine_instance_id: instanceId,
+          entered_day: enteredDay,
+        },
+      );
+    }
+    if (enteredDay > currentDay) {
+      throw new EngineFault(
+        "runtime.save.state_machine_entered_day_future",
+        "StateMachineInstanceState.entered_day cannot be later than the current world day",
+        {
+          world_id: worldId,
+          machine_instance_id: instanceId,
+          entered_day: enteredDay,
+          current_day: currentDay,
+        },
+      );
+    }
+
+    const owner = expectJsonObject(
+      expectProperty(instance, "owner", "StateMachineInstanceState"),
+      "StateMachineInstanceState.owner",
+    );
+    const ownerKind = expectString(
+      owner,
+      "owner_kind",
+      "StateMachineOwner",
+    );
+    if (ownerKind === "character") {
+      const entityId = expectString(
+        owner,
+        "entity_id",
+        "StateMachineOwner",
+      );
+      const matches = entitiesById.get(entityId) ?? [];
+      if (matches.length !== 1) {
+        throw new EngineFault(
+          "runtime.save.state_machine_owner_unresolved",
+          "Character StateMachine owner must resolve to exactly one EntityState",
+          {
+            world_id: worldId,
+            machine_instance_id: instanceId,
+            entity_id: entityId,
+            matches: matches.length,
+          },
+        );
+      }
+      if (characterOwners.has(entityId)) {
+        throw new EngineFault(
+          "runtime.save.character_state_machine_ambiguous",
+          "An Entity can own only one character StateMachine instance",
+          {
+            world_id: worldId,
+            machine_instance_id: instanceId,
+            entity_id: entityId,
+          },
+        );
+      }
+      characterOwners.add(entityId);
+      continue;
+    }
+
+    if (ownerKind === "world") {
+      const ownerWorldId = expectString(
+        owner,
+        "world_id",
+        "StateMachineOwner",
+      );
+      if (ownerWorldId !== worldId) {
+        throw new EngineFault(
+          "runtime.save.state_machine_owner_world_mismatch",
+          "World StateMachine owner must match the SaveEnvelope world",
+          {
+            world_id: worldId,
+            machine_instance_id: instanceId,
+            owner_world_id: ownerWorldId,
+          },
+        );
+      }
+      const machine = expectJsonObject(
+        expectProperty(instance, "machine", "StateMachineInstanceState"),
+        "StateMachineInstanceState.machine",
+      );
+      const ownerIdentity = JSON.stringify([
+        ownerWorldId,
+        expectString(machine, "bundle_id", "StateMachineCatalogRef"),
+        expectString(
+          machine,
+          "bundle_digest",
+          "StateMachineCatalogRef",
+        ),
+        expectString(machine, "local_id", "StateMachineCatalogRef"),
+      ]);
+      if (worldMachineOwners.has(ownerIdentity)) {
+        throw new EngineFault(
+          "runtime.save.world_state_machine_ambiguous",
+          "A world can own only one instance of the same StateMachine definition",
+          {
+            world_id: worldId,
+            machine_instance_id: instanceId,
+            machine_identity: ownerIdentity,
+          },
+        );
+      }
+      worldMachineOwners.add(ownerIdentity);
+      continue;
+    }
+
+    throw new EngineFault(
+      "runtime.save.state_machine_owner_kind_unsupported",
+      "StateMachineOwner.owner_kind is unsupported",
+      {
+        world_id: worldId,
+        machine_instance_id: instanceId,
+        owner_kind: ownerKind,
+      },
+    );
+  }
 }
 
 function assertStageInstanceRelationships(
@@ -228,7 +408,7 @@ function assertVisualBindingRelationships(
   worldId: string,
 ): void {
   const bindingIds = new Set<string>();
-  const activeIdentityKeys = new Set<string>();
+  const runtimeIdentityKeys = new Set<string>();
   for (const binding of asObjectArray(
     expectProperty(
       worldState,
@@ -271,21 +451,124 @@ function assertVisualBindingRelationships(
       binding,
       "VisualBinding",
     );
-    if (expectString(binding, "state", "VisualBinding") !== "active") {
-      continue;
-    }
-    if (activeIdentityKeys.has(runtimeIdentityKey)) {
+    assertVisualBindingSubjectCurrent(binding, worldState, worldId);
+    if (runtimeIdentityKeys.has(runtimeIdentityKey)) {
       throw new EngineFault(
-        "runtime.save.visual_binding_active_identity_duplicate",
-        "SaveEnvelope contains multiple active VisualBindings for one runtime subject revision and slot",
+        "runtime.save.visual_binding_identity_duplicate",
+        "SaveEnvelope contains multiple VisualBindings for one runtime subject revision and slot",
         {
           world_id: worldId,
           binding_id: bindingId,
-          active_identity_key: runtimeIdentityKey,
+          runtime_identity_key: runtimeIdentityKey,
         },
       );
     }
-    activeIdentityKeys.add(runtimeIdentityKey);
+    runtimeIdentityKeys.add(runtimeIdentityKey);
+  }
+}
+
+function assertVisualBindingSubjectCurrent(
+  binding: JsonObject,
+  worldState: JsonObject,
+  worldId: string,
+): void {
+  const bindingId = expectString(binding, "binding_id", "VisualBinding");
+  const subjectRevision = expectInteger(
+    binding,
+    "subject_revision",
+    "VisualBinding",
+  );
+  const subject = expectJsonObject(
+    expectProperty(binding, "subject", "VisualBinding"),
+    "VisualBinding.subject",
+  );
+  const subjectKind = expectString(subject, "kind", "SubjectRef");
+  if (subjectKind === "entity") {
+    const entityRef = expectJsonObject(
+      expectProperty(subject, "entity", "SubjectRef"),
+      "SubjectRef.entity",
+    );
+    const entityId = expectString(entityRef, "entity_id", "EntityRef");
+    const current = asObjectArray(
+      expectProperty(worldState, "entities", "WorldState"),
+      "WorldState.entities",
+    ).find(
+      (entity) =>
+        expectString(entity, "entity_id", "EntityState") === entityId,
+    );
+    if (
+      current === undefined ||
+      expectString(current, "state", "EntityState") !== "active" ||
+      expectInteger(current, "revision", "EntityState") !== subjectRevision
+    ) {
+      throw new EngineFault(
+        "runtime.save.visual_binding_subject_not_current",
+        "VisualBinding must target the current active Entity revision",
+        {
+          world_id: worldId,
+          binding_id: bindingId,
+          subject_kind: subjectKind,
+          subject_id: entityId,
+          subject_revision: subjectRevision,
+        },
+      );
+    }
+    return;
+  }
+  if (subjectKind === "definition") {
+    const definitionRef = expectJsonObject(
+      expectProperty(subject, "definition", "SubjectRef"),
+      "SubjectRef.definition",
+    );
+    if (expectString(definitionRef, "kind", "DefinitionRef") !== "dynamic") {
+      throw new EngineFault(
+        "runtime.save.visual_binding_subject_immutable",
+        "VisualBinding can target only a runtime Entity or DynamicDefinition",
+        {
+          world_id: worldId,
+          binding_id: bindingId,
+          subject_kind: "static_definition",
+        },
+      );
+    }
+    const definitionId = expectString(
+      definitionRef,
+      "definition_id",
+      "DynamicDefinitionRef",
+    );
+    const current = asObjectArray(
+      expectProperty(
+        worldState,
+        "dynamic_definitions",
+        "WorldState",
+      ),
+      "WorldState.dynamic_definitions",
+    ).find(
+      (definition) =>
+        expectString(
+          definition,
+          "definition_id",
+          "DynamicDefinitionState",
+        ) === definitionId,
+    );
+    if (
+      current === undefined ||
+      expectString(current, "state", "DynamicDefinitionState") !== "active" ||
+      expectInteger(current, "revision", "DynamicDefinitionState") !==
+        subjectRevision
+    ) {
+      throw new EngineFault(
+        "runtime.save.visual_binding_subject_not_current",
+        "VisualBinding must target the current active DynamicDefinition revision",
+        {
+          world_id: worldId,
+          binding_id: bindingId,
+          subject_kind: "dynamic_definition",
+          subject_id: definitionId,
+          subject_revision: subjectRevision,
+        },
+      );
+    }
   }
 }
 

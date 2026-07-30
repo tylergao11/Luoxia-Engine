@@ -1,20 +1,22 @@
 import {
   EngineFault,
-  expectInteger,
   expectJsonObject,
   expectProperty,
   expectString,
-  type JsonDigest,
+  type ContractSchemaExporter,
   type JsonObject,
 } from "@luoxia/contracts-runtime";
 
 import type {
+  ModelProviderInvocationResult,
   ModelProvider,
+  ProviderUsageObservation,
   ResolvedModelInvocation,
 } from "../../application/model-gateway.js";
 import {
-  copyProviderJsonObject,
+  deriveProviderOutputSchema,
   parseProviderJsonObject,
+  readProviderTokenCount,
   readBoundedProviderResponseText,
 } from "./model-provider-http-support.js";
 
@@ -23,10 +25,6 @@ const MAX_PROVIDER_RESPONSE_BYTES = 4 * 1024 * 1024;
 export interface OllamaChatModelProviderConfig {
   /** Explicit full native chat endpoint, ending in /api/chat. */
   readonly endpoint: string;
-  /** Deployment ModelProfile identity accepted by this adapter instance. */
-  readonly modelProfileId: string;
-  /** Exact ModelOperationKind accepted by this single-profile adapter. */
-  readonly requestKind: string;
   /** Explicit locally installed Ollama model name. */
   readonly model: string;
   /** Explicit provider timeout; dispatched requests are never retried. */
@@ -35,12 +33,10 @@ export interface OllamaChatModelProviderConfig {
   readonly maxOutputTokens: number;
   /** Explicit sampling temperature; no Ollama default is inherited. */
   readonly temperature: number;
-  /** JSON Schema derived by deployment from the formal ModelOutput contract. */
-  readonly outputSchema: JsonObject;
 }
 
 export interface OllamaChatModelProviderDependencies {
-  readonly digest: JsonDigest;
+  readonly contracts: ContractSchemaExporter;
   readonly config: OllamaChatModelProviderConfig;
 }
 
@@ -56,32 +52,20 @@ export function createOllamaChatModelProvider(
 }
 
 class OllamaChatModelProvider implements ModelProvider {
-  readonly #digest: JsonDigest;
+  readonly #contracts: ContractSchemaExporter;
   readonly #endpoint: string;
-  readonly #modelProfileId: string;
-  readonly #requestKind: string;
   readonly #model: string;
   readonly #timeoutMs: number;
   readonly #maxOutputTokens: number;
   readonly #temperature: number;
-  readonly #outputSchema: JsonObject;
+  readonly #outputSchemas = new Map<string, JsonObject>();
 
   public constructor(
     dependencies: OllamaChatModelProviderDependencies,
   ) {
-    this.#digest = dependencies.digest;
+    this.#contracts = dependencies.contracts;
     this.#endpoint = validateOllamaEndpoint(
       dependencies.config.endpoint,
-    );
-    this.#modelProfileId = requireNonemptyText(
-      dependencies.config.modelProfileId,
-      "model_profile_id",
-      128,
-    );
-    this.#requestKind = requireNonemptyText(
-      dependencies.config.requestKind,
-      "request_kind",
-      128,
     );
     this.#model = requireNonemptyText(
       dependencies.config.model,
@@ -99,58 +83,25 @@ class OllamaChatModelProvider implements ModelProvider {
     this.#temperature = requireTemperature(
       dependencies.config.temperature,
     );
-    this.#outputSchema = copyProviderJsonObject({
-      candidate: dependencies.config.outputSchema,
-      field: "output_schema",
-      providerLabel: "Ollama",
-    });
   }
 
   public assertCanInvoke(input: {
     readonly modelProfileId: string;
     readonly requestKind: string;
   }): void {
-    if (input.modelProfileId !== this.#modelProfileId) {
-      throw new EngineFault(
-        "model.provider.profile_not_configured",
-        "Ollama chat adapter is not configured for the requested ModelProfile",
-        {
-          requested_model_profile_id: input.modelProfileId,
-          configured_model_profile_id: this.#modelProfileId,
-          request_kind: input.requestKind,
-        },
-      );
-    }
-    if (input.requestKind !== this.#requestKind) {
-      throw new EngineFault(
-        "model.provider.request_kind_not_configured",
-        "Ollama chat adapter is not configured for the requested operation kind",
-        {
-          model_profile_id: input.modelProfileId,
-          requested_request_kind: input.requestKind,
-          configured_request_kind: this.#requestKind,
-        },
-      );
-    }
+    this.#requireOutputSchema(input.requestKind);
   }
 
   public async invoke(
     resolved: ResolvedModelInvocation,
-  ): Promise<unknown> {
-    const request = resolved.request.value;
-    const requestKind = expectString(
-      request,
-      "request_kind",
-      "ModelRequest",
-    );
+  ): Promise<ModelProviderInvocationResult> {
     this.assertCanInvoke({
-      modelProfileId: expectString(
-        request,
-        "model_profile_id",
-        "ModelRequest",
-      ),
-      requestKind,
+      modelProfileId: resolved.modelProfileId,
+      requestKind: resolved.requestKind,
     });
+    const outputSchema = this.#requireOutputSchema(
+      resolved.requestKind,
+    );
 
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), this.#timeoutMs);
@@ -167,7 +118,7 @@ class OllamaChatModelProvider implements ModelProvider {
           messages: buildOllamaMessages(resolved),
           stream: false,
           think: false,
-          format: this.#outputSchema,
+          format: outputSchema,
           options: {
             num_predict: this.#maxOutputTokens,
             temperature: this.#temperature,
@@ -186,7 +137,7 @@ class OllamaChatModelProvider implements ModelProvider {
           "model.provider.timeout",
           "Ollama chat request exceeded its explicit timeout",
           {
-            model_profile_id: this.#modelProfileId,
+            model_profile_id: resolved.modelProfileId,
             timeout_ms: this.#timeoutMs,
           },
         );
@@ -198,7 +149,7 @@ class OllamaChatModelProvider implements ModelProvider {
         "model.provider.transport_failed",
         "Ollama chat request failed before a verifiable response was received",
         {
-          model_profile_id: this.#modelProfileId,
+          model_profile_id: resolved.modelProfileId,
           cause: error instanceof Error ? error.message : String(error),
         },
       );
@@ -211,7 +162,7 @@ class OllamaChatModelProvider implements ModelProvider {
         "model.provider.http_error",
         "Ollama chat endpoint returned a non-success status",
         {
-          model_profile_id: this.#modelProfileId,
+          model_profile_id: resolved.modelProfileId,
           http_status: response.status,
           provider_error: readOllamaErrorSummary(responseText),
         },
@@ -226,68 +177,83 @@ class OllamaChatModelProvider implements ModelProvider {
       providerResponse,
       this.#model,
     );
-    const residentContext = expectJsonObject(
-      expectProperty(request, "resident_context", "ModelRequest"),
-      "ModelRequest.resident_context",
-    );
-
     return Object.freeze({
-      contract_version: "model-protocol.v1",
-      record_type: "model.response",
-      request_id: expectString(request, "request_id", "ModelRequest"),
-      request_kind: requestKind,
-      basis_revision: expectInteger(
-        request,
-        "basis_revision",
-        "ModelRequest",
-      ),
-      resident_context_digest: expectString(
-        residentContext,
-        "resident_digest",
-        "ResidentContextRef",
-      ),
-      dynamic_input_digest: expectString(
-        request,
-        "dynamic_input_digest",
-        "ModelRequest",
-      ),
-      output_digest: this.#digest.sha256(output),
       output,
+      usage: readOllamaUsage(providerResponse, this.#model),
     });
+  }
+
+  #requireOutputSchema(requestKind: string): JsonObject {
+    const existing = this.#outputSchemas.get(requestKind);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const schema = deriveProviderOutputSchema({
+      contracts: this.#contracts,
+      requestKind,
+      providerLabel: "Ollama",
+    });
+    this.#outputSchemas.set(requestKind, schema);
+    return schema;
   }
 }
 
 function buildOllamaMessages(
   resolved: ResolvedModelInvocation,
 ): readonly JsonObject[] {
-  const messages: JsonObject[] = resolved.prompt_blocks.map(
-    (block) =>
+  const messages: JsonObject[] = resolved.promptTexts.map(
+    (text) =>
       Object.freeze({
         role: "system",
-        content: block.text,
+        content: text,
       }),
   );
   messages.push(
     Object.freeze({
       role: "system",
       content:
-        "Return exactly one JSON object for the requested Luoxia ModelOutput. " +
-        "Set output_kind to the ModelRequest request_kind. Do not add Markdown, prose, or wrapper fields. " +
+        `Return exactly one JSON object for Luoxia operation ${resolved.requestKind}. ` +
+        `Set output_kind to ${JSON.stringify(resolved.requestKind)}. ` +
+        "The following user JSON is the operation input. Do not add Markdown, prose, or wrapper fields. " +
         "The native structured-output grammar supplied with this request is authoritative.",
     }),
   );
   messages.push(
     Object.freeze({
       role: "user",
-      content: JSON.stringify({
-        model_request: resolved.request.value,
-        ...(resolved.event_context === undefined
-          ? {}
-          : { event_context: resolved.event_context }),
-      }),
+      content: JSON.stringify(resolved.modelInput),
     }),
   );
   return Object.freeze(messages);
+}
+
+function readOllamaUsage(
+  response: JsonObject,
+  providerModel: string,
+): ProviderUsageObservation {
+  const input = readProviderTokenCount(response, "prompt_eval_count");
+  const output = readProviderTokenCount(response, "eval_count");
+  if (input.state === "absent" && output.state === "absent") {
+    return Object.freeze({
+      providerKind: "ollama_chat",
+      providerModel,
+      status: "absent",
+    });
+  }
+  if (input.state !== "valid" || output.state !== "valid") {
+    return Object.freeze({
+      providerKind: "ollama_chat",
+      providerModel,
+      status: "invalid",
+    });
+  }
+  return Object.freeze({
+    providerKind: "ollama_chat",
+    providerModel,
+    status: "partial",
+    inputTokens: input.value,
+    outputTokens: output.value,
+  });
 }
 
 function extractOllamaOutput(

@@ -48,7 +48,9 @@ export type {
   SaveSchemaMigrationModuleV1,
 } from "./application/save-schema-migration-abi.js";
 export type {
+  ModelProviderInvocationResult,
   ModelProvider,
+  ProviderUsageObservation,
   ResolvedModelInvocation,
 } from "./application/model-gateway.js";
 export type {

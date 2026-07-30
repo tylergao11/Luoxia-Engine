@@ -12,9 +12,7 @@ CREATE TABLE luoxia_engine.worlds (
   dependency_bundle_locks_document jsonb NOT NULL,
   rule_plugin_locks_document jsonb NOT NULL,
   stage_module_locks_document jsonb NOT NULL,
-  event_cursor bigint NOT NULL,
   event_log_floor_revision bigint NOT NULL,
-  asset_hashes_document jsonb NOT NULL,
   migration_history_document jsonb NOT NULL,
   updated_at timestamptz NOT NULL,
   CONSTRAINT worlds_revision_safe_integer CHECK (
@@ -36,18 +34,11 @@ CREATE TABLE luoxia_engine.worlds (
     jsonb_typeof(dependency_bundle_locks_document) = 'array'
     AND jsonb_typeof(rule_plugin_locks_document) = 'array'
     AND jsonb_typeof(stage_module_locks_document) = 'array'
-    AND jsonb_typeof(asset_hashes_document) = 'array'
     AND jsonb_typeof(migration_history_document) = 'array'
-  ),
-  CONSTRAINT worlds_event_cursor_safe_integer CHECK (
-    event_cursor >= 0 AND event_cursor <= 9007199254740991
-  ),
-  CONSTRAINT worlds_event_cursor_matches_revision CHECK (
-    event_cursor = revision
   ),
   CONSTRAINT worlds_event_log_floor_safe_integer CHECK (
     event_log_floor_revision >= 0
-    AND event_log_floor_revision <= event_cursor
+    AND event_log_floor_revision <= revision
   )
 );
 
@@ -329,7 +320,7 @@ CREATE TABLE luoxia_engine.dialogue_director_runs (
   response_turn_id uuid,
   response_rule_request_id uuid,
   prepared_at timestamptz NOT NULL,
-  PRIMARY KEY (session_id, command_id),
+  PRIMARY KEY (session_id, command_id, request_kind),
   CONSTRAINT dialogue_director_runs_command_foreign_key
     FOREIGN KEY (session_id, command_id)
     REFERENCES luoxia_engine.command_journal (session_id, command_id),
@@ -342,12 +333,14 @@ CREATE TABLE luoxia_engine.dialogue_director_runs (
   CONSTRAINT dialogue_director_runs_request_kind_closed CHECK (
     request_kind IN (
       'director.dialogue_events',
-      'director.system_dialogue'
+      'director.system_dialogue',
+      'director.goal_plan',
+      'director.definition_draft'
     )
   ),
   CONSTRAINT dialogue_director_runs_response_identity_shape CHECK (
     (
-      request_kind = 'director.dialogue_events'
+      request_kind <> 'director.system_dialogue'
       AND response_turn_id IS NULL
       AND response_rule_request_id IS NULL
     )
@@ -365,34 +358,41 @@ CREATE TABLE luoxia_engine.dialogue_director_runs (
 CREATE TABLE luoxia_engine.dialogue_director_proposal_runs (
   session_id uuid NOT NULL,
   command_id uuid NOT NULL,
-  proposal_kind text NOT NULL,
+  request_kind text NOT NULL,
   proposal_id uuid NOT NULL,
   proposal_ordinal integer NOT NULL,
   world_record_id uuid,
   rule_request_id uuid NOT NULL,
   prepared_at timestamptz NOT NULL,
-  PRIMARY KEY (session_id, command_id, proposal_kind, proposal_id),
+  PRIMARY KEY (
+    session_id,
+    command_id,
+    request_kind,
+    proposal_ordinal
+  ),
   CONSTRAINT dialogue_director_proposal_runs_run_foreign_key
-    FOREIGN KEY (session_id, command_id)
-    REFERENCES luoxia_engine.dialogue_director_runs (session_id, command_id),
+    FOREIGN KEY (session_id, command_id, request_kind)
+    REFERENCES luoxia_engine.dialogue_director_runs (
+      session_id,
+      command_id,
+      request_kind
+    ),
   CONSTRAINT dialogue_director_proposal_runs_proposal_id_unique
-    UNIQUE (session_id, command_id, proposal_id),
-  CONSTRAINT dialogue_director_proposal_runs_ordinal_unique
-    UNIQUE (session_id, command_id, proposal_kind, proposal_ordinal),
+    UNIQUE (proposal_id),
   CONSTRAINT dialogue_director_proposal_runs_world_record_id_unique
     UNIQUE (world_record_id),
   CONSTRAINT dialogue_director_proposal_runs_request_id_unique
     UNIQUE (rule_request_id),
-  CONSTRAINT dialogue_director_proposal_runs_kind_closed CHECK (
-    proposal_kind IN ('definition', 'goal_plan', 'event_card')
-  ),
   CONSTRAINT dialogue_director_proposal_runs_world_record_shape CHECK (
     (
-      proposal_kind IN ('definition', 'goal_plan')
+      request_kind IN (
+        'director.definition_draft',
+        'director.goal_plan'
+      )
       AND world_record_id IS NOT NULL
     )
     OR (
-      proposal_kind = 'event_card'
+      request_kind = 'director.dialogue_events'
       AND world_record_id IS NULL
     )
   ),
@@ -581,6 +581,12 @@ CREATE TABLE luoxia_engine.model_invocations (
   request_document jsonb NOT NULL,
   response_document jsonb,
   proof_document jsonb,
+  provider_kind text,
+  provider_model text,
+  token_usage_status text,
+  input_tokens bigint,
+  cached_input_tokens bigint,
+  output_tokens bigint,
   prepared_at timestamptz NOT NULL,
   dispatched_at timestamptz,
   verified_at timestamptz,
@@ -631,6 +637,60 @@ CREATE TABLE luoxia_engine.model_invocations (
       AND response_document IS NOT NULL
       AND proof_document IS NOT NULL
       AND verified_at IS NOT NULL
+    )
+  ),
+  CONSTRAINT model_invocations_provider_usage_shape CHECK (
+    (
+      invocation_status <> 'verified'
+      AND provider_kind IS NULL
+      AND provider_model IS NULL
+      AND token_usage_status IS NULL
+      AND input_tokens IS NULL
+      AND cached_input_tokens IS NULL
+      AND output_tokens IS NULL
+    )
+    OR (
+      invocation_status = 'verified'
+      AND provider_kind IS NOT NULL
+      AND char_length(provider_kind) BETWEEN 1 AND 64
+      AND provider_kind = btrim(provider_kind)
+      AND provider_kind !~ E'[\\r\\n]'
+      AND provider_model IS NOT NULL
+      AND char_length(provider_model) BETWEEN 1 AND 256
+      AND provider_model = btrim(provider_model)
+      AND provider_model !~ E'[\\r\\n]'
+      AND token_usage_status IS NOT NULL
+      AND token_usage_status IN (
+        'complete',
+        'partial',
+        'absent',
+        'invalid'
+      )
+      AND (
+        (
+          token_usage_status = 'complete'
+          AND input_tokens IS NOT NULL
+          AND cached_input_tokens IS NOT NULL
+          AND output_tokens IS NOT NULL
+          AND input_tokens BETWEEN 0 AND 9007199254740991
+          AND cached_input_tokens BETWEEN 0 AND input_tokens
+          AND output_tokens BETWEEN 0 AND 9007199254740991
+        )
+        OR (
+          token_usage_status = 'partial'
+          AND input_tokens IS NOT NULL
+          AND output_tokens IS NOT NULL
+          AND input_tokens BETWEEN 0 AND 9007199254740991
+          AND cached_input_tokens IS NULL
+          AND output_tokens BETWEEN 0 AND 9007199254740991
+        )
+        OR (
+          token_usage_status IN ('absent', 'invalid')
+          AND input_tokens IS NULL
+          AND cached_input_tokens IS NULL
+          AND output_tokens IS NULL
+        )
+      )
     )
   ),
   CONSTRAINT model_invocations_prepared_identity CHECK (
@@ -940,7 +1000,6 @@ CREATE INDEX content_upgrade_authorizations_world_revision_index
   );
 
 CREATE TABLE luoxia_engine.daily_settlement_runs (
-  run_id uuid PRIMARY KEY,
   world_id uuid NOT NULL,
   day bigint NOT NULL,
   model_request_id uuid NOT NULL,
@@ -955,7 +1014,7 @@ CREATE TABLE luoxia_engine.daily_settlement_runs (
       world_id,
       request_kind
     ),
-  CONSTRAINT daily_settlement_runs_world_day_unique UNIQUE (world_id, day),
+  PRIMARY KEY (world_id, day),
   CONSTRAINT daily_settlement_runs_model_request_unique
     UNIQUE (model_request_id),
   CONSTRAINT daily_settlement_runs_day_safe CHECK (
@@ -963,6 +1022,22 @@ CREATE TABLE luoxia_engine.daily_settlement_runs (
   ),
   CONSTRAINT daily_settlement_runs_request_kind CHECK (
     request_kind = 'director.daily_settlement'
+  )
+);
+
+CREATE TABLE luoxia_engine.daily_settlement_proposal_runs (
+  model_request_id uuid NOT NULL,
+  proposal_ordinal integer NOT NULL,
+  proposal_id uuid NOT NULL,
+  CONSTRAINT daily_settlement_proposal_runs_pkey
+    PRIMARY KEY (model_request_id, proposal_ordinal),
+  CONSTRAINT daily_settlement_proposal_runs_model_request_foreign_key
+    FOREIGN KEY (model_request_id)
+    REFERENCES luoxia_engine.daily_settlement_runs(model_request_id),
+  CONSTRAINT daily_settlement_proposal_runs_proposal_id_unique
+    UNIQUE (proposal_id),
+  CONSTRAINT daily_settlement_proposal_runs_ordinal_safe CHECK (
+    proposal_ordinal >= 0
   )
 );
 

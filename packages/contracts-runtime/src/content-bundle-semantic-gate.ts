@@ -33,6 +33,8 @@ type PromptPurpose =
   | "director_daily_settlement"
   | "director_dialogue_events"
   | "director_system_dialogue"
+  | "director_goal_plan"
+  | "director_definition_draft"
   | "system_persona"
   | "asset_subject"
   | "asset_style"
@@ -110,7 +112,6 @@ interface TypeRecord {
   readonly typeId: string;
   readonly typeKind: TypeKind;
   readonly parentTypeId: string | undefined;
-  readonly inverseTypeId: string | undefined;
   readonly componentCardinality: "one" | "many" | undefined;
 }
 
@@ -490,7 +491,6 @@ function buildTypeIndex(items: readonly JsonObject[]): ReadonlyMap<string, TypeR
         typeId,
         typeKind: expectEnum(item, "type_kind", `catalog.types[${index}]`) as TypeKind,
         parentTypeId: optionalString(item, "parent_type_id"),
-        inverseTypeId: optionalString(item, "inverse_type_id"),
         componentCardinality:
           item.component_cardinality === undefined
             ? undefined
@@ -926,24 +926,6 @@ function assertCatalog(bundle: JsonObject, index: BundleIndex): void {
             parent_type_id: type.parentTypeId,
             expected_kind: type.typeKind,
             actual_kind: parent.typeKind,
-          },
-        );
-      }
-    }
-    if (type.inverseTypeId !== undefined) {
-      const inverse = index.types.get(type.inverseTypeId);
-      if (inverse === undefined) {
-        throw unresolved(type.inverseTypeId, `type ${type.typeId}.inverse_type_id`, "type");
-      }
-      if (inverse.typeKind !== "relation" || type.typeKind !== "relation") {
-        throw semanticFault(
-          "content_bundle.semantic.kind_mismatch",
-          `inverse_type_id is only valid between relation types`,
-          {
-            type_id: type.typeId,
-            inverse_type_id: type.inverseTypeId,
-            type_kind: type.typeKind,
-            inverse_kind: inverse.typeKind,
           },
         );
       }
@@ -1936,6 +1918,7 @@ function assertSimulation(bundle: JsonObject, index: BundleIndex): void {
     "simulation.initial_machine_bindings",
   );
   const characterMachineBindings = new Set<string>();
+  const worldMachineBindings = new Set<string>();
   for (const [bindingIndex, binding] of bindings.entries()) {
     const path = `simulation.initial_machine_bindings[${bindingIndex}]`;
     const bindingKind = expectEnum(binding, "binding_kind", path);
@@ -2007,6 +1990,19 @@ function assertSimulation(bundle: JsonObject, index: BundleIndex): void {
           },
         );
       }
+      const targetKey = `${bindingWorldId}\u0000${machineId}`;
+      if (worldMachineBindings.has(targetKey)) {
+        throw semanticFault(
+          "content_bundle.semantic.world_machine_binding_ambiguous",
+          "A world StateMachineDefinition can have only one initial binding",
+          {
+            path,
+            world_id: bindingWorldId,
+            machine_id: machineId,
+          },
+        );
+      }
+      worldMachineBindings.add(targetKey);
     } else {
       throw semanticFault(
         "content_bundle.semantic.kind_mismatch",
@@ -2114,6 +2110,18 @@ function assertSimulation(bundle: JsonObject, index: BundleIndex): void {
       expectString(director, "system_dialogue_prompt_id", path),
       `${path}.system_dialogue_prompt_id`,
       "director_system_dialogue",
+    );
+    requirePrompt(
+      index,
+      expectString(director, "goal_plan_prompt_id", path),
+      `${path}.goal_plan_prompt_id`,
+      "director_goal_plan",
+    );
+    requirePrompt(
+      index,
+      expectString(director, "definition_draft_prompt_id", path),
+      `${path}.definition_draft_prompt_id`,
+      "director_definition_draft",
     );
     assertFieldValues(
       asObjectArray(expectProperty(director, "fields", path), `${path}.fields`),

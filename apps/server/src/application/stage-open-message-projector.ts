@@ -14,7 +14,7 @@ import type {
   ContentRuntimeIdentityMapper,
   WorldContentBinding,
   WorldContentLockDocument,
-} from "@luoxia/world-core/composition";
+} from "@luoxia/world-core";
 
 import type { StageContractAuthority } from "./stage-contract-authority.js";
 
@@ -594,7 +594,7 @@ function resolveBindingAsset(input: {
     if (matches.length > 1) {
       throw new EngineFault(
         "stage_open.projection.visual_binding_ambiguous",
-        "Multiple active VisualBindings target the same Stage entity revision and slot",
+        "Multiple VisualBindings target the same Stage entity revision and slot",
         {
           entity_id: entityId,
           entity_revision: entityRevision,
@@ -633,7 +633,6 @@ function visualBindingMatches(input: {
   readonly slotId: string;
 }): boolean {
   if (
-    expectString(input.binding, "state", "VisualBinding") !== "active" ||
     expectString(input.binding, "world_id", "VisualBinding") !==
       input.worldId ||
     expectInteger(

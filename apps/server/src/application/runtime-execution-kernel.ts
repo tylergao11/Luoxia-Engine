@@ -10,6 +10,7 @@ import {
   createPacketStateTransition,
   createRulePluginChoiceAuthority,
   createSessionViewProjector,
+  createStateMachineContractAuthority,
   createWorldCore,
   type ContentRuntimeCatalog,
   type ContentRuntimeIdentityMapper,
@@ -29,7 +30,7 @@ import {
   type ContentUpgradeHmacKeyring,
 } from "../adapters/crypto/content-upgrade-hmac-token-codec.js";
 import { createNodeDayCycleExecutionIdFactory } from "../adapters/crypto/day-cycle-execution-id-factory.js";
-import { createNodeDialogueCommitmentIdFactory } from "../adapters/crypto/dialogue-commitment-id-factory.js";
+import { createNodeDialogueLocalIdFactory } from "../adapters/crypto/dialogue-local-id-factory.js";
 import { createNodeEngineSessionIdFactory } from "../adapters/crypto/engine-session-id-factory.js";
 import { createNodeMaterializationIdentityFactory } from "../adapters/crypto/materialization-identity-factory.js";
 import { createNodeRuleHoldRequestIdFactory } from "../adapters/crypto/rule-hold-request-id-factory.js";
@@ -255,6 +256,10 @@ export interface RuntimeExecutionKernelDependencies {
   readonly directorDialogueEventsModelProfileId: string;
   /** Explicit deployment selection for Director System dialogue calls. */
   readonly directorSystemDialogueModelProfileId: string;
+  /** Explicit deployment selection for Director goal-plan drafting calls. */
+  readonly directorGoalPlanModelProfileId: string;
+  /** Explicit deployment selection for Director definition drafting calls. */
+  readonly directorDefinitionDraftModelProfileId: string;
   /** Explicit deployment selection for CharacterMind reaction calls. */
   readonly characterReactModelProfileId: string;
 }
@@ -349,6 +354,9 @@ export function createRuntimeExecutionKernel(
     );
   }
   const channel = createModelInvocationAuthorizationChannel();
+  const stateMachineContracts = createStateMachineContractAuthority({
+    catalog: dependencies.contentRuntimeCatalog,
+  });
 
   const modelGateway = new ModelGateway(
     dependencies.contracts,
@@ -474,6 +482,7 @@ export function createRuntimeExecutionKernel(
     rulePlugins: rulePluginAbi,
     stageModules: dependencies.stageModuleRegistry,
     stageContracts,
+    stateMachineContracts,
   });
   const saveSchemaMigrationRegistry =
     createSaveSchemaMigrationRegistry({
@@ -507,6 +516,7 @@ export function createRuntimeExecutionKernel(
     contracts: dependencies.contracts,
     catalog: dependencies.contentRuntimeCatalog,
     identityMapper: dependencies.contentRuntimeIdentityMapper,
+    stateMachineContracts,
     idFactory: createNodeRuntimeWorldCreationIdFactory(),
     clock: createSystemRuntimeWorldCreationClock(),
     saves,
@@ -516,12 +526,14 @@ export function createRuntimeExecutionKernel(
   const rulePluginGateway = createRulePluginGateway({
     contracts: dependencies.contracts,
     digest: dependencies.digest,
+    catalog: dependencies.contentRuntimeCatalog,
     adapter: rulePluginAdapter,
     modelProvenance: modelGateway.provenance,
     deterministicContextAuthority,
     contentUpgradeAuthorizationAuthority,
     contentUpgradeClock,
     stageContracts,
+    stateMachineContracts,
   });
 
   const rulePluginJournal: RulePluginInvocationJournal =
@@ -601,10 +613,12 @@ export function createRuntimeExecutionKernel(
     contentUpgradeClock,
     staticComponentDigestLookup: dependencies.contentRuntimeCatalog,
     stageOpenContractLookup: stageContracts,
+    stateMachineContracts,
     deterministicContextAuthority,
   });
   const stateTransition = createPacketStateTransition({
     ledgerArithmetic,
+    stateMachineContracts,
   });
   const world = createWorldCore({
     contracts: dependencies.contracts,
@@ -646,6 +660,21 @@ export function createRuntimeExecutionKernel(
     modelGateway,
     journal,
     events: readers.events,
+    stateMachineContracts,
+    directorDailySettlementModelProfileId:
+      dependencies.directorDailySettlementModelProfileId,
+    directorDialogueEventsModelProfileId:
+      dependencies.directorDialogueEventsModelProfileId,
+    directorSystemDialogueModelProfileId:
+      dependencies.directorSystemDialogueModelProfileId,
+    directorGoalPlanModelProfileId:
+      dependencies.directorGoalPlanModelProfileId,
+    directorDefinitionDraftModelProfileId:
+      dependencies.directorDefinitionDraftModelProfileId,
+    characterDialogueModelProfileId:
+      dependencies.characterDialogueModelProfileId,
+    characterReactModelProfileId:
+      dependencies.characterReactModelProfileId,
   });
   const worldExtensions = createWorldExtensionOrchestrator({
     contracts: dependencies.contracts,
@@ -668,13 +697,11 @@ export function createRuntimeExecutionKernel(
     rulePluginAbi,
     rulePlugins: rulePluginExecutor,
     deterministicContexts: deterministicContextAuthority,
+    stateMachineContracts,
     models,
+    dailySettlements: journal,
     mutations,
     worldExtensions,
-    directorDailySettlementModelProfileId:
-      dependencies.directorDailySettlementModelProfileId,
-    characterReactModelProfileId:
-      dependencies.characterReactModelProfileId,
   });
   const serverEnvelopeIds = createNodeServerEnvelopeIdFactory();
   const serverEnvelopes = createServerEnvelopeFactory({
@@ -706,13 +733,7 @@ export function createRuntimeExecutionKernel(
       contracts: dependencies.contracts,
       idFactory: createNodeCommandExecutionIdFactory(),
     }),
-    commitmentIds: createNodeDialogueCommitmentIdFactory(),
-    characterDialogueModelProfileId:
-      dependencies.characterDialogueModelProfileId,
-    directorDialogueEventsModelProfileId:
-      dependencies.directorDialogueEventsModelProfileId,
-    directorSystemDialogueModelProfileId:
-      dependencies.directorSystemDialogueModelProfileId,
+    localIds: createNodeDialogueLocalIdFactory(),
   });
   const eventCards = createEventCardCommandOrchestrator({
     contracts: dependencies.contracts,

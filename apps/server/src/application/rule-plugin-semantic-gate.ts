@@ -14,7 +14,10 @@ import {
   type StageOutcomeTransitionKind,
 } from "@luoxia/contracts-runtime";
 import type {
+  ContentRuntimeCatalog,
   ContentUpgradeAuthorizationAuthority,
+  StateMachineContractAuthority,
+  WorldContentLockDocument,
 } from "@luoxia/world-core";
 
 import type {
@@ -57,7 +60,9 @@ interface OperationContext {
   readonly outputKind: string;
   readonly worldId: string;
   readonly world: JsonObject;
+  readonly worldContentLock: WorldContentLockDocument;
   readonly stageContracts: StageContractAuthority;
+  readonly stateMachineContracts: StateMachineContractAuthority;
 }
 
 interface EvidenceContext {
@@ -67,6 +72,7 @@ interface EvidenceContext {
   readonly input: JsonObject;
   readonly worldId: string;
   readonly basisRevision: number;
+  readonly catalog: ContentRuntimeCatalog;
   readonly modelInvocations: readonly VerifiedModelInvocationReceipt[];
 }
 
@@ -79,9 +85,11 @@ export interface RulePluginContentUpgradeClock {
 export interface RulePluginSemanticGateDependencies {
   readonly contracts: ContractValidator;
   readonly digest: JsonDigest;
+  readonly catalog: ContentRuntimeCatalog;
   readonly contentUpgradeAuthorizations: ContentUpgradeAuthorizationAuthority;
   readonly contentUpgradeClock: RulePluginContentUpgradeClock;
   readonly stageContracts: StageContractAuthority;
+  readonly stateMachineContracts: StateMachineContractAuthority;
 }
 
 export function createRulePluginSemanticGate(
@@ -93,17 +101,21 @@ export function createRulePluginSemanticGate(
 class DefaultRulePluginSemanticGate implements RulePluginSemanticGate {
   readonly #contracts: ContractValidator;
   readonly #digest: JsonDigest;
+  readonly #catalog: ContentRuntimeCatalog;
   readonly #contentUpgradeAuthorizations: ContentUpgradeAuthorizationAuthority;
   readonly #contentUpgradeClock: RulePluginContentUpgradeClock;
   readonly #stageContracts: StageContractAuthority;
+  readonly #stateMachineContracts: StateMachineContractAuthority;
 
   public constructor(dependencies: RulePluginSemanticGateDependencies) {
     this.#contracts = dependencies.contracts;
     this.#digest = dependencies.digest;
+    this.#catalog = dependencies.catalog;
     this.#contentUpgradeAuthorizations =
       dependencies.contentUpgradeAuthorizations;
     this.#contentUpgradeClock = dependencies.contentUpgradeClock;
     this.#stageContracts = dependencies.stageContracts;
+    this.#stateMachineContracts = dependencies.stateMachineContracts;
   }
 
   public async assertRequestEvidence(
@@ -167,6 +179,28 @@ class DefaultRulePluginSemanticGate implements RulePluginSemanticGate {
         readonlyWorld: worldSnapshot,
       });
     }
+    if (operationKind === "state_machine.advance") {
+      assertStateMachineAdvanceInput({
+        input,
+        world: expectJsonObject(
+          expectProperty(
+            worldSnapshot,
+            "world_state",
+            "RulePluginRequest.readonly_world",
+          ),
+          "RulePluginRequest.readonly_world.world_state",
+        ),
+        worldId,
+        worldContentLock: this.#contracts.assertObject(
+          CONTRACT_REF.worldContentLock,
+          worldContentLock(
+            worldSnapshot,
+            "RulePluginRequest.readonly_world",
+          ),
+        ),
+        authority: this.#stateMachineContracts,
+      });
+    }
     assertModelEvidenceForOperation({
       request,
       digest: this.#digest,
@@ -174,6 +208,7 @@ class DefaultRulePluginSemanticGate implements RulePluginSemanticGate {
       input,
       worldId,
       basisRevision,
+      catalog: this.#catalog,
       modelInvocations,
     });
   }
@@ -221,6 +256,10 @@ class DefaultRulePluginSemanticGate implements RulePluginSemanticGate {
       ),
       "RulePluginRequest.readonly_world.world_state",
     );
+    const validatedWorldContentLock = this.#contracts.assertObject(
+      CONTRACT_REF.worldContentLock,
+      worldContentLock(worldSnapshot, "RulePluginRequest.readonly_world"),
+    );
 
     handler({
       contracts: this.#contracts,
@@ -233,7 +272,9 @@ class DefaultRulePluginSemanticGate implements RulePluginSemanticGate {
       outputKind: expectString(output, "output_kind", "RulePluginResponse.output"),
       worldId,
       world,
+      worldContentLock: validatedWorldContentLock,
       stageContracts: this.#stageContracts,
+      stateMachineContracts: this.#stateMachineContracts,
     });
   }
 }
@@ -344,16 +385,16 @@ function handleDefinitionValidate(context: OperationContext): void {
         "definition_id",
         "DefinitionValidationInput",
       );
-      const modelProposal = expectJsonObject(
-        expectProperty(context.input, "proposal", "DefinitionValidationInput"),
-        "DefinitionValidationInput.proposal",
+      const candidate = expectJsonObject(
+        expectProperty(context.input, "candidate", "DefinitionValidationInput"),
+        "DefinitionValidationInput.candidate",
       );
       const draft = expectJsonObject(
-        expectProperty(modelProposal, "draft", "DynamicDefinitionProposal"),
+        expectProperty(candidate, "draft", "DynamicDefinitionProposal"),
         "DynamicDefinitionProposal.draft",
       );
       const modelProposalId = expectString(
-        modelProposal,
+        candidate,
         "proposal_id",
         "DynamicDefinitionProposal",
       );
@@ -417,21 +458,21 @@ function handleGoalPlanValidate(context: OperationContext): void {
         "GoalPlanUpsertOp.goal_plan",
       );
       const planId = expectString(context.input, "plan_id", "GoalPlanValidateInput");
-      const modelProposal = expectJsonObject(
-        expectProperty(context.input, "proposal", "GoalPlanValidateInput"),
-        "GoalPlanValidateInput.proposal",
+      const candidate = expectJsonObject(
+        expectProperty(context.input, "candidate", "GoalPlanValidateInput"),
+        "GoalPlanValidateInput.candidate",
       );
       const draft = expectJsonObject(
-        expectProperty(modelProposal, "draft", "GoalPlanProposal"),
+        expectProperty(candidate, "draft", "GoalPlanProposal"),
         "GoalPlanProposal.draft",
       );
       const proposalId = expectString(
-        modelProposal,
+        candidate,
         "proposal_id",
         "GoalPlanProposal",
       );
       const ownerActorId = expectString(
-        modelProposal,
+        candidate,
         "owner_actor_id",
         "GoalPlanProposal",
       );
@@ -1861,12 +1902,24 @@ function assertExhaustiveCardExpiry(
 }
 
 function handleStateMachineAdvance(context: OperationContext): void {
+  const resolved = assertStateMachineAdvanceInput({
+    input: context.input,
+    world: context.world,
+    worldId: context.worldId,
+    worldContentLock: context.worldContentLock,
+    authority: context.stateMachineContracts,
+  });
   switch (context.outputKind) {
     case "reject":
+    case "state_machine.unchanged":
       return;
     case "packet.proposal": {
       const proposal = assertPacketProposalProvenance(context);
-      const op = singleOp(proposal, "state_machine.set_state", context.operationKind);
+      const op = singleOp(
+        proposal,
+        "state_machine.transition",
+        context.operationKind,
+      );
       const machineInstanceId = expectString(
         context.input,
         "machine_instance_id",
@@ -1875,19 +1928,23 @@ function handleStateMachineAdvance(context: OperationContext): void {
       assertEqual(
         "state_machine.machine_instance_id",
         machineInstanceId,
-        expectString(op, "machine_instance_id", "StateMachineSetStateOp"),
+        expectString(
+          op,
+          "machine_instance_id",
+          "StateMachineTransitionOp",
+        ),
         context.operationKind,
       );
-      if (!findStateMachine(context.world, machineInstanceId)) {
-        throw fault(
-          "rule_plugin.semantic.state_machine_missing",
-          `State machine instance ${machineInstanceId} is absent from readonly_world`,
-          {
-            operation_kind: context.operationKind,
-            machine_instance_id: machineInstanceId,
-          },
-        );
-      }
+      const transitionId = expectString(
+        op,
+        "transition_id",
+        "StateMachineTransitionOp",
+      );
+      const transition = resolved.machine.resolveTransition(
+        resolved.instance,
+        transitionId,
+      ).transition;
+      assertStateMachineGuardEvidence(proposal, transition, context);
       return;
     }
     default:
@@ -1919,29 +1976,29 @@ function handleCharacterAutomaticEventResolve(context: OperationContext): void {
       assertChoiceSpec(context);
       return;
     case "packet.proposal": {
-      assertPacketProposalProvenance(context);
+      const packetProposal = assertPacketProposalProvenance(context);
       assertModelProofRevisionCompatible(context, context.input, "director_proof");
-      const proposal = expectJsonObject(
+      const eventCandidate = expectJsonObject(
         expectProperty(
           context.input,
-          "proposal",
+          "candidate",
           "CharacterAutomaticEventResolveInput",
         ),
-        "CharacterAutomaticEventResolveInput.proposal",
+        "CharacterAutomaticEventResolveInput.candidate",
       );
       const proposalId = expectString(
-        proposal,
+        eventCandidate,
         "proposal_id",
-        "CharacterAutomaticEventProposal",
+        "MaterializedCharacterAutomaticEventCandidate",
       );
       const targetIds = new Set(
         asStringArray(
           expectProperty(
-            proposal,
+            eventCandidate,
             "target_entity_ids",
-            "CharacterAutomaticEventProposal",
+            "MaterializedCharacterAutomaticEventCandidate",
           ),
-          "CharacterAutomaticEventProposal.target_entity_ids",
+          "MaterializedCharacterAutomaticEventCandidate.target_entity_ids",
         ),
       );
       const batches = asObjectArray(
@@ -1981,13 +2038,25 @@ function handleCharacterAutomaticEventResolve(context: OperationContext): void {
         assertModelProofRevisionCompatible(context, batch, "model_proof");
 
         const reactions = asObjectArray(
-          expectProperty(batch, "reactions", "CharacterReactionBatch"),
-          "CharacterReactionBatch.reactions",
+          expectProperty(batch, "candidates", "CharacterReactionBatch"),
+          "CharacterReactionBatch.candidates",
         );
-        for (const reaction of reactions) {
+        for (const ordinalCandidate of reactions) {
+          const reaction = expectJsonObject(
+            expectProperty(
+              ordinalCandidate,
+              "candidate",
+              "OrdinalCharacterReactionCandidate",
+            ),
+            "OrdinalCharacterReactionCandidate.candidate",
+          );
           const sourceEvent = expectJsonObject(
-            expectProperty(reaction, "source_event", "CharacterReactionProposal"),
-            "CharacterReactionProposal.source_event",
+            expectProperty(
+              reaction,
+              "source_event",
+              "MaterializedCharacterReactionCandidate",
+            ),
+            "MaterializedCharacterReactionCandidate.source_event",
           );
           assertEqual(
             "character_reaction.source_event.proposal_id",
@@ -2012,10 +2081,284 @@ function handleCharacterAutomaticEventResolve(context: OperationContext): void {
           },
         );
       }
+      assertCharacterMachineDecisions(
+        context,
+        packetProposal,
+        batches,
+        proposalId,
+      );
       return;
     }
     default:
       throw unexpectedOutput(context);
+  }
+}
+
+function assertCharacterMachineDecisions(
+  context: OperationContext,
+  packetProposal: JsonObject,
+  batches: readonly JsonObject[],
+  eventProposalId: string,
+): void {
+  const transitionOps = asObjectArray(
+    expectProperty(packetProposal, "ops", "PacketProposal"),
+    "PacketProposal.ops",
+  ).filter(
+    (op) => expectString(op, "op", "EffectOp") === "state_machine.transition",
+  );
+  const coveredMachineIds = new Set<string>();
+
+  for (const [batchIndex, batch] of batches.entries()) {
+    const character = expectJsonObject(
+      expectProperty(batch, "character", "CharacterReactionBatch"),
+      "CharacterReactionBatch.character",
+    );
+    const entityId = expectString(character, "entity_id", "EntityRef");
+    const reactions = asObjectArray(
+      expectProperty(batch, "candidates", "CharacterReactionBatch"),
+      "CharacterReactionBatch.candidates",
+    ).filter((ordinalCandidate) => {
+      const reaction = expectJsonObject(
+        expectProperty(
+          ordinalCandidate,
+          "candidate",
+          "OrdinalCharacterReactionCandidate",
+        ),
+        "OrdinalCharacterReactionCandidate.candidate",
+      );
+      const source = expectJsonObject(
+        expectProperty(
+          reaction,
+          "source_event",
+          "MaterializedCharacterReactionCandidate",
+        ),
+        "MaterializedCharacterReactionCandidate.source_event",
+      );
+      return (
+        expectString(source, "proposal_id", "CharacterEventRef") ===
+        eventProposalId
+      );
+    });
+    if (reactions.length !== 1) {
+      throw fault(
+        "rule_plugin.semantic.character_machine_decision_ambiguous",
+        "Each CharacterReactionBatch must contain exactly one reaction for the current automatic event",
+        {
+          operation_kind: context.operationKind,
+          proposal_id: eventProposalId,
+          entity_id: entityId,
+          batch_index: batchIndex,
+          matching_reactions: reactions.length,
+        },
+      );
+    }
+    const ownedMachines = asObjectArray(
+      expectProperty(context.world, "state_machines", "WorldState"),
+      "WorldState.state_machines",
+    ).filter((instance) => {
+      const owner = expectJsonObject(
+        expectProperty(instance, "owner", "StateMachineInstanceState"),
+        "StateMachineInstanceState.owner",
+      );
+      return (
+        expectString(owner, "owner_kind", "StateMachineOwner") ===
+          "character" &&
+        expectString(owner, "entity_id", "StateMachineOwner") === entityId
+      );
+    });
+    if (ownedMachines.length !== 1) {
+      throw fault(
+        "rule_plugin.semantic.character_machine_owner_invalid",
+        "Character machine decision requires exactly one current character state machine",
+        {
+          operation_kind: context.operationKind,
+          entity_id: entityId,
+          machines: ownedMachines.length,
+        },
+      );
+    }
+    const instance = ownedMachines[0] as JsonObject;
+    const instanceId = expectString(
+      instance,
+      "instance_id",
+      "StateMachineInstanceState",
+    );
+    coveredMachineIds.add(instanceId);
+    const matchingOps = transitionOps.filter(
+      (op) =>
+        expectString(
+          op,
+          "machine_instance_id",
+          "StateMachineTransitionOp",
+        ) === instanceId,
+    );
+    const decision = expectJsonObject(
+      expectProperty(
+        expectJsonObject(
+          expectProperty(
+            reactions[0] as JsonObject,
+            "candidate",
+            "OrdinalCharacterReactionCandidate",
+          ),
+          "OrdinalCharacterReactionCandidate.candidate",
+        ),
+        "machine_decision",
+        "MaterializedCharacterReactionCandidate",
+      ),
+      "MaterializedCharacterReactionCandidate.machine_decision",
+    );
+    const decisionKind = expectString(
+      decision,
+      "decision_kind",
+      "MachineDecision",
+    );
+    if (decisionKind === "keep") {
+      if (matchingOps.length !== 0) {
+        throw fault(
+          "rule_plugin.semantic.character_machine_keep_violated",
+          "Character keep decision forbids a state-machine transition for that character",
+          {
+            operation_kind: context.operationKind,
+            entity_id: entityId,
+            machine_instance_id: instanceId,
+            transitions: matchingOps.length,
+          },
+        );
+      }
+      continue;
+    }
+    if (decisionKind !== "transition" || matchingOps.length !== 1) {
+      throw fault(
+        "rule_plugin.semantic.character_machine_transition_missing",
+        "Character transition decision requires exactly one matching state-machine transition",
+        {
+          operation_kind: context.operationKind,
+          entity_id: entityId,
+          machine_instance_id: instanceId,
+          decision_kind: decisionKind,
+          transitions: matchingOps.length,
+        },
+      );
+    }
+    const selectedTransitionId = expectString(
+      decision,
+      "transition_id",
+      "MachineDecision",
+    );
+    assertEqual(
+      "character_machine.transition_id",
+      selectedTransitionId,
+      expectString(
+        matchingOps[0] as JsonObject,
+        "transition_id",
+        "StateMachineTransitionOp",
+      ),
+      context.operationKind,
+    );
+    const machine = context.stateMachineContracts.assertLockedInstance({
+      worldContentLock: context.worldContentLock,
+      worldId: context.worldId,
+      instance,
+    });
+    const selectedTransition = machine.resolveTransition(
+      instance,
+      selectedTransitionId,
+    ).transition;
+    assertStateMachineGuardEvidence(
+      packetProposal,
+      selectedTransition,
+      context,
+    );
+  }
+
+  const extra = transitionOps.filter(
+    (op) =>
+      !coveredMachineIds.has(
+        expectString(
+          op,
+          "machine_instance_id",
+          "StateMachineTransitionOp",
+        ),
+      ),
+  );
+  const worldMachineShadow = new Map(
+    asObjectArray(
+      expectProperty(context.world, "state_machines", "WorldState"),
+      "WorldState.state_machines",
+    ).map((instance) => [
+      expectString(
+        instance,
+        "instance_id",
+        "StateMachineInstanceState",
+      ),
+      instance,
+    ]),
+  );
+  for (const op of extra) {
+    const instanceId = expectString(
+      op,
+      "machine_instance_id",
+      "StateMachineTransitionOp",
+    );
+    const instance = worldMachineShadow.get(instanceId);
+    if (instance === undefined) {
+      throw fault(
+        "rule_plugin.semantic.character_machine_transition_instance_missing",
+        "Character automatic-event packet references an absent state-machine instance",
+        {
+          operation_kind: context.operationKind,
+          proposal_id: eventProposalId,
+          machine_instance_id: instanceId,
+        },
+      );
+    }
+    const owner = expectJsonObject(
+      expectProperty(instance, "owner", "StateMachineInstanceState"),
+      "StateMachineInstanceState.owner",
+    );
+    const ownerKind = expectString(owner, "owner_kind", "StateMachineOwner");
+    if (ownerKind !== "world") {
+      throw fault(
+        "rule_plugin.semantic.character_machine_transition_extra",
+        "Character automatic-event packet cannot transition a non-target character machine",
+        {
+          operation_kind: context.operationKind,
+          proposal_id: eventProposalId,
+          machine_instance_id: instanceId,
+          owner_kind: ownerKind,
+        },
+      );
+    }
+    assertEqual(
+      "world_machine.owner.world_id",
+      context.worldId,
+      expectString(owner, "world_id", "StateMachineOwner"),
+      context.operationKind,
+    );
+    const machine = context.stateMachineContracts.assertLockedInstance({
+      worldContentLock: context.worldContentLock,
+      worldId: context.worldId,
+      instance,
+    });
+    const transitionId = expectString(
+      op,
+      "transition_id",
+      "StateMachineTransitionOp",
+    );
+    const resolvedTransition = machine.resolveTransition(
+      instance,
+      transitionId,
+    );
+    const transition = resolvedTransition.transition;
+    assertStateMachineGuardEvidence(packetProposal, transition, context);
+    worldMachineShadow.set(instanceId, {
+      ...instance,
+      state_id: expectString(
+        resolvedTransition.toState,
+        "state_id",
+        "MachineStateDefinition",
+      ),
+    });
   }
 }
 
@@ -2157,6 +2500,107 @@ function handleStageOutcomeResolve(context: OperationContext): void {
     }
     default:
       throw unexpectedOutput(context);
+  }
+}
+
+function assertStateMachineAdvanceInput(
+  parameters: {
+    readonly input: JsonObject;
+    readonly world: JsonObject;
+    readonly worldId: string;
+    readonly worldContentLock: WorldContentLockDocument;
+    readonly authority: StateMachineContractAuthority;
+  },
+): {
+  readonly instance: JsonObject;
+  readonly machine: ReturnType<
+    StateMachineContractAuthority["assertLockedInstance"]
+  >;
+} {
+  const {
+    input,
+    world,
+    worldId,
+    worldContentLock: lockedContent,
+    authority,
+  } = parameters;
+  const machineInstanceId = expectString(
+    input,
+    "machine_instance_id",
+    "StateMachineAdvanceInput",
+  );
+  const instance = findStateMachine(world, machineInstanceId);
+  if (instance === undefined) {
+    throw fault(
+      "rule_plugin.semantic.state_machine_missing",
+      `State machine instance ${machineInstanceId} is absent from readonly_world`,
+      {
+        operation_kind: "state_machine.advance",
+        machine_instance_id: machineInstanceId,
+      },
+    );
+  }
+  const machine = authority.assertLockedInstance({
+    worldContentLock: lockedContent,
+    worldId,
+    instance,
+  });
+  const inputDefinition = expectJsonObject(
+    expectProperty(input, "machine_definition", "StateMachineAdvanceInput"),
+    "StateMachineAdvanceInput.machine_definition",
+  );
+  if (!jsonEquals(inputDefinition, machine.definition)) {
+    throw fault(
+      "rule_plugin.semantic.state_machine_definition_mismatch",
+      "state_machine.advance input must carry the exact registered definition selected by the runtime instance",
+      {
+        operation_kind: "state_machine.advance",
+        machine_instance_id: machineInstanceId,
+      },
+    );
+  }
+  return Object.freeze({ instance, machine });
+}
+
+function assertStateMachineGuardEvidence(
+  proposal: JsonObject,
+  transition: JsonObject,
+  context: OperationContext,
+): void {
+  const guard = transition["guard"];
+  if (guard === undefined) {
+    return;
+  }
+  const guardRule = expectJsonObject(
+    guard,
+    "MachineTransitionDefinition.guard",
+  );
+  const matches = asObjectArray(
+    expectProperty(proposal, "preconditions", "PacketProposal"),
+    "PacketProposal.preconditions",
+  ).filter(
+    (precondition) =>
+      expectString(precondition, "kind", "PacketPrecondition") ===
+        "rule.holds" &&
+      jsonEquals(
+        expectProperty(precondition, "rule", "PacketPrecondition"),
+        guardRule,
+      ),
+  );
+  if (matches.length !== 1) {
+    throw fault(
+      "rule_plugin.semantic.state_machine_guard_evidence",
+      "Guarded state-machine proposal requires exactly one matching rule.holds precondition",
+      {
+        operation_kind: context.operationKind,
+        transition_id: expectString(
+          transition,
+          "transition_id",
+          "MachineTransitionDefinition",
+        ),
+        matching_preconditions: matches.length,
+      },
+    );
   }
 }
 
@@ -2328,19 +2772,10 @@ function handleDialogueTurnAppend(context: OperationContext): void {
         expectInteger(op, "expected_revision", "DialogueTurnAppendOp"),
         context.operationKind,
       );
-      assertJsonFieldEqual(
-        "dialogue.append.turn",
-        expectProperty(context.input, "turn", "DialogueTurnAppendInput"),
+      const turn = readDialogueTurnCandidate(context.input);
+      const committedTurn = expectJsonObject(
         expectProperty(op, "turn", "DialogueTurnAppendOp"),
-        context.operationKind,
-      );
-      const turn = expectJsonObject(
-        expectProperty(
-          context.input,
-          "turn",
-          "DialogueTurnAppendInput",
-        ),
-        "DialogueTurnAppendInput.turn",
+        "DialogueTurnAppendOp.turn",
       );
 
       const dialogueId = expectString(
@@ -2380,6 +2815,20 @@ function handleDialogueTurnAppend(context: OperationContext): void {
         "source_kind",
         "DialogueTurnSource",
       );
+      if (sourceKind === "character_mind") {
+        assertCharacterTurnProposalMatchesCandidate(
+          context,
+          turn,
+          committedTurn,
+        );
+      } else {
+        assertJsonFieldEqual(
+          "dialogue.append.turn",
+          turn,
+          committedTurn,
+          context.operationKind,
+        );
+      }
       assertDialogueSpeakerIsParticipant(
         context,
         turn,
@@ -2466,9 +2915,9 @@ function handleEventCardPublish(context: OperationContext): void {
     case "packet.proposal": {
       const proposal = assertPacketProposalProvenance(context);
       const op = singleOp(proposal, "event_card.publish", context.operationKind);
-      const cardProposal = expectJsonObject(
-        expectProperty(context.input, "proposal", "EventCardPublishInput"),
-        "EventCardPublishInput.proposal",
+      const cardCandidate = expectJsonObject(
+        expectProperty(context.input, "candidate", "EventCardPublishInput"),
+        "EventCardPublishInput.candidate",
       );
       const control = expectJsonObject(
         expectProperty(context.input, "control", "EventCardPublishInput"),
@@ -2478,31 +2927,35 @@ function handleEventCardPublish(context: OperationContext): void {
 
       assertEqual(
         "event_card.source_proposal_id",
-        expectString(cardProposal, "proposal_id", "EventCardProposal"),
+        expectString(cardCandidate, "proposal_id", "EventCardPublishCandidate"),
         expectString(op, "source_proposal_id", "EventCardPublishOp"),
         context.operationKind,
       );
       assertEqual(
         "event_card.source_dialogue_id",
-        expectString(cardProposal, "source_dialogue_id", "EventCardProposal"),
+        expectString(
+          cardCandidate,
+          "source_dialogue_id",
+          "EventCardPublishCandidate",
+        ),
         expectString(op, "source_dialogue_id", "EventCardPublishOp"),
         context.operationKind,
       );
       assertEqual(
         "event_card.day",
-        expectInteger(cardProposal, "day", "EventCardProposal"),
+        expectInteger(cardCandidate, "day", "EventCardPublishCandidate"),
         expectInteger(op, "day", "EventCardPublishOp"),
         context.operationKind,
       );
       assertJsonFieldEqual(
         "event_card.title",
-        expectProperty(cardProposal, "title", "EventCardProposal"),
+        expectProperty(cardCandidate, "title", "EventCardPublishCandidate"),
         expectProperty(op, "title", "EventCardPublishOp"),
         context.operationKind,
       );
       assertJsonFieldEqual(
         "event_card.summary",
-        expectProperty(cardProposal, "summary", "EventCardProposal"),
+        expectProperty(cardCandidate, "summary", "EventCardPublishCandidate"),
         expectProperty(op, "summary", "EventCardPublishOp"),
         context.operationKind,
       );
@@ -2519,7 +2972,7 @@ function handleEventCardPublish(context: OperationContext): void {
       );
       assertEqual(
         "sealed.source_proposal_id",
-        expectString(cardProposal, "proposal_id", "EventCardProposal"),
+        expectString(cardCandidate, "proposal_id", "EventCardPublishCandidate"),
         expectString(sealed, "source_proposal_id", "SealedEventResult"),
         context.operationKind,
       );
@@ -2555,12 +3008,20 @@ function handleEventCardPublish(context: OperationContext): void {
         "SealedEventResult",
       );
       const options = asObjectArray(
-        expectProperty(cardProposal, "result_options", "EventCardProposal"),
-        "EventCardProposal.result_options",
+        expectProperty(
+          cardCandidate,
+          "result_options",
+          "EventCardPublishCandidate",
+        ),
+        "EventCardPublishCandidate.result_options",
       );
       const selected = options.find(
         (option) =>
-          expectString(option, "option_id", "EventCardOutcomeDraft") ===
+          expectString(
+            option,
+            "option_id",
+            "MaterializedEventCardOutcomeCandidate",
+          ) ===
           selectedOptionId,
       );
       if (selected === undefined) {
@@ -2575,7 +3036,11 @@ function handleEventCardPublish(context: OperationContext): void {
       }
       assertJsonFieldEqual(
         "sealed.presentation",
-        expectProperty(selected, "presentation", "EventCardOutcomeDraft"),
+        expectProperty(
+          selected,
+          "presentation",
+          "MaterializedEventCardOutcomeCandidate",
+        ),
         expectProperty(sealed, "presentation", "SealedEventResult"),
         context.operationKind,
       );
@@ -2603,14 +3068,14 @@ function handleEventCardPublish(context: OperationContext): void {
 
       assertEventCardAgency(
         context,
-        cardProposal,
+        cardCandidate,
         selected,
         sealed,
-        expectInteger(cardProposal, "day", "EventCardProposal"),
+        expectInteger(cardCandidate, "day", "EventCardPublishCandidate"),
       );
       assertDialogueQuotesVisible(
         context,
-        cardProposal,
+        cardCandidate,
         control,
         sealed,
       );
@@ -2618,7 +3083,7 @@ function handleEventCardPublish(context: OperationContext): void {
       assertEventBudgetSufficient(
         context,
         control,
-        expectInteger(cardProposal, "day", "EventCardProposal"),
+        expectInteger(cardCandidate, "day", "EventCardPublishCandidate"),
         amount,
       );
       return;
@@ -2695,38 +3160,58 @@ function assertEventBudgetSufficient(
 
 function assertEventCardAgency(
   context: OperationContext,
-  cardProposal: JsonObject,
+  cardCandidate: JsonObject,
   selectedOption: JsonObject,
   sealed: JsonObject,
   day: number,
 ): void {
   const gates = asObjectArray(
-    expectProperty(cardProposal, "agency_gates", "EventCardProposal"),
-    "EventCardProposal.agency_gates",
+    expectProperty(
+      cardCandidate,
+      "agency_gates",
+      "EventCardPublishCandidate",
+    ),
+    "EventCardPublishCandidate.agency_gates",
   );
   const selectedOutcomes = asObjectArray(
-    expectProperty(selectedOption, "outcomes", "EventCardOutcomeDraft"),
-    "EventCardOutcomeDraft.outcomes",
+    expectProperty(
+      selectedOption,
+      "outcomes",
+      "MaterializedEventCardOutcomeCandidate",
+    ),
+    "MaterializedEventCardOutcomeCandidate.outcomes",
   );
   const selectedOutcomeIds = new Set(
     selectedOutcomes.map((outcome) =>
-      expectString(outcome, "outcome_id", "SemanticOutcomeProposal"),
+      expectString(
+        outcome,
+        "outcome_id",
+        "MaterializedSemanticOutcomeCandidate",
+      ),
     ),
   );
 
   const requiredCommitmentKeys = new Set<string>();
   for (const gate of gates) {
     const protectedIds = asStringArray(
-      expectProperty(gate, "protected_outcome_ids", "AgencyGate"),
-      "AgencyGate.protected_outcome_ids",
+      expectProperty(
+        gate,
+        "protected_outcome_ids",
+        "MaterializedAgencyGateCandidate",
+      ),
+      "MaterializedAgencyGateCandidate.protected_outcome_ids",
     );
     const protectsSelected = protectedIds.some((id) => selectedOutcomeIds.has(id));
     if (!protectsSelected) {
       continue;
     }
     const evidence = asObjectArray(
-      expectProperty(gate, "commitment_evidence", "AgencyGate"),
-      "AgencyGate.commitment_evidence",
+      expectProperty(
+        gate,
+        "commitment_evidence",
+        "MaterializedAgencyGateCandidate",
+      ),
+      "MaterializedAgencyGateCandidate.commitment_evidence",
     );
     if (evidence.length === 0) {
       throw fault(
@@ -2734,7 +3219,11 @@ function assertEventCardAgency(
         `Agency gate protecting selected outcomes has empty commitment_evidence`,
         {
           operation_kind: context.operationKind,
-          gate_id: expectString(gate, "gate_id", "AgencyGate"),
+          gate_id: expectString(
+            gate,
+            "gate_id",
+            "MaterializedAgencyGateCandidate",
+          ),
         },
       );
     }
@@ -2841,8 +3330,12 @@ function assertCommitmentRefResolves(
   }
 
   const requirement = expectJsonObject(
-    expectProperty(gate, "requirement", "AgencyGate"),
-    "AgencyGate.requirement",
+    expectProperty(
+      gate,
+      "requirement",
+      "MaterializedAgencyGateCandidate",
+    ),
+    "MaterializedAgencyGateCandidate.requirement",
   );
   assertEqual(
     "agency.semantic_intent",
@@ -2883,7 +3376,7 @@ function assertCommitmentRefResolves(
 
 function assertDialogueQuotesVisible(
   context: OperationContext,
-  cardProposal: JsonObject,
+  cardCandidate: JsonObject,
   control: JsonObject,
   sealed: JsonObject,
 ): void {
@@ -2913,9 +3406,9 @@ function assertDialogueQuotesVisible(
     "ControlBinding",
   );
   const sourceDialogueId = expectString(
-    cardProposal,
+    cardCandidate,
     "source_dialogue_id",
-    "EventCardProposal",
+    "EventCardPublishCandidate",
   );
   const sourceDialogue = findDialogue(context.world, sourceDialogueId);
   if (
@@ -3088,51 +3581,48 @@ function assertPacketProposalProvenance(context: OperationContext): JsonObject {
 function assertModelEvidenceForOperation(context: EvidenceContext): void {
   switch (context.operationKind) {
     case "definition.validate": {
-      const receipt = requireModelInvocation(
+      const verified = requireSingleVerifiedDraft(
         context,
         context.input,
         "model_proof",
-        ["director.system_dialogue"],
+        "director.definition_draft",
+        "draft",
       );
-      assertReceiptCollectionMember(
-        receipt,
-        "definitions",
-        expectProperty(context.input, "proposal", "DefinitionValidationInput"),
-        "definition.validate proposal",
+      assertDefinitionCandidateMatchesDraft(
+        context,
+        verified.receipt,
+        verified.draft,
       );
       return;
     }
     case "goal_plan.validate": {
-      const receipt = requireModelInvocation(
+      const verified = requireSingleVerifiedDraft(
         context,
         context.input,
         "model_proof",
-        ["director.system_dialogue"],
+        "director.goal_plan",
+        "draft",
       );
-      assertReceiptCollectionMember(
-        receipt,
-        "goal_plans",
-        expectProperty(context.input, "proposal", "GoalPlanValidateInput"),
-        "goal_plan.validate proposal",
+      assertGoalPlanCandidateMatchesDraft(
+        context,
+        verified.receipt,
+        verified.draft,
       );
       return;
     }
     case "automatic_event.world.resolve": {
-      const receipt = requireModelInvocation(
+      const verified = requireVerifiedCollectionDraft(
         context,
         context.input,
         "model_proof",
-        ["director.daily_settlement"],
-      );
-      assertReceiptCollectionMember(
-        receipt,
+        "director.daily_settlement",
         "automatic_events",
-        expectProperty(
-          context.input,
-          "proposal",
-          "WorldAutomaticEventResolveInput",
-        ),
-        "automatic_event.world.resolve proposal",
+      );
+      assertAutomaticEventCandidateMatchesDraft(
+        context,
+        verified.receipt,
+        verified.draft,
+        "world",
       );
       return;
     }
@@ -3143,17 +3633,17 @@ function assertModelEvidenceForOperation(context: EvidenceContext): void {
       assertDialogueTurnEvidence(context);
       return;
     case "event_card.publish": {
-      const receipt = requireModelInvocation(
+      const verified = requireVerifiedCollectionDraft(
         context,
         context.input,
         "model_proof",
-        ["director.dialogue_events", "director.system_dialogue"],
-      );
-      assertReceiptCollectionMember(
-        receipt,
+        "director.dialogue_events",
         "event_cards",
-        expectProperty(context.input, "proposal", "EventCardPublishInput"),
-        "event_card.publish proposal",
+      );
+      assertEventCardCandidateMatchesDraft(
+        context,
+        verified.receipt,
+        verified.draft,
       );
       return;
     }
@@ -3174,30 +3664,31 @@ function assertModelEvidenceForOperation(context: EvidenceContext): void {
 function assertCharacterAutomaticEventEvidence(
   context: EvidenceContext,
 ): void {
-  const directorReceipt = requireModelInvocation(
+  const verifiedEvent = requireVerifiedCollectionDraft(
     context,
     context.input,
     "director_proof",
-    ["director.daily_settlement"],
+    "director.daily_settlement",
+    "automatic_events",
   );
-  const proposal = expectJsonObject(
+  assertAutomaticEventCandidateMatchesDraft(
+    context,
+    verifiedEvent.receipt,
+    verifiedEvent.draft,
+    "character",
+  );
+  const eventCandidate = expectJsonObject(
     expectProperty(
       context.input,
-      "proposal",
+      "candidate",
       "CharacterAutomaticEventResolveInput",
     ),
-    "CharacterAutomaticEventResolveInput.proposal",
-  );
-  assertReceiptCollectionMember(
-    directorReceipt,
-    "automatic_events",
-    proposal,
-    "automatic_event.character.resolve proposal",
+    "CharacterAutomaticEventResolveInput.candidate",
   );
   const proposalId = expectString(
-    proposal,
+    eventCandidate,
     "proposal_id",
-    "CharacterAutomaticEventProposal",
+    "MaterializedCharacterAutomaticEventCandidate",
   );
   const batches = asObjectArray(
     expectProperty(
@@ -3210,11 +3701,11 @@ function assertCharacterAutomaticEventEvidence(
   const targetIds = new Set(
     asStringArray(
       expectProperty(
-        proposal,
+        eventCandidate,
         "target_entity_ids",
-        "CharacterAutomaticEventProposal",
+        "MaterializedCharacterAutomaticEventCandidate",
       ),
-      "CharacterAutomaticEventProposal.target_entity_ids",
+      "MaterializedCharacterAutomaticEventCandidate.target_entity_ids",
     ),
   );
   const batchCharacterIds = new Set<string>();
@@ -3226,6 +3717,12 @@ function assertCharacterAutomaticEventEvidence(
       ["character.react"],
     );
     const receiptInput = modelReceiptInput(receipt);
+    assertEqual(
+      "character_react.day",
+      expectInteger(eventCandidate, "day", "MaterializedCharacterAutomaticEventCandidate"),
+      expectInteger(receiptInput, "day", "CharacterReactInput"),
+      context.operationKind,
+    );
     const subjective = expectJsonObject(
       expectProperty(receiptInput, "subjective_view", "CharacterReactInput"),
       "CharacterReactInput.subjective_view",
@@ -3275,88 +3772,76 @@ function assertCharacterAutomaticEventEvidence(
       expectProperty(receiptInput, "events", "CharacterReactInput"),
       "CharacterReactInput.events",
     );
-    const matchingStimuli = stimuli.filter(
-      (stimulus) =>
-        expectString(stimulus, "proposal_id", "CharacterEventStimulus") ===
-        proposalId,
-    );
-    if (matchingStimuli.length !== 1) {
-      throw fault(
-        "rule_plugin.semantic.model_evidence_stimulus_missing",
-        "Character reaction proof must contain exactly one stimulus for the automatic event",
-        {
-          operation_kind: context.operationKind,
-          proposal_id: proposalId,
-          matching_stimuli: matchingStimuli.length,
-          batch_index: batchIndex,
-        },
-      );
-    }
-    assertStimulusMatchesProposal(
-      matchingStimuli[0] as JsonObject,
-      proposal,
-      context.operationKind,
-    );
-
     const output = modelReceiptOutput(receipt);
     const verifiedReactions = asObjectArray(
       expectProperty(output, "reactions", "CharacterReactOutput"),
       "CharacterReactOutput.reactions",
     );
-    const reactions = asObjectArray(
-      expectProperty(batch, "reactions", "CharacterReactionBatch"),
-      "CharacterReactionBatch.reactions",
+    assertArrayLength(
+      context,
+      "character_react.events_and_reactions",
+      stimuli,
+      verifiedReactions,
     );
-    const seenReactionIds = new Set<string>();
-    for (const reaction of reactions) {
-      const reactionId = expectString(
-        reaction,
-        "reaction_id",
-        "CharacterReactionProposal",
+    const candidates = asObjectArray(
+      expectProperty(batch, "candidates", "CharacterReactionBatch"),
+      "CharacterReactionBatch.candidates",
+    );
+    if (candidates.length !== 1) {
+      throw fault(
+        "rule_plugin.semantic.model_evidence_reaction_count",
+        "CharacterReactionBatch must carry exactly one candidate for the automatic event being resolved",
+        {
+          operation_kind: context.operationKind,
+          proposal_id: proposalId,
+          batch_index: batchIndex,
+          candidate_count: candidates.length,
+        },
       );
-      if (seenReactionIds.has(reactionId)) {
-        throw fault(
-          "rule_plugin.semantic.model_evidence_reaction_duplicate",
-          "CharacterReactionBatch contains a duplicate verified reaction",
-          {
-            operation_kind: context.operationKind,
-            reaction_id: reactionId,
-            batch_index: batchIndex,
-          },
-        );
-      }
-      seenReactionIds.add(reactionId);
-      const source = expectJsonObject(
-        expectProperty(reaction, "source_event", "CharacterReactionProposal"),
-        "CharacterReactionProposal.source_event",
-      );
-      if (
-        expectString(source, "proposal_id", "CharacterEventRef") !== proposalId
-      ) {
-        throw fault(
-          "rule_plugin.semantic.model_evidence_reaction_wrong_event",
-          "CharacterReactionBatch may only contain reactions for the current proposal",
-          {
-            operation_kind: context.operationKind,
-            proposal_id: proposalId,
-            reaction_id: reactionId,
-          },
-        );
-      }
-      if (
-        !verifiedReactions.some((verified) => jsonEquals(verified, reaction))
-      ) {
-        throw fault(
-          "rule_plugin.semantic.model_evidence_member_missing",
-          "CharacterReactionBatch reaction is not an exact member of its verified model output",
-          {
-            operation_kind: context.operationKind,
-            proposal_id: proposalId,
-            reaction_id: reactionId,
-          },
-        );
-      }
     }
+    const ordinalCandidate = candidates[0] as JsonObject;
+    const draftOrdinal = expectInteger(
+      ordinalCandidate,
+      "draft_ordinal",
+      "OrdinalCharacterReactionCandidate",
+    );
+    const stimulus = stimuli[draftOrdinal];
+    const rawDraft = verifiedReactions[draftOrdinal];
+    if (stimulus === undefined || rawDraft === undefined) {
+      throw fault(
+        "rule_plugin.semantic.model_evidence_ordinal_out_of_range",
+        "Character reaction draft_ordinal is outside its verified event/reaction pair",
+        {
+          operation_kind: context.operationKind,
+          proposal_id: proposalId,
+          batch_index: batchIndex,
+          draft_ordinal: draftOrdinal,
+          event_count: stimuli.length,
+          draft_count: verifiedReactions.length,
+        },
+      );
+    }
+    assertStimulusMatchesCandidate(
+      context,
+      stimulus,
+      eventCandidate,
+    );
+    const reactionCandidate = expectJsonObject(
+      expectProperty(
+        ordinalCandidate,
+        "candidate",
+        "OrdinalCharacterReactionCandidate",
+      ),
+      "OrdinalCharacterReactionCandidate.candidate",
+    );
+    assertCharacterReactionCandidateMatchesDraft({
+      context,
+      receipt,
+      rawDraft,
+      stimulus,
+      proposalId,
+      candidate: reactionCandidate,
+    });
   }
   if (
     targetIds.size !== batchCharacterIds.size ||
@@ -3376,10 +3861,7 @@ function assertCharacterAutomaticEventEvidence(
 }
 
 function assertDialogueTurnEvidence(context: EvidenceContext): void {
-  const turn = expectJsonObject(
-    expectProperty(context.input, "turn", "DialogueTurnAppendInput"),
-    "DialogueTurnAppendInput.turn",
-  );
+  const turn = readDialogueTurnCandidate(context.input);
   const source = expectJsonObject(
     expectProperty(turn, "source", "DialogueTurn"),
     "DialogueTurn.source",
@@ -3393,13 +3875,13 @@ function assertDialogueTurnEvidence(context: EvidenceContext): void {
     return;
   }
 
-  const expectedKinds =
+  const expectedKind =
     sourceKind === "character_mind"
-      ? (["character.dialogue"] as const)
+      ? "character.dialogue"
       : sourceKind === "director_system"
-        ? (["director.system_dialogue"] as const)
+        ? "director.system_dialogue"
         : undefined;
-  if (expectedKinds === undefined) {
+  if (expectedKind === undefined) {
     throw fault(
       "rule_plugin.semantic.dialogue_source_unknown",
       `Unknown DialogueTurn source_kind ${sourceKind}`,
@@ -3413,7 +3895,7 @@ function assertDialogueTurnEvidence(context: EvidenceContext): void {
     context,
     context.input,
     "model_proof",
-    expectedKinds,
+    [expectedKind],
   );
   assertEqual(
     "dialogue.source.model_request_id",
@@ -3458,9 +3940,26 @@ function assertDialogueTurnEvidence(context: EvidenceContext): void {
     expectProperty(output, "reply", "ModelDialogueOutput"),
     "ModelDialogueOutput.reply",
   );
-  assertReplyMatchesTurn(context, reply, turn);
+  assertReplyMatchesTurn(context, receiptInput, reply, turn);
+  assertJsonFieldEqual(
+    "dialogue.turn.occurred_at",
+    expectProperty(
+      requestWorldState(context),
+      "clock",
+      "WorldState",
+    ),
+    expectProperty(turn, "occurred_at", "DialogueTurn"),
+    context.operationKind,
+  );
 
   if (sourceKind === "character_mind") {
+    if (context.input.candidate === undefined) {
+      throw fault(
+        "rule_plugin.semantic.dialogue_character_candidate_missing",
+        "Character dialogue RulePlugin input must use its materialized candidate",
+        { operation_kind: context.operationKind },
+      );
+    }
     const subjective = expectJsonObject(
       expectProperty(
         receiptInput,
@@ -3487,23 +3986,56 @@ function assertDialogueTurnEvidence(context: EvidenceContext): void {
       expectString(speakerEntity, "entity_id", "EntityRef"),
       context.operationKind,
     );
-    assertCommitmentsMatchDrafts(context, output, turn);
+    assertCommitmentsMatchDrafts(
+      context,
+      receiptInput,
+      output,
+      turn,
+    );
+  } else if (context.input.turn === undefined) {
+    throw fault(
+      "rule_plugin.semantic.dialogue_system_turn_missing",
+      "System dialogue RulePlugin input must carry its complete turn",
+      { operation_kind: context.operationKind },
+    );
   }
+}
+
+function readDialogueTurnCandidate(input: JsonObject): JsonObject {
+  if (input.candidate !== undefined) {
+    return expectJsonObject(
+      input.candidate,
+      "CharacterDialogueTurnAppendInput.candidate",
+    );
+  }
+  return expectJsonObject(
+    expectProperty(input, "turn", "DialogueTurnAppendInput"),
+    "DialogueTurnAppendInput.turn",
+  );
 }
 
 function assertReplyMatchesTurn(
   context: EvidenceContext,
+  receiptInput: JsonObject,
   reply: JsonObject,
   turn: JsonObject,
 ): void {
-  for (const field of ["locale", "text"] as const) {
-    assertEqual(
-      `dialogue.turn.${field}`,
-      expectString(reply, field, "DialogueReplyDraft"),
-      expectString(turn, field, "DialogueTurn"),
-      context.operationKind,
-    );
-  }
+  assertEqual(
+    "dialogue.turn.locale",
+    expectString(
+      receiptInput,
+      "response_locale",
+      "ModelDialogueInput",
+    ),
+    expectString(turn, "locale", "DialogueTurn"),
+    context.operationKind,
+  );
+  assertEqual(
+    "dialogue.turn.text",
+    expectString(reply, "text", "DialogueReplyDraft"),
+    expectString(turn, "text", "DialogueTurn"),
+    context.operationKind,
+  );
   if (reply.emotion_id !== undefined || turn.emotion_id !== undefined) {
     if (reply.emotion_id !== turn.emotion_id) {
       throw fault(
@@ -3520,6 +4052,7 @@ function assertReplyMatchesTurn(
 
 function assertCommitmentsMatchDrafts(
   context: EvidenceContext,
+  receiptInput: JsonObject,
   output: JsonObject,
   turn: JsonObject,
 ): void {
@@ -3543,11 +4076,23 @@ function assertCommitmentsMatchDrafts(
     );
   }
   const commitmentIds = new Set<string>();
+  const dialogue = expectJsonObject(
+    expectProperty(
+      receiptInput,
+      "dialogue",
+      "CharacterDialogueInput",
+    ),
+    "CharacterDialogueInput.dialogue",
+  );
+  const participants = asObjectArray(
+    expectProperty(dialogue, "participants", "DialogueRecord"),
+    "DialogueRecord.participants",
+  );
   for (const [index, commitment] of commitments.entries()) {
     const commitmentId = expectString(
       commitment,
       "commitment_id",
-      "AgencyCommitment",
+      "MaterializedAgencyCommitmentCandidate",
     );
     if (commitmentIds.has(commitmentId)) {
       throw fault(
@@ -3560,41 +4105,2729 @@ function assertCommitmentsMatchDrafts(
       );
     }
     commitmentIds.add(commitmentId);
-    if (
-      !jsonEquals(
-        omitField(commitment, "commitment_id"),
-        drafts[index] as JsonObject,
-      )
-    ) {
+    const draft = drafts[index] as JsonObject;
+    for (const field of [
+      "semantic_intent",
+      "stance",
+      "terms",
+    ] as const) {
+      assertJsonFieldEqual(
+        `dialogue.commitment.${index}.${field}`,
+        expectProperty(
+          draft,
+          field,
+          "AgencyCommitmentSemanticDraft",
+        ),
+        expectProperty(
+          commitment,
+          field,
+          "MaterializedAgencyCommitmentCandidate",
+        ),
+        context.operationKind,
+      );
+    }
+    assertJsonFieldEqual(
+      `dialogue.commitment.${index}.subjects`,
+      readDialogueParticipantSubjects({
+        context,
+        participants,
+        indices: readModelIndices(
+          draft,
+          "subject_participant_indices",
+          "AgencyCommitmentSemanticDraft",
+        ),
+        label: `dialogue.commitment.${index}.subjects`,
+      }),
+      expectProperty(
+        commitment,
+        "subjects",
+        "MaterializedAgencyCommitmentCandidate",
+      ),
+      context.operationKind,
+    );
+  }
+}
+
+function assertStimulusMatchesCandidate(
+  context: EvidenceContext,
+  stimulus: JsonObject,
+  candidate: JsonObject,
+): void {
+  assertCharacterReactSituationMatchesCandidate(
+    context,
+    expectJsonObject(
+      expectProperty(
+        candidate,
+        "situation",
+        "MaterializedCharacterAutomaticEventCandidate",
+      ),
+      "MaterializedCharacterAutomaticEventCandidate.situation",
+    ),
+    expectJsonObject(
+      expectProperty(stimulus, "situation", "CharacterReactEventInput"),
+      "CharacterReactEventInput.situation",
+    ),
+  );
+  assertCharacterReactOutcomesMatchCandidate(
+    context,
+    asObjectArray(
+      expectProperty(
+        candidate,
+        "candidate_outcomes",
+        "MaterializedCharacterAutomaticEventCandidate",
+      ),
+      "MaterializedCharacterAutomaticEventCandidate.candidate_outcomes",
+    ),
+    asObjectArray(
+      expectProperty(
+        stimulus,
+        "candidate_outcomes",
+        "CharacterReactEventInput",
+      ),
+      "CharacterReactEventInput.candidate_outcomes",
+    ),
+  );
+  assertCharacterReactAgencyGatesMatchCandidate(
+    context,
+    asObjectArray(
+      expectProperty(
+        candidate,
+        "agency_gates",
+        "MaterializedCharacterAutomaticEventCandidate",
+      ),
+      "MaterializedCharacterAutomaticEventCandidate.agency_gates",
+    ),
+    asObjectArray(
+      expectProperty(
+        stimulus,
+        "agency_gates",
+        "CharacterReactEventInput",
+      ),
+      "CharacterReactEventInput.agency_gates",
+    ),
+  );
+}
+
+function requireSingleVerifiedDraft(
+  context: EvidenceContext,
+  owner: JsonObject,
+  proofField: string,
+  requestKind: string,
+  draftField: string,
+): {
+  readonly receipt: VerifiedModelInvocationReceipt;
+  readonly draft: JsonObject;
+} {
+  const receipt = requireModelInvocation(
+    context,
+    owner,
+    proofField,
+    [requestKind],
+  );
+  const ordinal = expectInteger(
+    owner,
+    "draft_ordinal",
+    context.operationKind,
+  );
+  if (ordinal !== 0) {
+    throw fault(
+      "rule_plugin.semantic.model_evidence_ordinal_out_of_range",
+      "A single-draft model output can only be selected with draft_ordinal 0",
+      {
+        operation_kind: context.operationKind,
+        request_kind: requestKind,
+        draft_ordinal: ordinal,
+      },
+    );
+  }
+  return Object.freeze({
+    receipt,
+    draft: expectJsonObject(
+      expectProperty(
+        modelReceiptOutput(receipt),
+        draftField,
+        "ModelOutput",
+      ),
+      `ModelOutput.${draftField}`,
+    ),
+  });
+}
+
+function requireVerifiedCollectionDraft(
+  context: EvidenceContext,
+  owner: JsonObject,
+  proofField: string,
+  requestKind: string,
+  collectionField: string,
+): {
+  readonly receipt: VerifiedModelInvocationReceipt;
+  readonly draft: JsonObject;
+  readonly ordinal: number;
+} {
+  const receipt = requireModelInvocation(
+    context,
+    owner,
+    proofField,
+    [requestKind],
+  );
+  const ordinal = expectInteger(
+    owner,
+    "draft_ordinal",
+    context.operationKind,
+  );
+  const drafts = asObjectArray(
+    expectProperty(
+      modelReceiptOutput(receipt),
+      collectionField,
+      "ModelOutput",
+    ),
+    `ModelOutput.${collectionField}`,
+  );
+  const draft = drafts[ordinal];
+  if (draft === undefined) {
+    throw fault(
+      "rule_plugin.semantic.model_evidence_ordinal_out_of_range",
+      "draft_ordinal is outside the referenced verified model collection",
+      {
+        operation_kind: context.operationKind,
+        request_kind: requestKind,
+        collection: collectionField,
+        draft_ordinal: ordinal,
+        draft_count: drafts.length,
+      },
+    );
+  }
+  return Object.freeze({ receipt, draft, ordinal });
+}
+
+function assertDefinitionCandidateMatchesDraft(
+  context: EvidenceContext,
+  receipt: VerifiedModelInvocationReceipt,
+  rawDraft: JsonObject,
+): void {
+  const selectionSpace = requireModelSelectionSpace(context, receipt);
+  const candidate = expectJsonObject(
+    expectProperty(
+      context.input,
+      "candidate",
+      "DefinitionValidationInput",
+    ),
+    "DefinitionValidationInput.candidate",
+  );
+  const candidateDraft = expectJsonObject(
+    expectProperty(candidate, "draft", "DynamicDefinitionProposal"),
+    "DynamicDefinitionProposal.draft",
+  );
+  const requestInput = modelReceiptInput(receipt);
+  const locale = expectString(
+    requestInput,
+    "response_locale",
+    "DirectorDefinitionDraftInput",
+  );
+  assertLocalizedText(
+    context,
+    "definition.purpose",
+    locale,
+    expectString(
+      requestInput,
+      "purpose",
+      "DirectorDefinitionDraftInput",
+    ),
+    expectProperty(candidate, "purpose", "DynamicDefinitionProposal"),
+  );
+  assertPlanningCatalogIndexMaterialization({
+    context,
+    label: "definition.definition_type",
+    owner: rawDraft,
+    indexField: "definition_type_index",
+    selectorLabel: "DynamicDefinitionSemanticDraft",
+    entries: selectionSpace.definitionTypes,
+    entryLabel: "TypeDefinition",
+    localIdField: "type_id",
+    materialized: expectJsonObject(
+      expectProperty(
+        candidateDraft,
+        "definition_type",
+        "DynamicDefinitionDraft",
+      ),
+      "DynamicDefinitionDraft.definition_type",
+    ),
+    catalogKind: "definition_type",
+  });
+  for (const field of ["name", "summary"] as const) {
+    assertLocalizedText(
+      context,
+      `definition.${field}`,
+      locale,
+      expectString(
+        rawDraft,
+        field,
+        "DynamicDefinitionSemanticDraft",
+      ),
+      expectProperty(candidateDraft, field, "DynamicDefinitionDraft"),
+    );
+  }
+  assertEqual(
+    "definition.rationale",
+    expectString(
+      rawDraft,
+      "rationale",
+      "DynamicDefinitionSemanticDraft",
+    ),
+    expectString(candidateDraft, "rationale", "DynamicDefinitionDraft"),
+    context.operationKind,
+  );
+  const rawComponents = asObjectArray(
+    expectProperty(
+      rawDraft,
+      "components",
+      "DynamicDefinitionSemanticDraft",
+    ),
+    "DynamicDefinitionSemanticDraft.components",
+  );
+  const components = asObjectArray(
+    expectProperty(
+      candidateDraft,
+      "components",
+      "DynamicDefinitionDraft",
+    ),
+    "DynamicDefinitionDraft.components",
+  );
+  assertArrayLength(
+    context,
+    "definition.components",
+    rawComponents,
+    components,
+  );
+  for (const [ordinal, rawComponent] of rawComponents.entries()) {
+    const component = components[ordinal] as JsonObject;
+    assertEqual(
+      `definition.components.${ordinal}.ordinal`,
+      ordinal,
+      expectInteger(component, "ordinal", "ComponentValue"),
+      context.operationKind,
+    );
+    assertPlanningCatalogIndexMaterialization({
+      context,
+      label: `definition.components.${ordinal}.component_type`,
+      owner: rawComponent,
+      indexField: "component_type_index",
+      selectorLabel: "DefinitionComponentSemanticDraft",
+      entries: selectionSpace.componentTypes,
+      entryLabel: "TypeDefinition",
+      localIdField: "type_id",
+      materialized: expectJsonObject(
+        expectProperty(component, "component_type", "ComponentValue"),
+        "ComponentValue.component_type",
+      ),
+      catalogKind: "component_type",
+    });
+    assertJsonFieldEqual(
+      `definition.components.${ordinal}.value`,
+      expectProperty(
+        rawComponent,
+        "value",
+        "DefinitionComponentSemanticDraft",
+      ),
+      expectProperty(component, "value", "ComponentValue"),
+      context.operationKind,
+    );
+  }
+}
+
+function assertGoalPlanCandidateMatchesDraft(
+  context: EvidenceContext,
+  receipt: VerifiedModelInvocationReceipt,
+  rawDraft: JsonObject,
+): void {
+  const selectionSpace = requireModelSelectionSpace(context, receipt);
+  const candidate = expectJsonObject(
+    expectProperty(context.input, "candidate", "GoalPlanValidateInput"),
+    "GoalPlanValidateInput.candidate",
+  );
+  const candidateDraft = expectJsonObject(
+    expectProperty(candidate, "draft", "GoalPlanProposal"),
+    "GoalPlanProposal.draft",
+  );
+  const requestInput = modelReceiptInput(receipt);
+  const locale = expectString(
+    requestInput,
+    "response_locale",
+    "DirectorGoalPlanInput",
+  );
+  const worldView = expectJsonObject(
+    expectProperty(requestInput, "world_view", "DirectorGoalPlanInput"),
+    "DirectorGoalPlanInput.world_view",
+  );
+  const knowledgeView = expectJsonObject(
+    expectProperty(
+      requestInput,
+      "knowledge_view",
+      "DirectorGoalPlanInput",
+    ),
+    "DirectorGoalPlanInput.knowledge_view",
+  );
+  assertEqual(
+    "goal_plan.owner_actor_id",
+    expectString(
+      knowledgeView,
+      "viewer_entity_id",
+      "KnowledgeView",
+    ),
+    expectString(candidate, "owner_actor_id", "GoalPlanProposal"),
+    context.operationKind,
+  );
+  assertLocalizedText(
+    context,
+    "goal_plan.goal",
+    locale,
+    expectString(rawDraft, "goal", "GoalPlanSemanticDraft"),
+    expectProperty(candidateDraft, "goal", "GoalPlanDraft"),
+  );
+  for (const field of ["expected_state", "knowledge_scope"] as const) {
+    assertJsonFieldEqual(
+      `goal_plan.${field}`,
+      expectProperty(rawDraft, field, "GoalPlanSemanticDraft"),
+      expectProperty(candidateDraft, field, "GoalPlanDraft"),
+      context.operationKind,
+    );
+  }
+  const expectedFacts = asObjectArray(
+    expectProperty(rawDraft, "facts", "GoalPlanSemanticDraft"),
+    "GoalPlanSemanticDraft.facts",
+  ).map((selector, ordinal) =>
+    resolveFactSelector(
+      context,
+      worldView,
+      knowledgeView,
+      selector,
+      ordinal,
+    ),
+  );
+  assertJsonFieldEqual(
+    "goal_plan.fact_refs",
+    expectedFacts,
+    expectProperty(candidateDraft, "fact_refs", "GoalPlanDraft"),
+    context.operationKind,
+  );
+  assertWorldLawIndexMaterialization({
+    context,
+    label: "goal_plan.constraints",
+    owner: rawDraft,
+    indexField: "constraint_law_indices",
+    selectorLabel: "GoalPlanSemanticDraft",
+    laws: selectionSpace.worldLaws,
+    materialized: asObjectArray(
+      expectProperty(candidateDraft, "constraints", "GoalPlanDraft"),
+      "GoalPlanDraft.constraints",
+    ),
+  });
+  assertGoalPlanCandidateNodes({
+    context,
+    selectionSpace,
+    locale,
+    rawDraft,
+    candidateDraft,
+  });
+}
+
+function assertGoalPlanCandidateNodes(input: {
+  readonly context: EvidenceContext;
+  readonly selectionSpace: ModelSelectionSpace;
+  readonly locale: string;
+  readonly rawDraft: JsonObject;
+  readonly candidateDraft: JsonObject;
+}): void {
+  const rawNodes = asObjectArray(
+    expectProperty(
+      input.rawDraft,
+      "nodes",
+      "GoalPlanSemanticDraft",
+    ),
+    "GoalPlanSemanticDraft.nodes",
+  );
+  const nodes = asObjectArray(
+    expectProperty(input.candidateDraft, "nodes", "GoalPlanDraft"),
+    "GoalPlanDraft.nodes",
+  );
+  assertArrayLength(input.context, "goal_plan.nodes", rawNodes, nodes);
+  const demandIds = new Set<string>();
+  const nodeKeys = readUniqueIdentifiers(
+    input.context,
+    nodes,
+    "node_key",
+    "GoalNodeDraft",
+    "goal_plan.nodes",
+  );
+  for (const [ordinal, rawNode] of rawNodes.entries()) {
+    const node = nodes[ordinal] as JsonObject;
+    assertLocalizedText(
+      input.context,
+      `goal_plan.nodes.${ordinal}.title`,
+      input.locale,
+      expectString(rawNode, "title", "GoalNodeSemanticDraft"),
+      expectProperty(node, "title", "GoalNodeDraft"),
+    );
+    assertJsonFieldEqual(
+      `goal_plan.nodes.${ordinal}.arguments`,
+      expectProperty(rawNode, "arguments", "GoalNodeSemanticDraft"),
+      expectProperty(node, "arguments", "GoalNodeDraft"),
+      input.context.operationKind,
+    );
+    for (const mapping of [
+      ["depends_on", "depends_on"],
+      ["alternatives", "alternative_node_keys"],
+    ] as const) {
+      assertJsonFieldEqual(
+        `goal_plan.nodes.${ordinal}.${mapping[1]}`,
+        readModelIndices(
+          rawNode,
+          mapping[0],
+          "GoalNodeSemanticDraft",
+        ).map((index) => {
+          const selected = nodeKeys[index];
+          if (selected === undefined) {
+            throw fault(
+              "rule_plugin.semantic.model_evidence_ordinal_out_of_range",
+              "Goal node selector is outside its verified node collection",
+              {
+                operation_kind: input.context.operationKind,
+                node_ordinal: ordinal,
+                field: mapping[0],
+                selected_ordinal: index,
+                node_count: nodeKeys.length,
+              },
+            );
+          }
+          return selected;
+        }),
+        expectProperty(node, mapping[1], "GoalNodeDraft"),
+        input.context.operationKind,
+      );
+    }
+    assertWorldLawIndexMaterialization({
+      context: input.context,
+      label: `goal_plan.nodes.${ordinal}.completion_rules`,
+      owner: rawNode,
+      indexField: "completion_rule_indices",
+      selectorLabel: "GoalNodeSemanticDraft",
+      laws: input.selectionSpace.worldLaws,
+      materialized: asObjectArray(
+        expectProperty(
+          node,
+          "completion_rules",
+          "GoalNodeDraft",
+        ),
+        "GoalNodeDraft.completion_rules",
+      ),
+    });
+    assertCapabilityRequirementMaterialization({
+      context: input.context,
+      selectionSpace: input.selectionSpace,
+      locale: input.locale,
+      label: `goal_plan.nodes.${ordinal}.capability_requirement`,
+      selector: expectJsonObject(
+        expectProperty(
+          rawNode,
+          "capability_requirement",
+          "GoalNodeSemanticDraft",
+        ),
+        "GoalNodeSemanticDraft.capability_requirement",
+      ),
+      materialized: expectJsonObject(
+        expectProperty(
+          node,
+          "capability_requirement",
+          "GoalNodeDraft",
+        ),
+        "GoalNodeDraft.capability_requirement",
+      ),
+      demandIds,
+    });
+  }
+}
+
+function assertCapabilityRequirementMaterialization(input: {
+  readonly context: EvidenceContext;
+  readonly selectionSpace: ModelSelectionSpace;
+  readonly locale: string;
+  readonly label: string;
+  readonly selector: JsonObject;
+  readonly materialized: JsonObject;
+  readonly demandIds: Set<string>;
+}): void {
+  const kind = expectString(
+    input.selector,
+    "requirement_kind",
+    "CapabilityRequirementSelector",
+  );
+  assertEqual(
+    `${input.label}.requirement_kind`,
+    kind,
+    expectString(
+      input.materialized,
+      "requirement_kind",
+      "CapabilityRequirement",
+    ),
+    input.context.operationKind,
+  );
+  if (kind === "bound") {
+    assertPlanningCatalogIndexMaterialization({
+      context: input.context,
+      label: `${input.label}.capability`,
+      owner: input.selector,
+      indexField: "capability_index",
+      selectorLabel: "CapabilityRequirementSelector",
+      entries: input.selectionSpace.capabilities,
+      entryLabel: "Capability",
+      localIdField: "capability_id",
+      materialized: expectJsonObject(
+        expectProperty(
+          input.materialized,
+          "capability",
+          "CapabilityRequirement",
+        ),
+        "CapabilityRequirement.capability",
+      ),
+      catalogKind: "capability",
+    });
+    return;
+  }
+  if (kind !== "demand") {
+    throw fault(
+      "rule_plugin.semantic.goal_plan_requirement_kind",
+      "Goal-plan candidate has an unknown capability requirement kind",
+      {
+        operation_kind: input.context.operationKind,
+        requirement_kind: kind,
+      },
+    );
+  }
+  const demand = expectJsonObject(
+    expectProperty(
+      input.materialized,
+      "demand",
+      "CapabilityRequirement",
+    ),
+    "CapabilityRequirement.demand",
+  );
+  const demandId = expectString(demand, "demand_id", "CapabilityDemand");
+  if (input.demandIds.has(demandId)) {
+    throw fault(
+      "rule_plugin.semantic.goal_plan_demand_id_duplicate",
+      "Goal-plan candidate demand_id values must be unique",
+      {
+        operation_kind: input.context.operationKind,
+        demand_id: demandId,
+      },
+    );
+  }
+  input.demandIds.add(demandId);
+  assertEqual(
+    `${input.label}.semantic_intent`,
+    expectString(
+      input.selector,
+      "semantic_intent",
+      "CapabilityRequirementSelector",
+    ),
+    expectString(demand, "semantic_intent", "CapabilityDemand"),
+    input.context.operationKind,
+  );
+  assertLocalizedText(
+    input.context,
+    `${input.label}.description`,
+    input.locale,
+    expectString(
+      input.selector,
+      "description",
+      "CapabilityRequirementSelector",
+    ),
+    expectProperty(demand, "description", "CapabilityDemand"),
+  );
+  const archetypeIndices = readModelIndices(
+    input.selector,
+    "allowed_archetype_indices",
+    "CapabilityRequirementSelector",
+  );
+  const archetypes = asObjectArray(
+    expectProperty(
+      demand,
+      "allowed_archetypes",
+      "CapabilityDemand",
+    ),
+    "CapabilityDemand.allowed_archetypes",
+  );
+  assertArrayLength(
+    input.context,
+    `${input.label}.allowed_archetypes`,
+    archetypeIndices,
+    archetypes,
+  );
+  for (const [ordinal, index] of archetypeIndices.entries()) {
+    assertPlanningCatalogEntryMaterialization({
+      context: input.context,
+      label: `${input.label}.allowed_archetypes.${ordinal}`,
+      entry: requireModelSelectionEntry(
+        input.context,
+        input.selectionSpace.generationArchetypes,
+        index,
+        `${input.label}.allowed_archetype_indices`,
+      ),
+      entryLabel: "GenerationArchetype",
+      localIdField: "archetype_id",
+      materialized: archetypes[ordinal] as JsonObject,
+      catalogKind: "generation_archetype",
+    });
+  }
+  assertWorldLawIndexMaterialization({
+    context: input.context,
+    label: `${input.label}.constraints`,
+    owner: input.selector,
+    indexField: "constraint_law_indices",
+    selectorLabel: "CapabilityRequirementSelector",
+    laws: input.selectionSpace.worldLaws,
+    materialized: asObjectArray(
+      expectProperty(demand, "constraints", "CapabilityDemand"),
+      "CapabilityDemand.constraints",
+    ),
+  });
+}
+
+interface ModelSelectionSpace {
+  readonly definitionTypes: readonly JsonObject[];
+  readonly componentTypes: readonly JsonObject[];
+  readonly capabilities: readonly JsonObject[];
+  readonly worldLaws: readonly JsonObject[];
+  readonly generationArchetypes: readonly JsonObject[];
+}
+
+function requireModelSelectionSpace(
+  context: EvidenceContext,
+  receipt: VerifiedModelInvocationReceipt,
+): ModelSelectionSpace {
+  const requestLock = worldContentLock(
+    expectJsonObject(
+      expectProperty(
+        context.request.value,
+        "readonly_world",
+        "RulePluginRequest",
+      ),
+      "RulePluginRequest.readonly_world",
+    ),
+    "RulePluginRequest.readonly_world",
+  );
+  const proofLock = worldContentLock(
+    receipt.snapshot.value,
+    "VerifiedModelInvocationReceipt.snapshot",
+  );
+  assertJsonFieldEqual(
+    "model_selection.world_content_lock",
+    proofLock,
+    requestLock,
+    context.operationKind,
+  );
+  const rootBundle = expectJsonObject(
+    expectProperty(
+      requestLock,
+      "root_bundle_lock",
+      "WorldContentLock",
+    ),
+    "WorldContentLock.root_bundle_lock",
+  );
+  const bundleId = expectString(rootBundle, "pack_id", "PackLock");
+  const bundleDigest = expectString(
+    rootBundle,
+    "bundle_digest",
+    "PackLock",
+  );
+  const registered = context.catalog.listModelSelectionCatalog({
+    bundle_id: bundleId,
+    bundle_digest: bundleDigest,
+  });
+  if (registered === undefined) {
+    throw fault(
+      "rule_plugin.semantic.model_selection_catalog_missing",
+      "Locked ContentBundle model selection catalog is unavailable",
+      {
+        operation_kind: context.operationKind,
+        bundle_id: bundleId,
+        bundle_digest: bundleDigest,
+      },
+    );
+  }
+  const worldDefinitionId = expectString(
+    requestLock,
+    "world_definition_id",
+    "WorldContentLock",
+  );
+  const forCurrentWorld = (
+    entries: readonly JsonObject[],
+    label: string,
+  ): readonly JsonObject[] =>
+    Object.freeze(
+      entries.filter(
+        (entry) =>
+          expectString(entry, "world_id", label) === worldDefinitionId,
+      ),
+    );
+  return Object.freeze({
+    definitionTypes: Object.freeze(
+      registered.definitionTypes.filter(
+        (entry) =>
+          expectString(entry, "type_kind", "TypeDefinition") ===
+            "definition" &&
+          entry.runtime_creatable === true &&
+          entry.validator !== undefined,
+      ),
+    ),
+    componentTypes: Object.freeze(
+      registered.componentTypes.filter(
+        (entry) =>
+          expectString(entry, "type_kind", "TypeDefinition") ===
+          "component",
+      ),
+    ),
+    capabilities: forCurrentWorld(registered.capabilities, "Capability"),
+    worldLaws: forCurrentWorld(registered.worldLaws, "WorldLaw"),
+    generationArchetypes: forCurrentWorld(
+      registered.generationArchetypes,
+      "GenerationArchetype",
+    ),
+  });
+}
+
+function assertPlanningCatalogIndexMaterialization(input: {
+  readonly context: EvidenceContext;
+  readonly label: string;
+  readonly owner: JsonObject;
+  readonly indexField: string;
+  readonly selectorLabel: string;
+  readonly entries: readonly JsonObject[];
+  readonly entryLabel: string;
+  readonly localIdField: string;
+  readonly materialized: JsonObject;
+  readonly catalogKind: string;
+}): void {
+  const index = expectInteger(
+    input.owner,
+    input.indexField,
+    input.selectorLabel,
+  );
+  assertPlanningCatalogEntryMaterialization({
+    context: input.context,
+    label: input.label,
+    entry: requireModelSelectionEntry(
+      input.context,
+      input.entries,
+      index,
+      `${input.selectorLabel}.${input.indexField}`,
+    ),
+    entryLabel: input.entryLabel,
+    localIdField: input.localIdField,
+    materialized: input.materialized,
+    catalogKind: input.catalogKind,
+  });
+}
+
+function assertPlanningCatalogEntryMaterialization(input: {
+  readonly context: EvidenceContext;
+  readonly label: string;
+  readonly entry: JsonObject;
+  readonly entryLabel: string;
+  readonly localIdField: string;
+  readonly materialized: JsonObject;
+  readonly catalogKind: string;
+}): void {
+  const rootBundle = requestRootBundleLock(input.context);
+  const bundleId = expectString(rootBundle, "pack_id", "PackLock");
+  const expected = Object.freeze({
+    bundle_id: bundleId,
+    bundle_digest: expectString(
+      rootBundle,
+      "bundle_digest",
+      "PackLock",
+    ),
+    catalog_kind: input.catalogKind,
+    local_id: expectString(
+      input.entry,
+      input.localIdField,
+      input.entryLabel,
+    ),
+  });
+  assertJsonFieldEqual(
+    input.label,
+    expected,
+    input.materialized,
+    input.context.operationKind,
+  );
+}
+
+function assertWorldLawIndexMaterialization(input: {
+  readonly context: EvidenceContext;
+  readonly label: string;
+  readonly owner: JsonObject;
+  readonly indexField: string;
+  readonly selectorLabel: string;
+  readonly laws: readonly JsonObject[];
+  readonly materialized: readonly JsonObject[];
+}): void {
+  const indices = readModelIndices(
+    input.owner,
+    input.indexField,
+    input.selectorLabel,
+  );
+  assertArrayLength(
+    input.context,
+    input.label,
+    indices,
+    input.materialized,
+  );
+  const rootBundle = requestRootBundleLock(input.context);
+  const digest = expectString(
+    rootBundle,
+    "bundle_digest",
+    "PackLock",
+  );
+  const rootPackId = expectString(
+    rootBundle,
+    "pack_id",
+    "PackLock",
+  );
+  for (const [ordinal, index] of indices.entries()) {
+    const law = requireModelSelectionEntry(
+      input.context,
+      input.laws,
+      index,
+      `${input.selectorLabel}.${input.indexField}`,
+    );
+    assertJsonFieldEqual(
+      `${input.label}.${ordinal}`,
+      Object.freeze({
+        bundle_id: rootPackId,
+        bundle_digest: digest,
+        rule_id: expectString(law, "law_id", "WorldLaw"),
+      }),
+      input.materialized[ordinal] as JsonObject,
+      input.context.operationKind,
+    );
+  }
+}
+
+function requireModelSelectionEntry(
+  context: EvidenceContext,
+  entries: readonly JsonObject[],
+  index: number,
+  label: string,
+): JsonObject {
+  const entry = entries[index];
+  if (entry === undefined) {
+    throw fault(
+      "rule_plugin.semantic.model_evidence_ordinal_out_of_range",
+      "Model selector is outside its locked selection space",
+      {
+        operation_kind: context.operationKind,
+        field: label,
+        selected_ordinal: index,
+        selection_count: entries.length,
+      },
+    );
+  }
+  return entry;
+}
+
+function requestRootBundleLock(context: EvidenceContext): JsonObject {
+  const snapshot = expectJsonObject(
+    expectProperty(
+      context.request.value,
+      "readonly_world",
+      "RulePluginRequest",
+    ),
+    "RulePluginRequest.readonly_world",
+  );
+  return expectJsonObject(
+    expectProperty(
+      worldContentLock(snapshot, "RulePluginRequest.readonly_world"),
+      "root_bundle_lock",
+      "WorldContentLock",
+    ),
+    "WorldContentLock.root_bundle_lock",
+  );
+}
+
+function worldContentLock(
+  snapshot: JsonObject,
+  label: string,
+): JsonObject {
+  return expectJsonObject(
+    expectProperty(snapshot, "world_content_lock", label),
+    `${label}.world_content_lock`,
+  );
+}
+
+function resolveFactSelector(
+  context: EvidenceContext,
+  worldView: JsonObject,
+  knowledgeView: JsonObject,
+  selector: JsonObject,
+  ordinal: number,
+): string {
+  const source = expectString(selector, "source", "FactSelector");
+  const index = expectInteger(selector, "index", "FactSelector");
+  const collection =
+    source === "world"
+      ? asObjectArray(
+          expectProperty(worldView, "facts", "DirectorWorldView"),
+          "DirectorWorldView.facts",
+        )
+      : source === "knowledge"
+        ? asObjectArray(
+            expectProperty(knowledgeView, "facts", "KnowledgeView"),
+            "KnowledgeView.facts",
+          )
+        : undefined;
+  const fact = collection?.[index];
+  if (fact === undefined) {
+    throw fault(
+      "rule_plugin.semantic.goal_plan_fact_selector",
+      "Goal-plan fact selector is outside its verified fact collection",
+      {
+        operation_kind: context.operationKind,
+        selector_ordinal: ordinal,
+        source,
+        index,
+      },
+    );
+  }
+  return expectString(fact, "fact_id", "FactRecord");
+}
+
+function assertAutomaticEventCandidateMatchesDraft(
+  context: EvidenceContext,
+  receipt: VerifiedModelInvocationReceipt,
+  rawDraft: JsonObject,
+  expectedScope: "world" | "character",
+): void {
+  const inputLabel =
+    expectedScope === "world"
+      ? "WorldAutomaticEventResolveInput"
+      : "CharacterAutomaticEventResolveInput";
+  const candidate = expectJsonObject(
+    expectProperty(context.input, "candidate", inputLabel),
+    `${inputLabel}.candidate`,
+  );
+  const candidateLabel =
+    expectedScope === "world"
+      ? "MaterializedWorldAutomaticEventCandidate"
+      : "MaterializedCharacterAutomaticEventCandidate";
+  assertEqual(
+    "automatic_event.event_scope",
+    expectedScope,
+    expectString(rawDraft, "event_scope", "AutomaticEventSemanticDraft"),
+    context.operationKind,
+  );
+  assertEqual(
+    "automatic_event.proposal_kind",
+    `automatic.${expectedScope}`,
+    expectString(candidate, "proposal_kind", candidateLabel),
+    context.operationKind,
+  );
+  const requestInput = modelReceiptInput(receipt);
+  const worldView = expectJsonObject(
+    expectProperty(
+      requestInput,
+      "world_view",
+      "DirectorDailySettlementInput",
+    ),
+    "DirectorDailySettlementInput.world_view",
+  );
+  const day = expectInteger(worldView, "day", "DirectorWorldView");
+  assertEqual(
+    "automatic_event.day",
+    day,
+    expectInteger(candidate, "day", candidateLabel),
+    context.operationKind,
+  );
+  assertEqual(
+    "automatic_event.current_day",
+    day,
+    expectInteger(
+      expectJsonObject(
+        expectProperty(
+          requestWorldState(context),
+          "day_cycle",
+          "WorldState",
+        ),
+        "WorldState.day_cycle",
+      ),
+      "day",
+      "DayCycleState",
+    ),
+    context.operationKind,
+  );
+  const actors = asObjectArray(
+    expectProperty(worldView, "actors", "DirectorWorldView"),
+    "DirectorWorldView.actors",
+  );
+  const subjects = assertEventSituationCandidateMatchesDraft({
+    context,
+    actors,
+    raw: expectJsonObject(
+      expectProperty(
+        rawDraft,
+        "situation",
+        "AutomaticEventSemanticDraft",
+      ),
+      "AutomaticEventSemanticDraft.situation",
+    ),
+    candidate: expectJsonObject(
+      expectProperty(candidate, "situation", candidateLabel),
+      `${candidateLabel}.situation`,
+    ),
+    locale: undefined,
+    label: "automatic_event.situation",
+  });
+
+  const rawOutcomes = asObjectArray(
+    expectProperty(
+      rawDraft,
+      "candidate_outcomes",
+      "AutomaticEventSemanticDraft",
+    ),
+    "AutomaticEventSemanticDraft.candidate_outcomes",
+  );
+  const outcomes = asObjectArray(
+    expectProperty(candidate, "candidate_outcomes", candidateLabel),
+    `${candidateLabel}.candidate_outcomes`,
+  );
+  const rawGates =
+    expectedScope === "character"
+      ? asObjectArray(
+          expectProperty(
+            rawDraft,
+            "agency_gates",
+            "CharacterAutomaticEventSemanticDraft",
+          ),
+          "CharacterAutomaticEventSemanticDraft.agency_gates",
+        )
+      : Object.freeze([]);
+  const gates =
+    expectedScope === "character"
+      ? asObjectArray(
+          expectProperty(candidate, "agency_gates", candidateLabel),
+          `${candidateLabel}.agency_gates`,
+        )
+      : Object.freeze([]);
+  const gateIds = readUniqueIdentifiers(
+    context,
+    gates,
+    "gate_id",
+    "MaterializedAgencyGateCandidate",
+    "automatic_event.agency_gates",
+  );
+  const outcomeIds = assertSemanticOutcomeCandidates({
+    context,
+    subjects,
+    rawOutcomes,
+    candidates: outcomes,
+    gateIds,
+    label: "automatic_event.candidate_outcomes",
+  });
+  assertAgencyGateCandidates({
+    context,
+    subjects,
+    rawGates,
+    candidates: gates,
+    outcomeIds,
+    commitmentEvidence: () => Object.freeze([]),
+    label: "automatic_event.agency_gates",
+  });
+
+  if (expectedScope === "character") {
+    assertJsonFieldEqual(
+      "automatic_event.target_entity_ids",
+      selectSubjects(
+        context,
+        subjects,
+        readModelIndices(
+          rawDraft,
+          "target_subject_indices",
+          "CharacterAutomaticEventSemanticDraft",
+        ),
+        "automatic_event.target_entity_ids",
+      ).map((subject) =>
+        expectString(
+          expectJsonObject(
+            expectProperty(subject, "entity", "SubjectRef"),
+            "SubjectRef.entity",
+          ),
+          "entity_id",
+          "EntityRef",
+        ),
+      ),
+      expectProperty(candidate, "target_entity_ids", candidateLabel),
+      context.operationKind,
+    );
+  }
+}
+
+function assertEventCardCandidateMatchesDraft(
+  context: EvidenceContext,
+  receipt: VerifiedModelInvocationReceipt,
+  rawDraft: JsonObject,
+): void {
+  const candidate = expectJsonObject(
+    expectProperty(context.input, "candidate", "EventCardPublishInput"),
+    "EventCardPublishInput.candidate",
+  );
+  const requestInput = modelReceiptInput(receipt);
+  const worldView = expectJsonObject(
+    expectProperty(
+      requestInput,
+      "world_view",
+      "DirectorDialogueEventsInput",
+    ),
+    "DirectorDialogueEventsInput.world_view",
+  );
+  const actors = asObjectArray(
+    expectProperty(worldView, "actors", "DirectorWorldView"),
+    "DirectorWorldView.actors",
+  );
+  const dialogue = expectJsonObject(
+    expectProperty(
+      requestInput,
+      "dialogue",
+      "DirectorDialogueEventsInput",
+    ),
+    "DirectorDialogueEventsInput.dialogue",
+  );
+  const locale = expectString(
+    requestInput,
+    "response_locale",
+    "DirectorDialogueEventsInput",
+  );
+  assertEqual(
+    "event_card.source_dialogue_id",
+    expectString(dialogue, "dialogue_id", "DialogueRecord"),
+    expectString(
+      candidate,
+      "source_dialogue_id",
+      "EventCardPublishCandidate",
+    ),
+    context.operationKind,
+  );
+  const currentDay = expectInteger(
+    expectJsonObject(
+      expectProperty(
+        requestWorldState(context),
+        "day_cycle",
+        "WorldState",
+      ),
+      "WorldState.day_cycle",
+    ),
+    "day",
+    "DayCycleState",
+  );
+  assertEqual(
+    "event_card.proof_day",
+    expectInteger(worldView, "day", "DirectorWorldView"),
+    currentDay,
+    context.operationKind,
+  );
+  assertEqual(
+    "event_card.day",
+    currentDay,
+    expectInteger(candidate, "day", "EventCardPublishCandidate"),
+    context.operationKind,
+  );
+  const subjects = assertEventSituationCandidateMatchesDraft({
+    context,
+    actors,
+    raw: expectJsonObject(
+      expectProperty(rawDraft, "situation", "EventCardSemanticDraft"),
+      "EventCardSemanticDraft.situation",
+    ),
+    candidate: expectJsonObject(
+      expectProperty(
+        candidate,
+        "situation",
+        "EventCardPublishCandidate",
+      ),
+      "EventCardPublishCandidate.situation",
+    ),
+    locale,
+    label: "event_card.situation",
+  });
+  for (const field of ["title", "summary"] as const) {
+    assertLocalizedText(
+      context,
+      `event_card.${field}`,
+      locale,
+      expectString(rawDraft, field, "EventCardSemanticDraft"),
+      expectProperty(candidate, field, "EventCardPublishCandidate"),
+    );
+  }
+
+  const rawOptions = asObjectArray(
+    expectProperty(
+      rawDraft,
+      "result_options",
+      "EventCardSemanticDraft",
+    ),
+    "EventCardSemanticDraft.result_options",
+  );
+  const options = asObjectArray(
+    expectProperty(
+      candidate,
+      "result_options",
+      "EventCardPublishCandidate",
+    ),
+    "EventCardPublishCandidate.result_options",
+  );
+  assertArrayLength(context, "event_card.result_options", rawOptions, options);
+  const rawGates = asObjectArray(
+    expectProperty(
+      rawDraft,
+      "agency_gates",
+      "EventCardSemanticDraft",
+    ),
+    "EventCardSemanticDraft.agency_gates",
+  );
+  const gates = asObjectArray(
+    expectProperty(
+      candidate,
+      "agency_gates",
+      "EventCardPublishCandidate",
+    ),
+    "EventCardPublishCandidate.agency_gates",
+  );
+  const gateIds = readUniqueIdentifiers(
+    context,
+    gates,
+    "gate_id",
+    "MaterializedAgencyGateCandidate",
+    "event_card.agency_gates",
+  );
+  const rawOutcomes = rawOptions.flatMap((option) =>
+    asObjectArray(
+      expectProperty(
+        option,
+        "outcomes",
+        "EventCardOutcomeSemanticDraft",
+      ),
+      "EventCardOutcomeSemanticDraft.outcomes",
+    ),
+  );
+  const outcomeCandidates = options.flatMap((option) =>
+    asObjectArray(
+      expectProperty(
+        option,
+        "outcomes",
+        "MaterializedEventCardOutcomeCandidate",
+      ),
+      "MaterializedEventCardOutcomeCandidate.outcomes",
+    ),
+  );
+  const outcomeIds = assertSemanticOutcomeCandidates({
+    context,
+    subjects,
+    rawOutcomes,
+    candidates: outcomeCandidates,
+    gateIds,
+    label: "event_card.result_options.outcomes",
+  });
+  const presentationIds = new Set<string>();
+  readUniqueIdentifiers(
+    context,
+    options,
+    "option_id",
+    "MaterializedEventCardOutcomeCandidate",
+    "event_card.result_options",
+  );
+  for (const [ordinal, rawOption] of rawOptions.entries()) {
+    const option = options[ordinal] as JsonObject;
+    assertEventCardPresentationMatchesDraft({
+      context,
+      dialogue,
+      locale,
+      raw: expectJsonObject(
+        expectProperty(
+          rawOption,
+          "presentation",
+          "EventCardOutcomeSemanticDraft",
+        ),
+        "EventCardOutcomeSemanticDraft.presentation",
+      ),
+      candidate: expectJsonObject(
+        expectProperty(
+          option,
+          "presentation",
+          "MaterializedEventCardOutcomeCandidate",
+        ),
+        "MaterializedEventCardOutcomeCandidate.presentation",
+      ),
+      presentationIds,
+      label: `event_card.result_options.${ordinal}.presentation`,
+    });
+  }
+  assertAgencyGateCandidates({
+    context,
+    subjects,
+    rawGates,
+    candidates: gates,
+    outcomeIds,
+    commitmentEvidence: (rawGate) =>
+      materializeCommitmentEvidenceRefs(
+        context,
+        dialogue,
+        asObjectArray(
+          expectProperty(
+            rawGate,
+            "commitment_evidence",
+            "EventCardAgencyGateSemanticDraft",
+          ),
+          "EventCardAgencyGateSemanticDraft.commitment_evidence",
+        ),
+      ),
+    label: "event_card.agency_gates",
+  });
+}
+
+function assertEventSituationCandidateMatchesDraft(input: {
+  readonly context: EvidenceContext;
+  readonly actors: readonly JsonObject[];
+  readonly raw: JsonObject;
+  readonly candidate: JsonObject;
+  readonly locale: string | undefined;
+  readonly label: string;
+}): readonly JsonObject[] {
+  for (const field of ["event_type", "context"] as const) {
+    assertJsonFieldEqual(
+      `${input.label}.${field}`,
+      expectProperty(input.raw, field, "EventSituationSemanticDraft"),
+      expectProperty(
+        input.candidate,
+        field,
+        "MaterializedEventSituationCandidate",
+      ),
+      input.context.operationKind,
+    );
+  }
+  const summary = expectString(
+    input.raw,
+    "summary",
+    "EventSituationSemanticDraft",
+  );
+  const localizedSummary = expectProperty(
+    input.candidate,
+    "summary",
+    "MaterializedEventSituationCandidate",
+  );
+  if (input.locale === undefined) {
+    assertSingleLocalizedTextValue(
+      input.context,
+      `${input.label}.summary`,
+      summary,
+      localizedSummary,
+    );
+  } else {
+    assertLocalizedText(
+      input.context,
+      `${input.label}.summary`,
+      input.locale,
+      summary,
+      localizedSummary,
+    );
+  }
+  const subjects = readActorSubjects(
+    input.context,
+    input.actors,
+    readModelIndices(
+      input.raw,
+      "subject_actor_indices",
+      "EventSituationSemanticDraft",
+    ),
+    `${input.label}.subjects`,
+  );
+  assertJsonFieldEqual(
+    `${input.label}.subjects`,
+    subjects,
+    expectProperty(
+      input.candidate,
+      "subjects",
+      "MaterializedEventSituationCandidate",
+    ),
+    input.context.operationKind,
+  );
+  return subjects;
+}
+
+function assertSemanticOutcomeCandidates(input: {
+  readonly context: EvidenceContext;
+  readonly subjects: readonly JsonObject[];
+  readonly rawOutcomes: readonly JsonObject[];
+  readonly candidates: readonly JsonObject[];
+  readonly gateIds: readonly string[];
+  readonly label: string;
+}): readonly string[] {
+  assertArrayLength(
+    input.context,
+    input.label,
+    input.rawOutcomes,
+    input.candidates,
+  );
+  const outcomeIds = readUniqueIdentifiers(
+    input.context,
+    input.candidates,
+    "outcome_id",
+    "MaterializedSemanticOutcomeCandidate",
+    input.label,
+  );
+  for (const [ordinal, raw] of input.rawOutcomes.entries()) {
+    const candidate = input.candidates[ordinal] as JsonObject;
+    for (const field of ["outcome_type", "parameters"] as const) {
+      assertJsonFieldEqual(
+        `${input.label}.${ordinal}.${field}`,
+        expectProperty(raw, field, "SemanticOutcomeDraft"),
+        expectProperty(
+          candidate,
+          field,
+          "MaterializedSemanticOutcomeCandidate",
+        ),
+        input.context.operationKind,
+      );
+    }
+    assertJsonFieldEqual(
+      `${input.label}.${ordinal}.subjects`,
+      selectSubjects(
+        input.context,
+        input.subjects,
+        readModelIndices(raw, "subject_indices", "SemanticOutcomeDraft"),
+        `${input.label}.${ordinal}.subjects`,
+      ),
+      expectProperty(
+        candidate,
+        "subjects",
+        "MaterializedSemanticOutcomeCandidate",
+      ),
+      input.context.operationKind,
+    );
+    const gateIndex = raw.requires_agency_gate_index;
+    const expectedGateId =
+      gateIndex === undefined
+        ? undefined
+        : input.gateIds[
+            requireModelIndex(
+              input.context,
+              gateIndex,
+              input.gateIds.length,
+              `${input.label}.${ordinal}.requires_agency_gate_index`,
+            )
+          ];
+    const actualGateId = candidate.requires_agency_gate_id;
+    if (expectedGateId !== actualGateId) {
       throw fault(
-        "rule_plugin.semantic.model_evidence_commitment_mismatch",
-        "Agency commitment fields other than commitment_id must exactly match the verified draft",
+        "rule_plugin.semantic.model_candidate_mismatch",
+        "Materialized outcome agency-gate link differs from its verified selector",
         {
-          operation_kind: context.operationKind,
-          commitment_index: index,
+          operation_kind: input.context.operationKind,
+          field: `${input.label}.${ordinal}.requires_agency_gate_id`,
+          expected: expectedGateId ?? "",
+          actual:
+            typeof actualGateId === "string" ? actualGateId : "",
         },
+      );
+    }
+  }
+  return Object.freeze(outcomeIds);
+}
+
+function assertAgencyGateCandidates(input: {
+  readonly context: EvidenceContext;
+  readonly subjects: readonly JsonObject[];
+  readonly rawGates: readonly JsonObject[];
+  readonly candidates: readonly JsonObject[];
+  readonly outcomeIds: readonly string[];
+  readonly commitmentEvidence: (
+    rawGate: JsonObject,
+  ) => readonly JsonObject[];
+  readonly label: string;
+}): void {
+  assertArrayLength(
+    input.context,
+    input.label,
+    input.rawGates,
+    input.candidates,
+  );
+  for (const [ordinal, raw] of input.rawGates.entries()) {
+    const candidate = input.candidates[ordinal] as JsonObject;
+    assertJsonFieldEqual(
+      `${input.label}.${ordinal}.protected_outcome_ids`,
+      readModelIndices(
+        raw,
+        "protected_outcome_indices",
+        "AgencyGateSemanticDraft",
+      ).map((index) => {
+        const outcomeId = input.outcomeIds[index];
+        if (outcomeId === undefined) {
+          throw fault(
+            "rule_plugin.semantic.model_evidence_ordinal_out_of_range",
+            "Agency gate protects an outcome ordinal outside its draft",
+            {
+              operation_kind: input.context.operationKind,
+              gate_ordinal: ordinal,
+              outcome_ordinal: index,
+            },
+          );
+        }
+        return outcomeId;
+      }),
+      expectProperty(
+        candidate,
+        "protected_outcome_ids",
+        "MaterializedAgencyGateCandidate",
+      ),
+      input.context.operationKind,
+    );
+    const participantSubjects = selectSubjects(
+      input.context,
+      input.subjects,
+      readModelIndices(
+        raw,
+        "participant_subject_indices",
+        "AgencyGateSemanticDraft",
+      ),
+      `${input.label}.${ordinal}.participants`,
+    );
+    assertJsonFieldEqual(
+      `${input.label}.${ordinal}.participants`,
+      participantSubjects.map((subject) =>
+        expectJsonObject(
+          expectProperty(subject, "entity", "SubjectRef"),
+          "SubjectRef.entity",
+        ),
+      ),
+      expectProperty(
+        candidate,
+        "participants",
+        "MaterializedAgencyGateCandidate",
+      ),
+      input.context.operationKind,
+    );
+    const rawRequirement = expectJsonObject(
+      expectProperty(raw, "requirement", "AgencyGateSemanticDraft"),
+      "AgencyGateSemanticDraft.requirement",
+    );
+    const requirement = expectJsonObject(
+      expectProperty(
+        candidate,
+        "requirement",
+        "MaterializedAgencyGateCandidate",
+      ),
+      "MaterializedAgencyGateCandidate.requirement",
+    );
+    for (const field of ["semantic_intent", "terms"] as const) {
+      assertJsonFieldEqual(
+        `${input.label}.${ordinal}.requirement.${field}`,
+        expectProperty(
+          rawRequirement,
+          field,
+          "AgencyRequirementSemanticDraft",
+        ),
+        expectProperty(requirement, field, "AgencyRequirement"),
+        input.context.operationKind,
+      );
+    }
+    assertJsonFieldEqual(
+      `${input.label}.${ordinal}.requirement.subjects`,
+      selectSubjects(
+        input.context,
+        input.subjects,
+        readModelIndices(
+          rawRequirement,
+          "subject_indices",
+          "AgencyRequirementSemanticDraft",
+        ),
+        `${input.label}.${ordinal}.requirement.subjects`,
+      ),
+      expectProperty(requirement, "subjects", "AgencyRequirement"),
+      input.context.operationKind,
+    );
+    for (const field of ["policy", "commitment_evidence"] as const) {
+      const expected =
+        field === "policy"
+          ? expectProperty(raw, "policy", "AgencyGateSemanticDraft")
+          : input.commitmentEvidence(raw);
+      assertJsonFieldEqual(
+        `${input.label}.${ordinal}.${field}`,
+        expected,
+        expectProperty(
+          candidate,
+          field,
+          "MaterializedAgencyGateCandidate",
+        ),
+        input.context.operationKind,
       );
     }
   }
 }
 
-function assertStimulusMatchesProposal(
-  stimulus: JsonObject,
-  proposal: JsonObject,
-  operationKind: OperationKind,
+function assertEventCardPresentationMatchesDraft(input: {
+  readonly context: EvidenceContext;
+  readonly dialogue: JsonObject;
+  readonly locale: string;
+  readonly raw: JsonObject;
+  readonly candidate: JsonObject;
+  readonly presentationIds: Set<string>;
+  readonly label: string;
+}): void {
+  const presentationId = expectString(
+    input.candidate,
+    "presentation_id",
+    "EventResultPresentation",
+  );
+  if (input.presentationIds.has(presentationId)) {
+    throw fault(
+      "rule_plugin.semantic.event_card_presentation_id_duplicate",
+      "Materialized EventCard presentation_id values must be unique",
+      {
+        operation_kind: input.context.operationKind,
+        presentation_id: presentationId,
+      },
+    );
+  }
+  input.presentationIds.add(presentationId);
+  const rawSegments = asObjectArray(
+    expectProperty(
+      input.raw,
+      "segments",
+      "EventResultPresentationSemanticDraft",
+    ),
+    "EventResultPresentationSemanticDraft.segments",
+  );
+  const segments = asObjectArray(
+    expectProperty(
+      input.candidate,
+      "segments",
+      "EventResultPresentation",
+    ),
+    "EventResultPresentation.segments",
+  );
+  assertArrayLength(
+    input.context,
+    `${input.label}.segments`,
+    rawSegments,
+    segments,
+  );
+  const turns = asObjectArray(
+    expectProperty(input.dialogue, "turns", "DialogueRecord"),
+    "DialogueRecord.turns",
+  );
+  const dialogueId = expectString(
+    input.dialogue,
+    "dialogue_id",
+    "DialogueRecord",
+  );
+  for (const [ordinal, rawSegment] of rawSegments.entries()) {
+    const segment = segments[ordinal] as JsonObject;
+    const kind = expectString(
+      rawSegment,
+      "segment_kind",
+      "NarrativeSegmentSemanticDraft",
+    );
+    assertEqual(
+      `${input.label}.segments.${ordinal}.segment_kind`,
+      kind,
+      expectString(segment, "segment_kind", "NarrativeSegment"),
+      input.context.operationKind,
+    );
+    if (kind === "dialogue_quote") {
+      const turnIndex = expectInteger(
+        rawSegment,
+        "turn_index",
+        "DialogueTurnQuoteSelector",
+      );
+      const turn = turns[turnIndex];
+      if (turn === undefined) {
+        throw fault(
+          "rule_plugin.semantic.event_card_quote_selector",
+          "EventCard dialogue quote selector is outside the verified dialogue",
+          {
+            operation_kind: input.context.operationKind,
+            segment_ordinal: ordinal,
+            turn_index: turnIndex,
+          },
+        );
+      }
+      assertEqual(
+        `${input.label}.segments.${ordinal}.dialogue_id`,
+        dialogueId,
+        expectString(segment, "dialogue_id", "DialogueTurnQuoteSegment"),
+        input.context.operationKind,
+      );
+      assertEqual(
+        `${input.label}.segments.${ordinal}.turn_id`,
+        expectString(turn, "turn_id", "DialogueTurn"),
+        expectString(segment, "turn_id", "DialogueTurnQuoteSegment"),
+        input.context.operationKind,
+      );
+      continue;
+    }
+    assertLocalizedText(
+      input.context,
+      `${input.label}.segments.${ordinal}.text`,
+      input.locale,
+      expectString(
+        rawSegment,
+        "text",
+        "GeneratedNarrativeSegmentSemanticDraft",
+      ),
+      expectProperty(segment, "text", "GeneratedNarrativeSegment"),
+    );
+  }
+}
+
+function materializeCommitmentEvidenceRefs(
+  context: EvidenceContext,
+  dialogue: JsonObject,
+  selectors: readonly JsonObject[],
+): readonly JsonObject[] {
+  const turns = asObjectArray(
+    expectProperty(dialogue, "turns", "DialogueRecord"),
+    "DialogueRecord.turns",
+  );
+  const dialogueId = expectString(dialogue, "dialogue_id", "DialogueRecord");
+  return Object.freeze(
+    selectors.map((selector, ordinal) => {
+      const turnIndex = expectInteger(
+        selector,
+        "turn_index",
+        "DialogueCommitmentSelector",
+      );
+      const commitmentIndex = expectInteger(
+        selector,
+        "commitment_index",
+        "DialogueCommitmentSelector",
+      );
+      const turn = turns[turnIndex];
+      const commitment =
+        turn === undefined
+          ? undefined
+          : asObjectArray(
+              expectProperty(
+                turn,
+                "agency_commitments",
+                "DialogueTurn",
+              ),
+              "DialogueTurn.agency_commitments",
+            )[commitmentIndex];
+      if (turn === undefined || commitment === undefined) {
+        throw fault(
+          "rule_plugin.semantic.event_card_commitment_selector",
+          "EventCard commitment selector is outside the verified dialogue",
+          {
+            operation_kind: context.operationKind,
+            selector_ordinal: ordinal,
+            turn_index: turnIndex,
+            commitment_index: commitmentIndex,
+          },
+        );
+      }
+      return Object.freeze({
+        dialogue_id: dialogueId,
+        turn_id: expectString(turn, "turn_id", "DialogueTurn"),
+        commitment_id: expectString(
+          commitment,
+          "commitment_id",
+          "AgencyCommitment",
+        ),
+      });
+    }),
+  );
+}
+
+function assertCharacterReactionCandidateMatchesDraft(input: {
+  readonly context: EvidenceContext;
+  readonly receipt: VerifiedModelInvocationReceipt;
+  readonly rawDraft: JsonObject;
+  readonly stimulus: JsonObject;
+  readonly proposalId: string;
+  readonly candidate: JsonObject;
+}): void {
+  assertEqual(
+    "character_reaction.impact",
+    expectString(
+      input.rawDraft,
+      "impact",
+      "CharacterReactionSemanticDraft",
+    ),
+    expectString(
+      input.candidate,
+      "impact",
+      "MaterializedCharacterReactionCandidate",
+    ),
+    input.context.operationKind,
+  );
+  assertJsonFieldEqual(
+    "character_reaction.source_event",
+    Object.freeze({
+      source_kind: "automatic",
+      proposal_id: input.proposalId,
+    }),
+    expectProperty(
+      input.candidate,
+      "source_event",
+      "MaterializedCharacterReactionCandidate",
+    ),
+    input.context.operationKind,
+  );
+  const rawDecisions = asObjectArray(
+    expectProperty(
+      input.rawDraft,
+      "agency_decisions",
+      "CharacterReactionSemanticDraft",
+    ),
+    "CharacterReactionSemanticDraft.agency_decisions",
+  );
+  const decisions = asObjectArray(
+    expectProperty(
+      input.candidate,
+      "agency_decisions",
+      "MaterializedCharacterReactionCandidate",
+    ),
+    "MaterializedCharacterReactionCandidate.agency_decisions",
+  );
+  assertArrayLength(
+    input.context,
+    "character_reaction.agency_decisions",
+    rawDecisions,
+    decisions,
+  );
+  const stimulusGates = asObjectArray(
+    expectProperty(
+      input.stimulus,
+      "agency_gates",
+      "CharacterReactEventInput",
+    ),
+    "CharacterReactEventInput.agency_gates",
+  );
+  for (const [ordinal, rawDecision] of rawDecisions.entries()) {
+    const decision = decisions[ordinal] as JsonObject;
+    const gateIndex = expectInteger(
+      rawDecision,
+      "gate_index",
+      "AgencyDecisionSemanticDraft",
+    );
+    const gate = stimulusGates[gateIndex];
+    if (gate === undefined) {
+      throw fault(
+        "rule_plugin.semantic.character_reaction_gate_selector",
+        "Character reaction gate selector is outside the verified stimulus",
+        {
+          operation_kind: input.context.operationKind,
+          decision_ordinal: ordinal,
+          gate_index: gateIndex,
+        },
+      );
+    }
+    assertEqual(
+      `character_reaction.agency_decisions.${ordinal}.gate_id`,
+      expectString(gate, "gate_id", "CharacterReactAgencyGateInput"),
+      expectString(decision, "gate_id", "AgencyDecision"),
+      input.context.operationKind,
+    );
+    for (const field of ["stance", "terms"] as const) {
+      assertJsonFieldEqual(
+        `character_reaction.agency_decisions.${ordinal}.${field}`,
+        expectProperty(
+          rawDecision,
+          field,
+          "AgencyDecisionSemanticDraft",
+        ),
+        expectProperty(decision, field, "AgencyDecision"),
+        input.context.operationKind,
+      );
+    }
+  }
+  const rawOutcomes = asObjectArray(
+    expectProperty(
+      input.rawDraft,
+      "self_outcomes",
+      "CharacterReactionSemanticDraft",
+    ),
+    "CharacterReactionSemanticDraft.self_outcomes",
+  );
+  const outcomes = asObjectArray(
+    expectProperty(
+      input.candidate,
+      "self_outcomes",
+      "MaterializedCharacterReactionCandidate",
+    ),
+    "MaterializedCharacterReactionCandidate.self_outcomes",
+  );
+  assertArrayLength(
+    input.context,
+    "character_reaction.self_outcomes",
+    rawOutcomes,
+    outcomes,
+  );
+  readUniqueIdentifiers(
+    input.context,
+    outcomes,
+    "outcome_id",
+    "MaterializedSelfSubjectiveOutcomeCandidate",
+    "character_reaction.self_outcomes",
+  );
+  for (const [ordinal, rawOutcome] of rawOutcomes.entries()) {
+    const outcome = outcomes[ordinal] as JsonObject;
+    for (const field of ["outcome_type", "parameters"] as const) {
+      assertJsonFieldEqual(
+        `character_reaction.self_outcomes.${ordinal}.${field}`,
+        expectProperty(
+          rawOutcome,
+          field,
+          "SelfSubjectiveOutcomeSemanticDraft",
+        ),
+        expectProperty(
+          outcome,
+          field,
+          "MaterializedSelfSubjectiveOutcomeCandidate",
+        ),
+        input.context.operationKind,
+      );
+    }
+  }
+  assertMachineDecisionMaterialization(input);
+}
+
+function assertMachineDecisionMaterialization(input: {
+  readonly context: EvidenceContext;
+  readonly receipt: VerifiedModelInvocationReceipt;
+  readonly rawDraft: JsonObject;
+  readonly candidate: JsonObject;
+}): void {
+  const rawDecision = expectJsonObject(
+    expectProperty(
+      input.rawDraft,
+      "machine_decision",
+      "CharacterReactionSemanticDraft",
+    ),
+    "CharacterReactionSemanticDraft.machine_decision",
+  );
+  const decision = expectJsonObject(
+    expectProperty(
+      input.candidate,
+      "machine_decision",
+      "MaterializedCharacterReactionCandidate",
+    ),
+    "MaterializedCharacterReactionCandidate.machine_decision",
+  );
+  const kind = expectString(
+    rawDecision,
+    "decision_kind",
+    "MachineDecisionSelector",
+  );
+  assertEqual(
+    "character_reaction.machine_decision.decision_kind",
+    kind,
+    expectString(decision, "decision_kind", "MachineDecision"),
+    input.context.operationKind,
+  );
+  if (kind === "keep") {
+    return;
+  }
+  const subjective = expectJsonObject(
+    expectProperty(
+      modelReceiptInput(input.receipt),
+      "subjective_view",
+      "CharacterReactInput",
+    ),
+    "CharacterReactInput.subjective_view",
+  );
+  const actionMachine = expectJsonObject(
+    expectProperty(
+      subjective,
+      "action_machine",
+      "CharacterSubjectiveView",
+    ),
+    "CharacterSubjectiveView.action_machine",
+  );
+  const transitions = asObjectArray(
+    expectProperty(
+      actionMachine,
+      "outgoing_transitions",
+      "StateMachineModelView",
+    ),
+    "StateMachineModelView.outgoing_transitions",
+  );
+  const transitionIndex = expectInteger(
+    rawDecision,
+    "transition_index",
+    "MachineDecisionSelector",
+  );
+  const selected = transitions[transitionIndex];
+  if (selected === undefined) {
+    throw fault(
+      "rule_plugin.semantic.character_reaction_transition_selector",
+      "Character reaction transition selector is outside the verified action machine",
+      {
+        operation_kind: input.context.operationKind,
+        transition_index: transitionIndex,
+      },
+    );
+  }
+  const transition = expectJsonObject(
+    expectProperty(
+      selected,
+      "transition",
+      "StateMachineTransitionModelView",
+    ),
+    "StateMachineTransitionModelView.transition",
+  );
+  assertEqual(
+    "character_reaction.machine_decision.transition_id",
+    expectString(
+      transition,
+      "transition_id",
+      "MachineTransitionDefinition",
+    ),
+    expectString(decision, "transition_id", "MachineDecision"),
+    input.context.operationKind,
+  );
+}
+
+function assertCharacterTurnProposalMatchesCandidate(
+  context: OperationContext,
+  candidate: JsonObject,
+  committed: JsonObject,
 ): void {
   for (const field of [
-    "proposal_id",
-    "day",
-    "situation",
-    "candidate_outcomes",
-    "agency_gates",
+    "turn_id",
+    "speaker",
+    "locale",
+    "text",
+    "occurred_at",
+    "source",
   ] as const) {
     assertJsonFieldEqual(
-      `character_stimulus.${field}`,
-      expectProperty(proposal, field, "CharacterAutomaticEventProposal"),
-      expectProperty(stimulus, field, "CharacterEventStimulus"),
-      operationKind,
+      `dialogue.append.character.${field}`,
+      expectProperty(
+        candidate,
+        field,
+        "CharacterDialogueTurnCandidate",
+      ),
+      expectProperty(committed, field, "DialogueTurn"),
+      context.operationKind,
+    );
+  }
+  if (
+    candidate.emotion_id !== undefined ||
+    committed.emotion_id !== undefined
+  ) {
+    assertJsonFieldEqual(
+      "dialogue.append.character.emotion_id",
+      candidate.emotion_id ?? null,
+      committed.emotion_id ?? null,
+      context.operationKind,
+    );
+  }
+  const candidates = asObjectArray(
+    expectProperty(
+      candidate,
+      "agency_commitments",
+      "CharacterDialogueTurnCandidate",
+    ),
+    "CharacterDialogueTurnCandidate.agency_commitments",
+  );
+  const commitments = asObjectArray(
+    expectProperty(
+      committed,
+      "agency_commitments",
+      "DialogueTurn",
+    ),
+    "DialogueTurn.agency_commitments",
+  );
+  assertArrayLength(context, "dialogue.append.character.commitments", candidates, commitments);
+  for (const [ordinal, commitmentCandidate] of candidates.entries()) {
+    const commitment = commitments[ordinal] as JsonObject;
+    for (const field of [
+      "commitment_id",
+      "semantic_intent",
+      "subjects",
+      "stance",
+      "terms",
+    ] as const) {
+      assertJsonFieldEqual(
+        `dialogue.append.character.commitments.${ordinal}.${field}`,
+        expectProperty(
+          commitmentCandidate,
+          field,
+          "MaterializedAgencyCommitmentCandidate",
+        ),
+        expectProperty(commitment, field, "AgencyCommitment"),
+        context.operationKind,
+      );
+    }
+  }
+}
+
+function assertCharacterReactSituationMatchesCandidate(
+  context: EvidenceContext,
+  candidate: JsonObject,
+  reactionInput: JsonObject,
+): void {
+  for (const field of ["event_type", "summary", "context"] as const) {
+    assertJsonFieldEqual(
+      `character_react_event.situation.${field}`,
+      expectProperty(
+        candidate,
+        field,
+        "MaterializedEventSituationCandidate",
+      ),
+      expectProperty(reactionInput, field, "CharacterReactSituationInput"),
+      context.operationKind,
+    );
+  }
+  assertJsonFieldEqual(
+    "character_react_event.situation.subject_entity_ids",
+    characterReactSubjectEntityIds(
+      context,
+      asObjectArray(
+        expectProperty(
+          candidate,
+          "subjects",
+          "MaterializedEventSituationCandidate",
+        ),
+        "MaterializedEventSituationCandidate.subjects",
+      ),
+      "character_react_event.situation.subject_entity_ids",
+    ),
+    expectProperty(
+      reactionInput,
+      "subject_entity_ids",
+      "CharacterReactSituationInput",
+    ),
+    context.operationKind,
+  );
+}
+
+function assertCharacterReactOutcomesMatchCandidate(
+  context: EvidenceContext,
+  candidates: readonly JsonObject[],
+  reactionInputs: readonly JsonObject[],
+): void {
+  assertArrayLength(
+    context,
+    "character_react_event.candidate_outcomes",
+    candidates,
+    reactionInputs,
+  );
+  for (const [ordinal, candidate] of candidates.entries()) {
+    const reactionInput = reactionInputs[ordinal] as JsonObject;
+    for (const field of [
+      "outcome_id",
+      "outcome_type",
+      "parameters",
+    ] as const) {
+      assertJsonFieldEqual(
+        `character_react_event.candidate_outcomes.${ordinal}.${field}`,
+        expectProperty(
+          candidate,
+          field,
+          "MaterializedSemanticOutcomeCandidate",
+        ),
+        expectProperty(
+          reactionInput,
+          field,
+          "CharacterReactOutcomeInput",
+        ),
+        context.operationKind,
+      );
+    }
+    assertJsonFieldEqual(
+      `character_react_event.candidate_outcomes.${ordinal}.subject_entity_ids`,
+      characterReactSubjectEntityIds(
+        context,
+        asObjectArray(
+          expectProperty(
+            candidate,
+            "subjects",
+            "MaterializedSemanticOutcomeCandidate",
+          ),
+          "MaterializedSemanticOutcomeCandidate.subjects",
+        ),
+        `character_react_event.candidate_outcomes.${ordinal}.subject_entity_ids`,
+      ),
+      expectProperty(
+        reactionInput,
+        "subject_entity_ids",
+        "CharacterReactOutcomeInput",
+      ),
+      context.operationKind,
+    );
+    if (
+      candidate.requires_agency_gate_id !== undefined ||
+      reactionInput.requires_agency_gate_id !== undefined
+    ) {
+      assertJsonFieldEqual(
+        `character_react_event.candidate_outcomes.${ordinal}.requires_agency_gate_id`,
+        candidate.requires_agency_gate_id ?? null,
+        reactionInput.requires_agency_gate_id ?? null,
+        context.operationKind,
+      );
+    }
+  }
+}
+
+function assertCharacterReactAgencyGatesMatchCandidate(
+  context: EvidenceContext,
+  candidates: readonly JsonObject[],
+  reactionInputs: readonly JsonObject[],
+): void {
+  assertArrayLength(
+    context,
+    "character_react_event.agency_gates",
+    candidates,
+    reactionInputs,
+  );
+  for (const [ordinal, candidate] of candidates.entries()) {
+    const reactionInput = reactionInputs[ordinal] as JsonObject;
+    for (const field of [
+      "gate_id",
+      "protected_outcome_ids",
+      "policy",
+    ] as const) {
+      assertJsonFieldEqual(
+        `character_react_event.agency_gates.${ordinal}.${field}`,
+        expectProperty(
+          candidate,
+          field,
+          "MaterializedAgencyGateCandidate",
+        ),
+        expectProperty(
+          reactionInput,
+          field,
+          "CharacterReactAgencyGateInput",
+        ),
+        context.operationKind,
+      );
+    }
+    assertJsonFieldEqual(
+      `character_react_event.agency_gates.${ordinal}.participant_entity_ids`,
+      asObjectArray(
+        expectProperty(
+          candidate,
+          "participants",
+          "MaterializedAgencyGateCandidate",
+        ),
+        "MaterializedAgencyGateCandidate.participants",
+      ).map((participant) =>
+        expectString(participant, "entity_id", "EntityRef"),
+      ),
+      expectProperty(
+        reactionInput,
+        "participant_entity_ids",
+        "CharacterReactAgencyGateInput",
+      ),
+      context.operationKind,
+    );
+
+    const candidateRequirement = expectJsonObject(
+      expectProperty(
+        candidate,
+        "requirement",
+        "MaterializedAgencyGateCandidate",
+      ),
+      "MaterializedAgencyGateCandidate.requirement",
+    );
+    const reactionRequirement = expectJsonObject(
+      expectProperty(
+        reactionInput,
+        "requirement",
+        "CharacterReactAgencyGateInput",
+      ),
+      "CharacterReactAgencyGateInput.requirement",
+    );
+    for (const field of ["semantic_intent", "terms"] as const) {
+      assertJsonFieldEqual(
+        `character_react_event.agency_gates.${ordinal}.requirement.${field}`,
+        expectProperty(candidateRequirement, field, "AgencyRequirement"),
+        expectProperty(
+          reactionRequirement,
+          field,
+          "CharacterReactRequirementInput",
+        ),
+        context.operationKind,
+      );
+    }
+    assertJsonFieldEqual(
+      `character_react_event.agency_gates.${ordinal}.requirement.subject_entity_ids`,
+      characterReactSubjectEntityIds(
+        context,
+        asObjectArray(
+          expectProperty(
+            candidateRequirement,
+            "subjects",
+            "AgencyRequirement",
+          ),
+          "AgencyRequirement.subjects",
+        ),
+        `character_react_event.agency_gates.${ordinal}.requirement.subject_entity_ids`,
+      ),
+      expectProperty(
+        reactionRequirement,
+        "subject_entity_ids",
+        "CharacterReactRequirementInput",
+      ),
+      context.operationKind,
+    );
+  }
+}
+
+function characterReactSubjectEntityIds(
+  context: EvidenceContext,
+  subjects: readonly JsonObject[],
+  label: string,
+): readonly string[] {
+  return Object.freeze(
+    subjects.map((subject, ordinal) => {
+      if (expectString(subject, "kind", "SubjectRef") !== "entity") {
+        throw fault(
+          "rule_plugin.semantic.character_react_subject_kind",
+          "CharacterReact projection can contain only entity subjects",
+          {
+            operation_kind: context.operationKind,
+            field: label,
+            subject_ordinal: ordinal,
+          },
+        );
+      }
+      return expectString(
+        expectJsonObject(
+          expectProperty(subject, "entity", "SubjectRef"),
+          "SubjectRef.entity",
+        ),
+        "entity_id",
+        "EntityRef",
+      );
+    }),
+  );
+}
+
+function requestWorldState(context: EvidenceContext): JsonObject {
+  const snapshot = expectJsonObject(
+    expectProperty(
+      context.request.value,
+      "readonly_world",
+      "RulePluginRequest",
+    ),
+    "RulePluginRequest.readonly_world",
+  );
+  return expectJsonObject(
+    expectProperty(snapshot, "world_state", "WorldSnapshot"),
+    "WorldSnapshot.world_state",
+  );
+}
+
+function readActorSubjects(
+  context: EvidenceContext,
+  actors: readonly JsonObject[],
+  indices: readonly number[],
+  label: string,
+): readonly JsonObject[] {
+  const world = requestWorldState(context);
+  return Object.freeze(
+    indices.map((index) => {
+      const actor = actors[index];
+      if (actor === undefined) {
+        throw fault(
+          "rule_plugin.semantic.model_evidence_ordinal_out_of_range",
+          "Actor selector is outside its verified world-view actor collection",
+          {
+            operation_kind: context.operationKind,
+            field: label,
+            actor_index: index,
+            actor_count: actors.length,
+          },
+        );
+      }
+      const entityId = expectString(
+        actor,
+        "entity_id",
+        "DirectorActorView",
+      );
+      const entity = findEntity(world, entityId);
+      if (entity === undefined) {
+        throw fault(
+          "rule_plugin.semantic.model_candidate_entity_missing",
+          "Verified actor selected by a model draft is absent from the locked RulePlugin world",
+          {
+            operation_kind: context.operationKind,
+            field: label,
+            actor_index: index,
+            entity_id: entityId,
+          },
+        );
+      }
+      return Object.freeze({
+        kind: "entity",
+        entity: Object.freeze({
+          world_id: context.worldId,
+          entity_id: entityId,
+          expected_revision: expectInteger(
+            entity,
+            "revision",
+            "EntityState",
+          ),
+        }),
+      });
+    }),
+  );
+}
+
+function selectSubjects(
+  context: EvidenceContext,
+  subjects: readonly JsonObject[],
+  indices: readonly number[],
+  label: string,
+): readonly JsonObject[] {
+  return Object.freeze(
+    indices.map((index) => {
+      const subject = subjects[index];
+      if (subject === undefined) {
+        throw fault(
+          "rule_plugin.semantic.model_evidence_ordinal_out_of_range",
+          "Subject selector is outside the materialized event subject collection",
+          {
+            operation_kind: context.operationKind,
+            field: label,
+            subject_index: index,
+            subject_count: subjects.length,
+          },
+        );
+      }
+      return subject;
+    }),
+  );
+}
+
+function readDialogueParticipantSubjects(input: {
+  readonly context: EvidenceContext;
+  readonly participants: readonly JsonObject[];
+  readonly indices: readonly number[];
+  readonly label: string;
+}): readonly JsonObject[] {
+  const world = requestWorldState(input.context);
+  return Object.freeze(
+    input.indices.map((index) => {
+      const participant = input.participants[index];
+      if (participant === undefined) {
+        throw fault(
+          "rule_plugin.semantic.dialogue_commitment_selector",
+          "Dialogue commitment participant selector is outside the verified dialogue",
+          {
+            operation_kind: input.context.operationKind,
+            field: input.label,
+            participant_index: index,
+            participant_count: input.participants.length,
+          },
+        );
+      }
+      if (
+        expectString(
+          participant,
+          "participant_kind",
+          "DialogueParticipantRef",
+        ) !== "entity"
+      ) {
+        throw fault(
+          "rule_plugin.semantic.dialogue_commitment_subject_kind",
+          "Dialogue commitment subjects must select entity participants",
+          {
+            operation_kind: input.context.operationKind,
+            field: input.label,
+            participant_index: index,
+          },
+        );
+      }
+      const participantEntity = expectJsonObject(
+        expectProperty(
+          participant,
+          "entity",
+          "DialogueParticipantRef",
+        ),
+        "DialogueParticipantRef.entity",
+      );
+      const entityId = expectString(
+        participantEntity,
+        "entity_id",
+        "EntityRef",
+      );
+      const entity = findEntity(world, entityId);
+      if (entity === undefined) {
+        throw fault(
+          "rule_plugin.semantic.dialogue_commitment_entity_missing",
+          "Dialogue commitment participant is absent from the locked RulePlugin world",
+          {
+            operation_kind: input.context.operationKind,
+            field: input.label,
+            participant_index: index,
+            entity_id: entityId,
+          },
+        );
+      }
+      return Object.freeze({
+        kind: "entity",
+        entity: Object.freeze({
+          world_id: input.context.worldId,
+          entity_id: entityId,
+          expected_revision: expectInteger(
+            entity,
+            "revision",
+            "EntityState",
+          ),
+        }),
+      });
+    }),
+  );
+}
+
+function readModelIndices(
+  owner: JsonObject,
+  field: string,
+  label: string,
+): readonly number[] {
+  const value = expectProperty(owner, field, label);
+  if (!Array.isArray(value)) {
+    throw fault(
+      "rule_plugin.semantic.shape",
+      `${label}.${field} must be an array`,
+      { field: `${label}.${field}` },
+    );
+  }
+  return Object.freeze(
+    value.map((entry, ordinal) => {
+      if (
+        typeof entry !== "number" ||
+        !Number.isSafeInteger(entry) ||
+        entry < 0
+      ) {
+        throw fault(
+          "rule_plugin.semantic.model_evidence_index_invalid",
+          "Model selector index must be a safe non-negative integer",
+          {
+            field: `${label}.${field}`,
+            ordinal,
+          },
+        );
+      }
+      return entry;
+    }),
+  );
+}
+
+function requireModelIndex(
+  context: EvidenceContext,
+  value: JsonValue,
+  length: number,
+  label: string,
+): number {
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value < 0 ||
+    value >= length
+  ) {
+    throw fault(
+      "rule_plugin.semantic.model_evidence_ordinal_out_of_range",
+      "Model selector index is outside its referenced collection",
+      {
+        operation_kind: context.operationKind,
+        field: label,
+        index: value,
+        collection_length: length,
+      },
+    );
+  }
+  return value;
+}
+
+function readUniqueIdentifiers(
+  context: EvidenceContext,
+  values: readonly JsonObject[],
+  field: string,
+  label: string,
+  path: string,
+): readonly string[] {
+  const identifiers = values.map((value) =>
+    expectString(value, field, label),
+  );
+  if (new Set(identifiers).size !== identifiers.length) {
+    throw fault(
+      "rule_plugin.semantic.model_candidate_identity_duplicate",
+      "Locally materialized candidate identities must be unique within their ordinal collection",
+      {
+        operation_kind: context.operationKind,
+        field: path,
+      },
+    );
+  }
+  return Object.freeze(identifiers);
+}
+
+function assertLocalizedText(
+  context: EvidenceContext,
+  label: string,
+  locale: string,
+  text: string,
+  actual: JsonValue,
+): void {
+  assertJsonFieldEqual(
+    label,
+    Object.freeze({ [locale]: text }),
+    actual,
+    context.operationKind,
+  );
+}
+
+function assertSingleLocalizedTextValue(
+  context: EvidenceContext,
+  label: string,
+  text: string,
+  actual: JsonValue,
+): void {
+  const localized = expectJsonObject(actual, label);
+  const entries = Object.entries(localized);
+  if (
+    entries.length !== 1 ||
+    entries[0]?.[1] !== text
+  ) {
+    throw fault(
+      "rule_plugin.semantic.model_candidate_localized_text_mismatch",
+      "Locally materialized text must preserve the verified raw text under exactly one locale",
+      {
+        operation_kind: context.operationKind,
+        field: label,
+      },
+    );
+  }
+}
+
+function assertArrayLength(
+  context: Pick<EvidenceContext, "operationKind">,
+  label: string,
+  expected: readonly unknown[],
+  actual: readonly unknown[],
+): void {
+  if (expected.length !== actual.length) {
+    throw fault(
+      "rule_plugin.semantic.model_candidate_collection_length",
+      "Locally materialized candidate collection length differs from its verified raw draft",
+      {
+        operation_kind: context.operationKind,
+        field: label,
+        expected_count: expected.length,
+        actual_count: actual.length,
+      },
     );
   }
 }
@@ -3700,33 +6933,6 @@ function requireModelInvocation(
     );
   }
   return receipt;
-}
-
-function assertReceiptCollectionMember(
-  receipt: VerifiedModelInvocationReceipt,
-  collectionField: string,
-  candidate: JsonValue,
-  label: string,
-): void {
-  const output = modelReceiptOutput(receipt);
-  const members = asObjectArray(
-    expectProperty(output, collectionField, "ModelOutput"),
-    `ModelOutput.${collectionField}`,
-  );
-  if (!members.some((member) => jsonEquals(member, candidate))) {
-    throw fault(
-      "rule_plugin.semantic.model_evidence_member_missing",
-      `${label} is not an exact member of the verified model output`,
-      {
-        request_id: expectString(
-          receipt.request.value,
-          "request_id",
-          "ModelRequest",
-        ),
-        collection: collectionField,
-      },
-    );
-  }
 }
 
 function modelReceiptInput(

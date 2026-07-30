@@ -18,12 +18,6 @@ import type {
   StaticComponentDigestLookup,
 } from "./packet-semantic-gate.js";
 
-export interface StaticDefinitionRefLike {
-  readonly bundle_id: string;
-  readonly bundle_digest: string;
-  readonly local_id: string;
-}
-
 export interface RuleRefLike {
   readonly bundle_id: string;
   readonly bundle_digest: string;
@@ -32,6 +26,7 @@ export interface RuleRefLike {
 
 export type PlanningCatalogKind =
   | "definition_type"
+  | "component_type"
   | "capability"
   | "generation_archetype";
 
@@ -94,6 +89,35 @@ export interface BundleLockRef {
   readonly bundle_digest: string;
 }
 
+/**
+ * Stable model selector space for one digest-locked ContentBundle.
+ * Arrays preserve registration order and contain the original frozen bundle
+ * objects. Callers own world/runtime-creatable/validator filtering.
+ */
+export interface ModelSelectionCatalog {
+  readonly definitionTypes: readonly JsonObject[];
+  readonly componentTypes: readonly JsonObject[];
+  readonly capabilities: readonly JsonObject[];
+  readonly worldLaws: readonly JsonObject[];
+  readonly generationArchetypes: readonly JsonObject[];
+}
+
+export interface StateMachineCatalogRefLike extends BundleLockRef {
+  readonly catalog_kind: "state_machine";
+  readonly local_id: string;
+}
+
+/**
+ * Read-only derived indexes over one original StateMachineDefinition.
+ * Every returned object is the exact frozen ContentBundle JSON object.
+ */
+export interface StateMachineCatalogEntry {
+  readonly definition: JsonObject;
+  findState(stateId: string): JsonObject | undefined;
+  findTransition(transitionId: string): JsonObject | undefined;
+  listOutgoingTransitions(stateId: string): readonly JsonObject[] | undefined;
+}
+
 export interface PresentationProfileRefLike extends BundleLockRef {
   readonly profile_id: string;
 }
@@ -123,6 +147,7 @@ export interface WorldContentBinding {
   readonly packId: string;
   readonly packVersion: string;
   readonly bundleDigest: string;
+  readonly defaultLocale: string;
   readonly worldDefinition: JsonObject;
   readonly directorProfile: JsonObject;
   readonly eventBudget: JsonObject;
@@ -157,8 +182,6 @@ export interface WorldPresentationContent {
 
 export interface ContentRuntimeCatalog extends StaticComponentDigestLookup {
   register(loaded: LoadedContentBundle): void;
-  hasBundle(bundleId: string, bundleDigest: string): boolean;
-  findStaticDefinition(ref: StaticDefinitionRefLike): JsonObject | undefined;
   /**
    * Resolve the three catalog kinds that may be introduced by an untrusted
    * Director System planning response. The returned value is the original
@@ -167,6 +190,14 @@ export interface ContentRuntimeCatalog extends StaticComponentDigestLookup {
   findPlanningCatalogEntry(
     ref: PlanningCatalogRefLike,
   ): JsonObject | undefined;
+  /**
+   * Resolve one exact StateMachineDefinition and its registration-time
+   * state/transition/outgoing indexes. Missing bundle or definition returns
+   * undefined; no world, machine, state, or transition is inferred.
+   */
+  findStateMachineCatalogEntry(
+    ref: StateMachineCatalogRefLike,
+  ): StateMachineCatalogEntry | undefined;
   /**
    * Resolve RuleRef to WorldLaw evaluator and rule_plugin DependencyLock.
    * Missing bundle or law returns undefined; illegal shapes fail hard.
@@ -208,14 +239,13 @@ export interface ContentRuntimeCatalog extends StaticComponentDigestLookup {
       readonly entity_id: string;
     },
   ): JsonObject | undefined;
-  /** Ordered capability objects for event-context digests (same bundle lock). */
-  listCapabilities(ref: BundleLockRef): readonly JsonObject[] | undefined;
-  listWorldLaws(ref: BundleLockRef): readonly JsonObject[] | undefined;
   /**
-   * Registration-order WorldDefinitions for a locked bundle.
-   * Missing bundle returns undefined; does not pick a default world.
+   * Registration-order selector space from one exact locked bundle.
+   * Missing bundle returns undefined; no world or default is inferred.
    */
-  listWorldDefinitions(ref: BundleLockRef): readonly JsonObject[] | undefined;
+  listModelSelectionCatalog(
+    ref: BundleLockRef,
+  ): ModelSelectionCatalog | undefined;
   /**
    * Resolves one exact migration declared by the target bundle. The target
    * PackLock and migration_id are both mandatory; no single-item inference.
@@ -245,13 +275,12 @@ interface IndexedBundle {
   readonly packId: string;
   readonly packVersion: string;
   readonly bundleDigest: string;
+  readonly defaultLocale: string;
   readonly document: JsonObject;
   readonly definitions: ReadonlyMap<string, JsonObject>;
   readonly definitionTypes: ReadonlyMap<string, JsonObject>;
   /** WorldDefinition.world_id → original WorldDefinition object. */
   readonly worlds: ReadonlyMap<string, JsonObject>;
-  /** Registration-order WorldDefinition objects (no sort, no default pick). */
-  readonly worldsOrdered: readonly JsonObject[];
   readonly worldLaws: ReadonlyMap<string, JsonObject>;
   readonly worldLawsOrdered: readonly JsonObject[];
   readonly dependencies: ReadonlyMap<string, JsonObject>;
@@ -263,6 +292,10 @@ interface IndexedBundle {
   readonly initialRelations: readonly JsonObject[];
   readonly stateMachines: ReadonlyMap<string, JsonObject>;
   readonly stateMachinesOrdered: readonly JsonObject[];
+  readonly stateMachineCatalogEntries: ReadonlyMap<
+    string,
+    StateMachineCatalogEntry
+  >;
   readonly initialMachineBindings: readonly JsonObject[];
   readonly capabilities: ReadonlyMap<string, JsonObject>;
   readonly capabilitiesOrdered: readonly JsonObject[];
@@ -277,6 +310,7 @@ interface IndexedBundle {
   readonly presentationMaterializationProfiles: readonly JsonObject[];
   readonly presentationBindings: readonly JsonObject[];
   readonly contentUpgrades: ReadonlyMap<string, JsonObject>;
+  readonly modelSelectionCatalog: ModelSelectionCatalog;
 }
 
 export function createContentRuntimeCatalog(
@@ -313,6 +347,11 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
     );
     const packId = expectString(manifest, "pack_id", "manifest");
     const packVersion = expectString(manifest, "pack_version", "manifest");
+    const defaultLocale = expectString(
+      manifest,
+      "default_locale",
+      "manifest",
+    );
     const bundleDigest = loaded.bundleDigest;
     if (bundleDigest.length !== 64) {
       throw new EngineFault(
@@ -380,16 +419,31 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
       }
       definitions.set(definitionId, definition);
     }
+    const typesOrdered = asObjectArray(
+      expectProperty(catalog, "types", "catalog"),
+      "catalog.types",
+    );
     const definitionTypes = uniqueIdMap(
-      asObjectArray(
-        expectProperty(catalog, "types", "catalog"),
-        "catalog.types",
-      ),
+      typesOrdered,
       "type_id",
       "TypeDefinition",
       packId,
       bundleDigest,
       "content.catalog.duplicate_type",
+    );
+    const definitionTypesOrdered = Object.freeze(
+      typesOrdered.filter(
+        (type) =>
+          expectString(type, "type_kind", "TypeDefinition") ===
+          "definition",
+      ),
+    );
+    const componentTypesOrdered = Object.freeze(
+      typesOrdered.filter(
+        (type) =>
+          expectString(type, "type_kind", "TypeDefinition") ===
+          "component",
+      ),
     );
     const initialEntities = asObjectArray(
       expectProperty(catalog, "entities", "catalog"),
@@ -474,15 +528,16 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
       bundleDigest,
       "content.catalog.duplicate_capability",
     );
-    const generationArchetypes = uniqueIdMap(
-      asObjectArray(
-        expectProperty(
-          gameplay,
-          "generation_archetypes",
-          "gameplay",
-        ),
-        "gameplay.generation_archetypes",
+    const generationArchetypesOrdered = asObjectArray(
+      expectProperty(
+        gameplay,
+        "generation_archetypes",
+        "gameplay",
       ),
+      "gameplay.generation_archetypes",
+    );
+    const generationArchetypes = uniqueIdMap(
+      generationArchetypesOrdered,
       "archetype_id",
       "GenerationArchetype",
       packId,
@@ -550,6 +605,11 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
       packId,
       bundleDigest,
       "content.catalog.duplicate_state_machine",
+    );
+    const stateMachineCatalogEntries = createStateMachineCatalogEntries(
+      stateMachinesList,
+      packId,
+      bundleDigest,
     );
     const initialMachineBindings = asObjectArray(
       expectProperty(
@@ -645,19 +705,31 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
       worlds.set(worldDefinitionId, worldDefinition);
     }
 
+    const frozenWorldLaws = Object.freeze([...worldLawsList]);
+    const frozenCapabilities = Object.freeze([...capabilitiesOrdered]);
+    const modelSelectionCatalog: ModelSelectionCatalog = Object.freeze({
+      definitionTypes: definitionTypesOrdered,
+      componentTypes: componentTypesOrdered,
+      capabilities: frozenCapabilities,
+      worldLaws: frozenWorldLaws,
+      generationArchetypes: Object.freeze([
+        ...generationArchetypesOrdered,
+      ]),
+    });
+
     this.#bundles.set(
       key,
       Object.freeze({
         packId,
         packVersion,
         bundleDigest,
+        defaultLocale,
         document: root,
         definitions,
         definitionTypes,
         worlds,
-        worldsOrdered: Object.freeze([...worldsList]),
         worldLaws,
-        worldLawsOrdered: Object.freeze([...worldLawsList]),
+        worldLawsOrdered: frozenWorldLaws,
         dependencies,
         promptFragments,
         directorProfiles,
@@ -667,11 +739,12 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
         initialRelations: Object.freeze([...initialRelations]),
         stateMachines,
         stateMachinesOrdered: Object.freeze([...stateMachinesList]),
+        stateMachineCatalogEntries,
         initialMachineBindings: Object.freeze([
           ...initialMachineBindings,
         ]),
         capabilities,
-        capabilitiesOrdered: Object.freeze([...capabilitiesOrdered]),
+        capabilitiesOrdered: frozenCapabilities,
         generationArchetypes,
         presentationArtProfiles,
         presentationAssetMap,
@@ -682,12 +755,24 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
         ]),
         presentationBindings: Object.freeze([...presentationBindings]),
         contentUpgrades,
+        modelSelectionCatalog,
       }),
     );
   }
 
-  public hasBundle(bundleId: string, bundleDigest: string): boolean {
-    return this.#bundles.has(bundleKey(bundleId, bundleDigest));
+  public findStateMachineCatalogEntry(
+    ref: StateMachineCatalogRefLike,
+  ): StateMachineCatalogEntry | undefined {
+    if (ref.catalog_kind !== "state_machine") {
+      throw new EngineFault(
+        "content.catalog.state_machine_ref_kind",
+        "State machine lookup requires catalog_kind=state_machine",
+        { catalog_kind: ref.catalog_kind },
+      );
+    }
+    return this.#bundles
+      .get(bundleKey(ref.bundle_id, ref.bundle_digest))
+      ?.stateMachineCatalogEntries.get(ref.local_id);
   }
 
   public resolveContentUpgrade(
@@ -850,18 +935,6 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
     });
   }
 
-  public findStaticDefinition(
-    ref: StaticDefinitionRefLike,
-  ): JsonObject | undefined {
-    const indexed = this.#bundles.get(
-      bundleKey(ref.bundle_id, ref.bundle_digest),
-    );
-    if (indexed === undefined) {
-      return undefined;
-    }
-    return indexed.definitions.get(ref.local_id);
-  }
-
   public findPlanningCatalogEntry(
     ref: PlanningCatalogRefLike,
   ): JsonObject | undefined {
@@ -877,6 +950,14 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
         return type !== undefined &&
           expectString(type, "type_kind", "TypeDefinition") ===
             "definition"
+          ? type
+          : undefined;
+      }
+      case "component_type": {
+        const type = indexed.definitionTypes.get(ref.local_id);
+        return type !== undefined &&
+          expectString(type, "type_kind", "TypeDefinition") ===
+            "component"
           ? type
           : undefined;
       }
@@ -1114,6 +1195,7 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
       packId: indexed.packId,
       packVersion: indexed.packVersion,
       bundleDigest: indexed.bundleDigest,
+      defaultLocale: indexed.defaultLocale,
       worldDefinition,
       directorProfile,
       eventBudget,
@@ -1241,23 +1323,11 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
     return match;
   }
 
-  public listCapabilities(
+  public listModelSelectionCatalog(
     ref: BundleLockRef,
-  ): readonly JsonObject[] | undefined {
+  ): ModelSelectionCatalog | undefined {
     return this.#bundles.get(bundleKey(ref.bundle_id, ref.bundle_digest))
-      ?.capabilitiesOrdered;
-  }
-
-  public listWorldLaws(ref: BundleLockRef): readonly JsonObject[] | undefined {
-    return this.#bundles.get(bundleKey(ref.bundle_id, ref.bundle_digest))
-      ?.worldLawsOrdered;
-  }
-
-  public listWorldDefinitions(
-    ref: BundleLockRef,
-  ): readonly JsonObject[] | undefined {
-    return this.#bundles.get(bundleKey(ref.bundle_id, ref.bundle_digest))
-      ?.worldsOrdered;
+      ?.modelSelectionCatalog;
   }
 
   public listRulePluginOperationBindings(
@@ -1537,7 +1607,7 @@ function collectBundleRulePluginOperationBindings(
     );
   }
 
-  for (const worldDefinition of indexed.worldsOrdered) {
+  for (const worldDefinition of indexed.worlds.values()) {
     bindings.push(
       ...collectWorldRulePluginOperationBindings(indexed, worldDefinition),
     );
@@ -1718,6 +1788,117 @@ function resolveRequiredRulePluginDependency(
   }
 
   return dependency;
+}
+
+function createStateMachineCatalogEntries(
+  definitions: readonly JsonObject[],
+  packId: string,
+  bundleDigest: string,
+): ReadonlyMap<string, StateMachineCatalogEntry> {
+  const entries = new Map<string, StateMachineCatalogEntry>();
+  for (const definition of definitions) {
+    const machineId = expectString(
+      definition,
+      "machine_id",
+      "StateMachineDefinition",
+    );
+    const states = uniqueIdMap(
+      asObjectArray(
+        expectProperty(definition, "states", "StateMachineDefinition"),
+        "StateMachineDefinition.states",
+      ),
+      "state_id",
+      "MachineStateDefinition",
+      packId,
+      bundleDigest,
+      "content.catalog.duplicate_machine_state",
+    );
+    const transitions = uniqueIdMap(
+      asObjectArray(
+        expectProperty(definition, "transitions", "StateMachineDefinition"),
+        "StateMachineDefinition.transitions",
+      ),
+      "transition_id",
+      "MachineTransitionDefinition",
+      packId,
+      bundleDigest,
+      "content.catalog.duplicate_machine_transition",
+    );
+    const initialStateId = expectString(
+      definition,
+      "initial_state_id",
+      "StateMachineDefinition",
+    );
+    if (!states.has(initialStateId)) {
+      throw new EngineFault(
+        "content.catalog.machine_initial_state_missing",
+        "StateMachineDefinition.initial_state_id is not present in states",
+        {
+          pack_id: packId,
+          bundle_digest: bundleDigest,
+          machine_id: machineId,
+          state_id: initialStateId,
+        },
+      );
+    }
+
+    const outgoingMutable = new Map<string, JsonObject[]>();
+    for (const stateId of states.keys()) {
+      outgoingMutable.set(stateId, []);
+    }
+    for (const transition of transitions.values()) {
+      const transitionId = expectString(
+        transition,
+        "transition_id",
+        "MachineTransitionDefinition",
+      );
+      const fromStateId = expectString(
+        transition,
+        "from_state_id",
+        "MachineTransitionDefinition",
+      );
+      const toStateId = expectString(
+        transition,
+        "to_state_id",
+        "MachineTransitionDefinition",
+      );
+      const outgoing = outgoingMutable.get(fromStateId);
+      if (outgoing === undefined || !states.has(toStateId)) {
+        throw new EngineFault(
+          "content.catalog.machine_transition_state_missing",
+          "MachineTransitionDefinition must reference states in its owning StateMachineDefinition",
+          {
+            pack_id: packId,
+            bundle_digest: bundleDigest,
+            machine_id: machineId,
+            transition_id: transitionId,
+            from_state_id: fromStateId,
+            to_state_id: toStateId,
+          },
+        );
+      }
+      outgoing.push(transition);
+    }
+    const outgoing = new Map<string, readonly JsonObject[]>();
+    for (const [stateId, values] of outgoingMutable) {
+      outgoing.set(stateId, Object.freeze([...values]));
+    }
+
+    entries.set(
+      machineId,
+      Object.freeze({
+        definition,
+        findState: (stateId: string): JsonObject | undefined =>
+          states.get(stateId),
+        findTransition: (transitionId: string): JsonObject | undefined =>
+          transitions.get(transitionId),
+        listOutgoingTransitions: (
+          stateId: string,
+        ): readonly JsonObject[] | undefined => outgoing.get(stateId),
+      }),
+    );
+  }
+  return entries;
 }
 
 function bundleKey(bundleId: string, bundleDigest: string): string {

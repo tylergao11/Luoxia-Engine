@@ -20,6 +20,7 @@ import {
 import type {
   ModelRequestDocument,
   ModelResponseDocument,
+  ProviderUsageObservation,
   PreparedModelInvocation,
   VerifiedModelInvocationReceipt,
   VerifiedModelOutputDocument,
@@ -48,7 +49,8 @@ export interface RuntimeWorldRecord {
   /**
    * Lowest revision for which this PostgreSQL world can provide subsequent
    * CommittedEvents. It is 0 for a locally created world and the imported
-   * SaveEnvelope event_cursor for an imported world.
+   * world revision for an imported world; v1 SaveEnvelope requires its
+   * event_cursor to equal that revision.
    */
   readonly eventHistoryFloorRevision: number;
 }
@@ -167,6 +169,7 @@ export interface ModelInvocationJournal
   ): Promise<AuthorizedModelDispatch>;
   recordVerified(
     receipt: VerifiedModelInvocationReceipt,
+    usage: ProviderUsageObservation,
   ): Promise<StoredVerifiedModelInvocation>;
 }
 
@@ -176,16 +179,15 @@ export type DailySettlementRunPhase =
   | "response_verified";
 
 export interface DailySettlementRunRecord {
-  readonly runId: string;
   readonly worldId: string;
   readonly day: number;
   readonly phase: DailySettlementRunPhase;
   readonly invocation: StoredModelInvocation;
 }
 
-export interface AuthorizedDailyDirectorDispatch {
-  readonly run: DailySettlementRunRecord;
-  readonly authorization: ModelDispatchAuthorization;
+export interface DailySettlementProposalIdentity {
+  readonly ordinal: number;
+  readonly proposalId: string;
 }
 
 export interface DailySettlementRunJournal
@@ -193,19 +195,18 @@ export interface DailySettlementRunJournal
   prepareDirectorInvocation(
     invocation: PreparedModelInvocation,
   ): Promise<DailySettlementRunRecord>;
+  prepareDailyProposals(
+    modelRequestId: string,
+  ): Promise<readonly DailySettlementProposalIdentity[]>;
   read(
     worldId: string,
     day: number,
   ): Promise<DailySettlementRunRecord | undefined>;
-  markDirectorDispatched(
-    runId: string,
-    invocation: PreparedModelInvocation,
-  ): Promise<AuthorizedDailyDirectorDispatch>;
-  recordDirectorVerified(
-    runId: string,
-    receipt: VerifiedModelInvocationReceipt,
-  ): Promise<DailySettlementRunRecord>;
 }
+
+export interface RuntimeModelInvocationJournal
+  extends ModelInvocationJournal,
+    DailySettlementRunJournal {}
 
 export interface StoredPreparedRulePluginInvocation {
   readonly phase: "prepared";

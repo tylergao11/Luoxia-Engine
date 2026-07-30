@@ -4,18 +4,22 @@ import {
   expectJsonObject,
   expectProperty,
   expectString,
-  type JsonDigest,
+  isJsonObject,
+  type ContractSchemaExporter,
   type JsonObject,
   type JsonValue,
 } from "@luoxia/contracts-runtime";
 
 import type {
+  ModelProviderInvocationResult,
   ModelProvider,
+  ProviderUsageObservation,
   ResolvedModelInvocation,
 } from "../../application/model-gateway.js";
 import {
-  copyProviderJsonObject,
+  deriveProviderOutputSchema,
   parseProviderJsonObject,
+  readProviderTokenCount,
   readBoundedProviderResponseText,
 } from "./model-provider-http-support.js";
 
@@ -27,10 +31,6 @@ export interface DeepSeekChatModelProviderConfig {
   /** Explicit official Chat Completions endpoint. */
   readonly endpoint: string;
   readonly apiKey: string;
-  /** Deployment ModelProfile identity accepted by this adapter instance. */
-  readonly modelProfileId: string;
-  /** Exact ModelOperationKind accepted by this adapter instance. */
-  readonly requestKind: string;
   /** Explicit DeepSeek model identifier; no adapter default. */
   readonly model: string;
   /** Explicit thinking mode sent to DeepSeek. */
@@ -41,12 +41,10 @@ export interface DeepSeekChatModelProviderConfig {
   readonly maxOutputTokens: number;
   /** Explicit sampling temperature; no provider default is inherited. */
   readonly temperature: number;
-  /** JSON Schema derived by deployment from the formal ModelOutput contract. */
-  readonly outputSchema: JsonObject;
 }
 
 export interface DeepSeekChatModelProviderDependencies {
-  readonly digest: JsonDigest;
+  readonly contracts: ContractSchemaExporter;
   readonly config: DeepSeekChatModelProviderConfig;
 }
 
@@ -62,37 +60,25 @@ export function createDeepSeekChatModelProvider(
 }
 
 class DeepSeekChatModelProvider implements ModelProvider {
-  readonly #digest: JsonDigest;
+  readonly #contracts: ContractSchemaExporter;
   readonly #endpoint: string;
   readonly #apiKey: string;
-  readonly #modelProfileId: string;
-  readonly #requestKind: string;
   readonly #model: string;
   readonly #thinkingMode: DeepSeekThinkingMode;
   readonly #timeoutMs: number;
   readonly #maxOutputTokens: number;
   readonly #temperature: number;
-  readonly #outputSchema: JsonObject;
+  readonly #outputSchemas = new Map<string, JsonObject>();
 
   public constructor(
     dependencies: DeepSeekChatModelProviderDependencies,
   ) {
-    this.#digest = dependencies.digest;
+    this.#contracts = dependencies.contracts;
     this.#endpoint = validateDeepSeekEndpoint(
       dependencies.config.endpoint,
     );
     this.#apiKey = requireNonemptySecret(
       dependencies.config.apiKey,
-    );
-    this.#modelProfileId = requireNonemptyText(
-      dependencies.config.modelProfileId,
-      "model_profile_id",
-      128,
-    );
-    this.#requestKind = requireNonemptyText(
-      dependencies.config.requestKind,
-      "request_kind",
-      128,
     );
     this.#model = requireNonemptyText(
       dependencies.config.model,
@@ -113,58 +99,25 @@ class DeepSeekChatModelProvider implements ModelProvider {
     this.#temperature = requireTemperature(
       dependencies.config.temperature,
     );
-    this.#outputSchema = copyProviderJsonObject({
-      candidate: dependencies.config.outputSchema,
-      field: "output_schema",
-      providerLabel: "DeepSeek",
-    });
   }
 
   public assertCanInvoke(input: {
     readonly modelProfileId: string;
     readonly requestKind: string;
   }): void {
-    if (input.modelProfileId !== this.#modelProfileId) {
-      throw new EngineFault(
-        "model.provider.profile_not_configured",
-        "DeepSeek chat adapter is not configured for the requested ModelProfile",
-        {
-          requested_model_profile_id: input.modelProfileId,
-          configured_model_profile_id: this.#modelProfileId,
-          request_kind: input.requestKind,
-        },
-      );
-    }
-    if (input.requestKind !== this.#requestKind) {
-      throw new EngineFault(
-        "model.provider.request_kind_not_configured",
-        "DeepSeek chat adapter is not configured for the requested operation kind",
-        {
-          model_profile_id: input.modelProfileId,
-          requested_request_kind: input.requestKind,
-          configured_request_kind: this.#requestKind,
-        },
-      );
-    }
+    this.#requireOutputSchema(input.requestKind);
   }
 
   public async invoke(
     resolved: ResolvedModelInvocation,
-  ): Promise<unknown> {
-    const request = resolved.request.value;
-    const requestKind = expectString(
-      request,
-      "request_kind",
-      "ModelRequest",
-    );
+  ): Promise<ModelProviderInvocationResult> {
     this.assertCanInvoke({
-      modelProfileId: expectString(
-        request,
-        "model_profile_id",
-        "ModelRequest",
-      ),
-      requestKind,
+      modelProfileId: resolved.modelProfileId,
+      requestKind: resolved.requestKind,
     });
+    const outputSchema = this.#requireOutputSchema(
+      resolved.requestKind,
+    );
 
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), this.#timeoutMs);
@@ -181,7 +134,7 @@ class DeepSeekChatModelProvider implements ModelProvider {
           model: this.#model,
           messages: buildDeepSeekMessages(
             resolved,
-            this.#outputSchema,
+            outputSchema,
           ),
           response_format: {
             type: "json_object",
@@ -206,7 +159,7 @@ class DeepSeekChatModelProvider implements ModelProvider {
           "model.provider.timeout",
           "DeepSeek chat request exceeded its explicit timeout",
           {
-            model_profile_id: this.#modelProfileId,
+            model_profile_id: resolved.modelProfileId,
             timeout_ms: this.#timeoutMs,
           },
         );
@@ -218,7 +171,7 @@ class DeepSeekChatModelProvider implements ModelProvider {
         "model.provider.transport_failed",
         "DeepSeek chat request failed before a verifiable response was received",
         {
-          model_profile_id: this.#modelProfileId,
+          model_profile_id: resolved.modelProfileId,
           cause: error instanceof Error ? error.message : String(error),
         },
       );
@@ -231,7 +184,7 @@ class DeepSeekChatModelProvider implements ModelProvider {
         "model.provider.http_error",
         "DeepSeek chat endpoint returned a non-success status",
         {
-          model_profile_id: this.#modelProfileId,
+          model_profile_id: resolved.modelProfileId,
           http_status: response.status,
           provider_error: readDeepSeekErrorSummary(responseText),
         },
@@ -246,34 +199,24 @@ class DeepSeekChatModelProvider implements ModelProvider {
       providerResponse,
       this.#model,
     );
-    const residentContext = expectJsonObject(
-      expectProperty(request, "resident_context", "ModelRequest"),
-      "ModelRequest.resident_context",
-    );
-
     return Object.freeze({
-      contract_version: "model-protocol.v1",
-      record_type: "model.response",
-      request_id: expectString(request, "request_id", "ModelRequest"),
-      request_kind: requestKind,
-      basis_revision: expectInteger(
-        request,
-        "basis_revision",
-        "ModelRequest",
-      ),
-      resident_context_digest: expectString(
-        residentContext,
-        "resident_digest",
-        "ResidentContextRef",
-      ),
-      dynamic_input_digest: expectString(
-        request,
-        "dynamic_input_digest",
-        "ModelRequest",
-      ),
-      output_digest: this.#digest.sha256(output),
       output,
+      usage: readDeepSeekUsage(providerResponse, this.#model),
     });
+  }
+
+  #requireOutputSchema(requestKind: string): JsonObject {
+    const existing = this.#outputSchemas.get(requestKind);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const schema = deriveProviderOutputSchema({
+      contracts: this.#contracts,
+      requestKind,
+      providerLabel: "DeepSeek",
+    });
+    this.#outputSchemas.set(requestKind, schema);
+    return schema;
   }
 }
 
@@ -281,35 +224,106 @@ function buildDeepSeekMessages(
   resolved: ResolvedModelInvocation,
   outputSchema: JsonObject,
 ): readonly JsonObject[] {
-  const messages: JsonObject[] = [
+  const messages: JsonObject[] = resolved.promptTexts.map((text) =>
+      Object.freeze({
+        role: "system",
+        content: text,
+      }),
+  );
+  messages.push(
     Object.freeze({
       role: "system",
       content:
-        "Return exactly one json object for the requested Luoxia ModelOutput. " +
-        "Set output_kind to the ModelRequest request_kind. Do not add Markdown, prose, or wrapper fields. " +
+        `Return exactly one JSON object for Luoxia operation ${resolved.requestKind}. ` +
+        `Set output_kind to ${JSON.stringify(resolved.requestKind)}. ` +
+        "The following user JSON is the operation input. Do not add Markdown, prose, or wrapper fields. " +
         `The following JSON Schema is the exact output contract: ${JSON.stringify(outputSchema)}`,
     }),
-  ];
-  messages.push(
-    ...resolved.prompt_blocks.map((block) =>
-      Object.freeze({
-        role: "system",
-        content: block.text,
-      }),
-    ),
   );
   messages.push(
     Object.freeze({
       role: "user",
-      content: JSON.stringify({
-        model_request: resolved.request.value,
-        ...(resolved.event_context === undefined
-          ? {}
-          : { event_context: resolved.event_context }),
-      }),
+      content: JSON.stringify(resolved.modelInput),
     }),
   );
   return Object.freeze(messages);
+}
+
+function readDeepSeekUsage(
+  response: JsonObject,
+  providerModel: string,
+): ProviderUsageObservation {
+  const usageCandidate = response["usage"];
+  if (usageCandidate === undefined) {
+    return Object.freeze({
+      providerKind: "deepseek_chat",
+      providerModel,
+      status: "absent",
+    });
+  }
+  if (!isJsonObject(usageCandidate)) {
+    return invalidDeepSeekUsage(providerModel);
+  }
+  const input = readProviderTokenCount(usageCandidate, "prompt_tokens");
+  const output = readProviderTokenCount(
+    usageCandidate,
+    "completion_tokens",
+  );
+  const total = readProviderTokenCount(usageCandidate, "total_tokens");
+  if (
+    input.state !== "valid" ||
+    output.state !== "valid" ||
+    total.state === "invalid" ||
+    (total.state === "valid" &&
+      (!Number.isSafeInteger(input.value + output.value) ||
+        total.value !== input.value + output.value))
+  ) {
+    return invalidDeepSeekUsage(providerModel);
+  }
+
+  const cacheHit = readProviderTokenCount(
+    usageCandidate,
+    "prompt_cache_hit_tokens",
+  );
+  const cacheMiss = readProviderTokenCount(
+    usageCandidate,
+    "prompt_cache_miss_tokens",
+  );
+  if (cacheHit.state === "absent" && cacheMiss.state === "absent") {
+    return Object.freeze({
+      providerKind: "deepseek_chat",
+      providerModel,
+      status: "partial",
+      inputTokens: input.value,
+      outputTokens: output.value,
+    });
+  }
+  if (
+    cacheHit.state !== "valid" ||
+    cacheMiss.state !== "valid" ||
+    !Number.isSafeInteger(cacheHit.value + cacheMiss.value) ||
+    cacheHit.value + cacheMiss.value !== input.value
+  ) {
+    return invalidDeepSeekUsage(providerModel);
+  }
+  return Object.freeze({
+    providerKind: "deepseek_chat",
+    providerModel,
+    status: "complete",
+    inputTokens: input.value,
+    cachedInputTokens: cacheHit.value,
+    outputTokens: output.value,
+  });
+}
+
+function invalidDeepSeekUsage(
+  providerModel: string,
+): ProviderUsageObservation {
+  return Object.freeze({
+    providerKind: "deepseek_chat",
+    providerModel,
+    status: "invalid",
+  });
 }
 
 function extractDeepSeekOutput(

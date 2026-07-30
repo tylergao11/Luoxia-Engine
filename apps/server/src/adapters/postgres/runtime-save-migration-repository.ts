@@ -41,7 +41,6 @@ const STABLE_SAVE_FIELDS = Object.freeze([
   "dependency_bundle_locks",
   "rule_plugin_locks",
   "stage_module_locks",
-  "asset_hashes",
 ] as const);
 
 export function createPostgresRuntimeSaveMigrationRepository(
@@ -94,7 +93,6 @@ export function createPostgresRuntimeSaveMigrationRepository(
                     updated_at = $4::timestamptz
               WHERE world_id = $1::uuid
                 AND revision = $5::bigint
-                AND event_cursor = $5::bigint
               RETURNING
                 world_id::text AS world_id,
                 revision::text AS revision_text,
@@ -105,10 +103,8 @@ export function createPostgresRuntimeSaveMigrationRepository(
                 dependency_bundle_locks_document,
                 rule_plugin_locks_document,
                 stage_module_locks_document,
-                event_cursor::text AS event_cursor_text,
                 event_log_floor_revision::text
                   AS event_log_floor_revision_text,
-                asset_hashes_document,
                 migration_history_document,
                 updated_at`,
             [

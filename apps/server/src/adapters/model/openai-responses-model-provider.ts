@@ -1,20 +1,24 @@
 import {
   EngineFault,
-  expectInteger,
   expectJsonObject,
   expectProperty,
   expectString,
-  type JsonDigest,
+  isJsonObject,
+  type ContractSchemaExporter,
   type JsonObject,
   type JsonValue,
 } from "@luoxia/contracts-runtime";
 
 import type {
+  ModelProviderInvocationResult,
   ModelProvider,
+  ProviderUsageObservation,
   ResolvedModelInvocation,
 } from "../../application/model-gateway.js";
 import {
+  deriveProviderOutputSchema,
   parseProviderJsonObject,
+  readProviderTokenCount,
   readBoundedProviderResponseText,
 } from "./model-provider-http-support.js";
 
@@ -24,8 +28,6 @@ export interface OpenAIResponsesModelProviderConfig {
   /** Explicit full Responses endpoint, normally ending in /v1/responses. */
   readonly endpoint: string;
   readonly apiKey: string;
-  /** Deployment ModelProfile identity accepted by this adapter instance. */
-  readonly modelProfileId: string;
   /** Explicit OpenAI model identifier; no adapter default. */
   readonly model: string;
   /** Explicit provider timeout; dispatched requests are never retried. */
@@ -35,14 +37,14 @@ export interface OpenAIResponsesModelProviderConfig {
 }
 
 export interface OpenAIResponsesModelProviderDependencies {
-  readonly digest: JsonDigest;
+  readonly contracts: ContractSchemaExporter;
   readonly config: OpenAIResponsesModelProviderConfig;
 }
 
 /**
  * Real single-shot OpenAI Responses adapter. It asks for one JSON object,
- * wraps that untrusted ModelOutput with the exact request correlations, and
- * leaves all Schema/digest/semantic authorization to ModelGateway.
+ * returns that untrusted ModelOutput, and leaves all correlations,
+ * Schema/digest checks, and semantic authorization to ModelGateway.
  */
 export function createOpenAIResponsesModelProvider(
   dependencies: OpenAIResponsesModelProviderDependencies,
@@ -51,25 +53,20 @@ export function createOpenAIResponsesModelProvider(
 }
 
 class OpenAIResponsesModelProvider implements ModelProvider {
-  readonly #digest: JsonDigest;
+  readonly #contracts: ContractSchemaExporter;
   readonly #endpoint: string;
   readonly #apiKey: string;
-  readonly #modelProfileId: string;
   readonly #model: string;
   readonly #timeoutMs: number;
   readonly #maxOutputTokens: number;
+  readonly #outputSchemas = new Map<string, JsonObject>();
 
   public constructor(
     dependencies: OpenAIResponsesModelProviderDependencies,
   ) {
-    this.#digest = dependencies.digest;
+    this.#contracts = dependencies.contracts;
     this.#endpoint = validateEndpoint(dependencies.config.endpoint);
     this.#apiKey = requireNonemptySecret(dependencies.config.apiKey);
-    this.#modelProfileId = requireNonemptyText(
-      dependencies.config.modelProfileId,
-      "model_profile_id",
-      128,
-    );
     this.#model = requireNonemptyText(
       dependencies.config.model,
       "model",
@@ -89,36 +86,19 @@ class OpenAIResponsesModelProvider implements ModelProvider {
     readonly modelProfileId: string;
     readonly requestKind: string;
   }): void {
-    if (input.modelProfileId !== this.#modelProfileId) {
-      throw new EngineFault(
-        "model.provider.profile_not_configured",
-        "OpenAI Responses adapter is not configured for the requested ModelProfile",
-        {
-          requested_model_profile_id: input.modelProfileId,
-          configured_model_profile_id: this.#modelProfileId,
-          request_kind: input.requestKind,
-        },
-      );
-    }
+    this.#requireOutputSchema(input.requestKind);
   }
 
   public async invoke(
     resolved: ResolvedModelInvocation,
-  ): Promise<unknown> {
-    const request = resolved.request.value;
-    const requestedProfile = expectString(
-      request,
-      "model_profile_id",
-      "ModelRequest",
-    );
+  ): Promise<ModelProviderInvocationResult> {
     this.assertCanInvoke({
-      modelProfileId: requestedProfile,
-      requestKind: expectString(
-        request,
-        "request_kind",
-        "ModelRequest",
-      ),
+      modelProfileId: resolved.modelProfileId,
+      requestKind: resolved.requestKind,
     });
+    const outputSchema = this.#requireOutputSchema(
+      resolved.requestKind,
+    );
 
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), this.#timeoutMs);
@@ -140,7 +120,10 @@ class OpenAIResponsesModelProvider implements ModelProvider {
               type: "json_object",
             },
           },
-          input: buildResponsesInput(resolved),
+          input: buildResponsesInput(
+            resolved,
+            outputSchema,
+          ),
         }),
         signal: abort.signal,
       });
@@ -155,7 +138,7 @@ class OpenAIResponsesModelProvider implements ModelProvider {
           "model.provider.timeout",
           "OpenAI Responses request exceeded its explicit timeout",
           {
-            model_profile_id: this.#modelProfileId,
+            model_profile_id: resolved.modelProfileId,
             timeout_ms: this.#timeoutMs,
           },
         );
@@ -167,7 +150,7 @@ class OpenAIResponsesModelProvider implements ModelProvider {
         "model.provider.transport_failed",
         "OpenAI Responses request failed before a verifiable response was received",
         {
-          model_profile_id: this.#modelProfileId,
+          model_profile_id: resolved.modelProfileId,
           cause: error instanceof Error ? error.message : String(error),
         },
       );
@@ -180,7 +163,7 @@ class OpenAIResponsesModelProvider implements ModelProvider {
         "model.provider.http_error",
         "OpenAI Responses endpoint returned a non-success status",
         {
-          model_profile_id: this.#modelProfileId,
+          model_profile_id: resolved.modelProfileId,
           http_status: response.status,
           provider_error: readProviderErrorSummary(responseText),
         },
@@ -197,51 +180,38 @@ class OpenAIResponsesModelProvider implements ModelProvider {
       code: "model.provider.output_not_json",
       message: "OpenAI Responses output_text is not one JSON object",
     });
-    const residentContext = expectJsonObject(
-      expectProperty(request, "resident_context", "ModelRequest"),
-      "ModelRequest.resident_context",
-    );
-
     return Object.freeze({
-      contract_version: "model-protocol.v1",
-      record_type: "model.response",
-      request_id: expectString(request, "request_id", "ModelRequest"),
-      request_kind: expectString(
-        request,
-        "request_kind",
-        "ModelRequest",
-      ),
-      basis_revision: expectInteger(
-        request,
-        "basis_revision",
-        "ModelRequest",
-      ),
-      resident_context_digest: expectString(
-        residentContext,
-        "resident_digest",
-        "ResidentContextRef",
-      ),
-      dynamic_input_digest: expectString(
-        request,
-        "dynamic_input_digest",
-        "ModelRequest",
-      ),
-      output_digest: this.#digest.sha256(output),
       output,
+      usage: readOpenAIUsage(providerResponse, this.#model),
     });
+  }
+
+  #requireOutputSchema(requestKind: string): JsonObject {
+    const existing = this.#outputSchemas.get(requestKind);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const schema = deriveProviderOutputSchema({
+      contracts: this.#contracts,
+      requestKind,
+      providerLabel: "OpenAI Responses",
+    });
+    this.#outputSchemas.set(requestKind, schema);
+    return schema;
   }
 }
 
 function buildResponsesInput(
   resolved: ResolvedModelInvocation,
+  outputSchema: JsonObject,
 ): readonly JsonObject[] {
-  const input: JsonObject[] = resolved.prompt_blocks.map((block) =>
+  const input: JsonObject[] = resolved.promptTexts.map((text) =>
     Object.freeze({
       role: "developer",
       content: [
         Object.freeze({
           type: "input_text",
-          text: block.text,
+          text,
         }),
       ],
     }),
@@ -253,8 +223,11 @@ function buildResponsesInput(
         Object.freeze({
           type: "input_text",
           text:
-            "Return exactly one JSON object for the requested Luoxia ModelOutput. " +
-            "Set output_kind to the ModelRequest request_kind. Do not add Markdown, prose, or wrapper fields.",
+            `Return exactly one JSON object for Luoxia operation ${resolved.requestKind}. ` +
+            `Set output_kind to ${JSON.stringify(resolved.requestKind)}. ` +
+            "The following user JSON is the operation input. " +
+            "Do not add Markdown, prose, or wrapper fields. " +
+            `The following JSON Schema is the exact output contract: ${JSON.stringify(outputSchema)}`,
         }),
       ],
     }),
@@ -265,17 +238,87 @@ function buildResponsesInput(
       content: [
         Object.freeze({
           type: "input_text",
-          text: JSON.stringify({
-            model_request: resolved.request.value,
-            ...(resolved.event_context === undefined
-              ? {}
-              : { event_context: resolved.event_context }),
-          }),
+          text: JSON.stringify(resolved.modelInput),
         }),
       ],
     }),
   );
   return Object.freeze(input);
+}
+
+function readOpenAIUsage(
+  response: JsonObject,
+  providerModel: string,
+): ProviderUsageObservation {
+  const usageCandidate = response["usage"];
+  if (usageCandidate === undefined) {
+    return Object.freeze({
+      providerKind: "openai_responses",
+      providerModel,
+      status: "absent",
+    });
+  }
+  if (!isJsonObject(usageCandidate)) {
+    return invalidOpenAIUsage(providerModel);
+  }
+  const input = readProviderTokenCount(usageCandidate, "input_tokens");
+  const output = readProviderTokenCount(usageCandidate, "output_tokens");
+  const total = readProviderTokenCount(usageCandidate, "total_tokens");
+  if (
+    input.state !== "valid" ||
+    output.state !== "valid" ||
+    total.state === "invalid" ||
+    (total.state === "valid" &&
+      (!Number.isSafeInteger(input.value + output.value) ||
+        total.value !== input.value + output.value))
+  ) {
+    return invalidOpenAIUsage(providerModel);
+  }
+
+  const detailsCandidate = usageCandidate["input_tokens_details"];
+  if (detailsCandidate === undefined) {
+    return Object.freeze({
+      providerKind: "openai_responses",
+      providerModel,
+      status: "partial",
+      inputTokens: input.value,
+      outputTokens: output.value,
+    });
+  }
+  if (!isJsonObject(detailsCandidate)) {
+    return invalidOpenAIUsage(providerModel);
+  }
+  const cached = readProviderTokenCount(detailsCandidate, "cached_tokens");
+  if (cached.state === "absent") {
+    return Object.freeze({
+      providerKind: "openai_responses",
+      providerModel,
+      status: "partial",
+      inputTokens: input.value,
+      outputTokens: output.value,
+    });
+  }
+  if (cached.state !== "valid" || cached.value > input.value) {
+    return invalidOpenAIUsage(providerModel);
+  }
+  return Object.freeze({
+    providerKind: "openai_responses",
+    providerModel,
+    status: "complete",
+    inputTokens: input.value,
+    cachedInputTokens: cached.value,
+    outputTokens: output.value,
+  });
+}
+
+function invalidOpenAIUsage(
+  providerModel: string,
+): ProviderUsageObservation {
+  return Object.freeze({
+    providerKind: "openai_responses",
+    providerModel,
+    status: "invalid",
+  });
 }
 
 function extractSingleOutputText(response: JsonObject): string {

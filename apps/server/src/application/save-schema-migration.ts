@@ -53,7 +53,6 @@ const STABLE_SAVE_FIELDS = Object.freeze([
   "dependency_bundle_locks",
   "rule_plugin_locks",
   "stage_module_locks",
-  "asset_hashes",
 ] as const);
 
 export function createSaveSchemaMigrationService(
@@ -304,7 +303,7 @@ function assertStableSaveFields(
     ) {
       throw new EngineFault(
         "save_schema.step_stable_fact_changed",
-        "Save Schema migration cannot change world, content, implementation, cursor, asset or contract identity facts",
+        "Save Schema migration cannot change world, content, implementation, cursor or contract identity facts",
         { migration_id: migrationId, field },
       );
     }

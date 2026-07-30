@@ -11,6 +11,7 @@ import {
   type JsonObject,
   type SaveEnvelopeDocument,
   type ValidatedJsonObject,
+  type WorldContentLockDocument,
 } from "@luoxia/contracts-runtime/portable";
 
 import type {
@@ -70,6 +71,7 @@ export interface PacketStateTransition {
     packet: ContentPacketDocument,
     snapshot: WorldSnapshotDocument,
     commitIdentity: PacketCommitIdentityDocument,
+    worldContentLock: WorldContentLockDocument,
   ): PacketTransitionCandidates;
 }
 
@@ -123,15 +125,25 @@ export {
   type ContentRuntimeCatalog,
   type ContentRuntimeCatalogDependencies,
   type MaterializationContentBinding,
+  type ModelSelectionCatalog,
   type PresentationProfileRefLike,
   type RuleEvaluationBinding,
   type RuleRefLike,
-  type StaticDefinitionRefLike,
+  type StateMachineCatalogEntry,
+  type StateMachineCatalogRefLike,
   type WorldContentBinding,
   type WorldInitializationContent,
   type WorldPresentationContent,
   type WorldContentLockDocument,
 } from "./content-runtime-catalog.js";
+
+export {
+  createStateMachineContractAuthority,
+  type RegisteredStateMachineContract,
+  type ResolvedStateMachineTransition,
+  type StateMachineContractAuthority,
+  type StateMachineContractAuthorityDependencies,
+} from "./state-machine-contract-authority.js";
 
 export {
   CONTENT_RUNTIME_IDENTITY_KINDS,
@@ -286,6 +298,14 @@ class DefaultWorldAuthority implements WorldAuthority {
           snapshot.value,
           authorityEnvelope.value,
         );
+        const worldContentLock = this.#contracts.assertObject(
+          CONTRACT_REF.worldContentLock,
+          expectProperty(
+            authorityEnvelope.value,
+            "world_content_lock",
+            "SaveEnvelope",
+          ),
+        );
         await this.#semanticGate.assertApplicable(
           packet,
           snapshot,
@@ -300,6 +320,7 @@ class DefaultWorldAuthority implements WorldAuthority {
           packet,
           snapshot,
           commitIdentity,
+          worldContentLock,
         );
         const nextWorldState = this.#contracts.assertObject(
           CONTRACT_REF.worldState,

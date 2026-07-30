@@ -11,11 +11,11 @@ import {
   type JsonObject,
   type JsonValue,
 } from "@luoxia/contracts-runtime";
-import type { ContentRuntimeCatalog } from "@luoxia/world-core";
 import type {
+  ContentRuntimeCatalog,
   DeterministicContextAuthority,
   WorldContentBinding,
-} from "@luoxia/world-core/composition";
+} from "@luoxia/world-core";
 
 import type { CommandJournal, StoredReceivedCommand } from "./command-journal.js";
 import type { CommandFinalizer } from "./command-finalizer.js";
@@ -45,13 +45,17 @@ import type { ServerEnvelopeDocument } from "./server-envelope.js";
 import type { WorldMutationOrchestrator } from "./world-mutation-orchestrator.js";
 
 type DialogueOperationKind = "dialogue.open" | "dialogue.turn.append";
+type DialogueInteractionKind =
+  | "dialogue"
+  | "goal_plan"
+  | "definition_draft";
 type OrchestratedOperationKind =
   | DialogueOperationKind
   | "definition.validate"
   | "goal_plan.validate";
 
-export interface DialogueCommitmentIdFactory {
-  createCommitmentId(): string;
+export interface DialogueLocalIdFactory {
+  createId(): string;
 }
 
 export interface DialogueCommandOrchestrator {
@@ -73,13 +77,7 @@ export interface DialogueCommandOrchestratorDependencies {
   readonly mutations: WorldMutationOrchestrator;
   readonly finalizer: CommandFinalizer;
   readonly directorRuns: DialogueDirectorRunJournal;
-  readonly commitmentIds: DialogueCommitmentIdFactory;
-  /** Required deployment selection; never read from content or a client message. */
-  readonly characterDialogueModelProfileId: string;
-  /** Required deployment selection for Director NPC dialogue event calls. */
-  readonly directorDialogueEventsModelProfileId: string;
-  /** Required deployment selection for Director System dialogue calls. */
-  readonly directorSystemDialogueModelProfileId: string;
+  readonly localIds: DialogueLocalIdFactory;
 }
 
 interface HumanStageContext {
@@ -94,6 +92,21 @@ type DialogueResponder =
     }
   | {
       readonly responderKind: "director_system";
+    };
+
+type SystemPlanningInvocation =
+  | {
+      readonly interactionKind: "dialogue";
+    }
+  | {
+      readonly interactionKind: "goal_plan";
+      readonly run: DialogueDirectorRunRecord;
+      readonly modelReceipt: VerifiedModelInvocationReceipt;
+    }
+  | {
+      readonly interactionKind: "definition_draft";
+      readonly run: DialogueDirectorRunRecord;
+      readonly modelReceipt: VerifiedModelInvocationReceipt;
     };
 
 export function createDialogueCommandOrchestrator(
@@ -117,10 +130,7 @@ class DefaultDialogueCommandOrchestrator
   readonly #mutations: WorldMutationOrchestrator;
   readonly #finalizer: CommandFinalizer;
   readonly #directorRuns: DialogueDirectorRunJournal;
-  readonly #commitmentIds: DialogueCommitmentIdFactory;
-  readonly #characterDialogueModelProfileId: string;
-  readonly #directorDialogueEventsModelProfileId: string;
-  readonly #directorSystemDialogueModelProfileId: string;
+  readonly #localIds: DialogueLocalIdFactory;
 
   public constructor(
     dependencies: DialogueCommandOrchestratorDependencies,
@@ -137,25 +147,7 @@ class DefaultDialogueCommandOrchestrator
     this.#mutations = dependencies.mutations;
     this.#finalizer = dependencies.finalizer;
     this.#directorRuns = dependencies.directorRuns;
-    this.#commitmentIds = dependencies.commitmentIds;
-    this.#characterDialogueModelProfileId =
-      dependencies.characterDialogueModelProfileId;
-    this.#directorDialogueEventsModelProfileId =
-      dependencies.directorDialogueEventsModelProfileId;
-    this.#directorSystemDialogueModelProfileId =
-      dependencies.directorSystemDialogueModelProfileId;
-    this.#contracts.assert(
-      CONTRACT_REF.identifier,
-      this.#characterDialogueModelProfileId,
-    );
-    this.#contracts.assert(
-      CONTRACT_REF.identifier,
-      this.#directorDialogueEventsModelProfileId,
-    );
-    this.#contracts.assert(
-      CONTRACT_REF.identifier,
-      this.#directorSystemDialogueModelProfileId,
-    );
+    this.#localIds = dependencies.localIds;
   }
 
   public async execute(
@@ -235,11 +227,22 @@ class DefaultDialogueCommandOrchestrator
     });
     const responder =
       await this.#assertHumanReceiptIdentity(stored, humanReceipt);
+    const interactionKind = readDialogueInteractionKind(stored);
     if (humanReceipt.proposal === undefined) {
       return this.#finalizer.completeRejected({
         sessionId: stored.session.sessionId,
         commandId: stored.commandId,
         code: readRejectCode(humanReceipt),
+      });
+    }
+    if (
+      responder.responderKind === "character_mind" &&
+      interactionKind !== "dialogue"
+    ) {
+      return this.#finalizer.completeRejected({
+        sessionId: stored.session.sessionId,
+        commandId: stored.commandId,
+        code: "dialogue.interaction_kind_recipient_invalid",
       });
     }
     const humanCommit =
@@ -255,6 +258,7 @@ class DefaultDialogueCommandOrchestrator
       return this.#executeSystemResponse({
         command: stored,
         humanWorldRevision,
+        interactionKind,
       });
     }
     const recipientEntityId = responder.entityId;
@@ -265,12 +269,10 @@ class DefaultDialogueCommandOrchestrator
       dialogueId: stored.dialogueExecution.dialogueId,
       latestPlayerTurnId: stored.dialogueExecution.humanTurnId,
       requestId: stored.dialogueExecution.characterModelRequestId,
-      model_profile_id: this.#characterDialogueModelProfileId,
     });
     assertCharacterModelReceiptIdentity(
       stored,
       recipientEntityId,
-      this.#characterDialogueModelProfileId,
       modelReceipt,
     );
 
@@ -322,15 +324,12 @@ class DefaultDialogueCommandOrchestrator
     const directorReceipt = await this.#models.directorDialogueEvents({
       worldId: stored.session.worldId,
       dialogueId: stored.dialogueExecution.dialogueId,
+      latestPlayerTurnId: stored.dialogueExecution.humanTurnId,
       requestId: directorRun.modelRequestId,
-      model_profile_id:
-        this.#directorDialogueEventsModelProfileId,
     });
     assertDirectorDialogueReceiptIdentity({
       command: stored,
       requestId: directorRun.modelRequestId,
-      modelProfileId:
-        this.#directorDialogueEventsModelProfileId,
       receipt: directorReceipt,
       expectedBasisRevision: characterWorldRevision,
     });
@@ -353,6 +352,7 @@ class DefaultDialogueCommandOrchestrator
   async #executeSystemResponse(input: {
     readonly command: StoredReceivedCommand;
     readonly humanWorldRevision: number;
+    readonly interactionKind: DialogueInteractionKind;
   }): Promise<readonly ServerEnvelopeDocument[]> {
     const execution = requireDialogueExecution(input.command);
     const run = await this.#directorRuns.prepare({
@@ -374,15 +374,12 @@ class DefaultDialogueCommandOrchestrator
       worldId: input.command.session.worldId,
       dialogueId: execution.dialogueId,
       playerEntityId: input.command.session.playerEntityId,
+      latestPlayerTurnId: execution.humanTurnId,
       requestId: run.modelRequestId,
-      model_profile_id:
-        this.#directorSystemDialogueModelProfileId,
     });
     assertDirectorSystemReceiptIdentity({
       command: input.command,
       requestId: run.modelRequestId,
-      modelProfileId:
-        this.#directorSystemDialogueModelProfileId,
       receipt: modelReceipt,
       expectedBasisRevision: input.humanWorldRevision,
     });
@@ -428,72 +425,41 @@ class DefaultDialogueCommandOrchestrator
       "director_system",
     );
 
-    const output = readModelOutput(modelReceipt);
-    const definitions = asObjectArray(
-      expectProperty(
-        output,
-        "definitions",
-        "DirectorSystemDialogueOutput",
-      ),
-      "DirectorSystemDialogueOutput.definitions",
-    );
-    const goalPlans = asObjectArray(
-      expectProperty(
-        output,
-        "goal_plans",
-        "DirectorSystemDialogueOutput",
-      ),
-      "DirectorSystemDialogueOutput.goal_plans",
-    );
-    const eventCards = asObjectArray(
-      expectProperty(
-        output,
-        "event_cards",
-        "DirectorSystemDialogueOutput",
-      ),
-      "DirectorSystemDialogueOutput.event_cards",
-    );
-    const proposalRuns =
-      await this.#directorRuns.prepareProposals({
-        run,
-        definitionProposalIds: proposalIds(
-          definitions,
-          "DynamicDefinitionProposal",
-        ),
-        goalPlanProposalIds: proposalIds(
-          goalPlans,
-          "GoalPlanProposal",
-        ),
-        eventCardProposalIds: proposalIds(
-          eventCards,
-          "EventCardProposal",
-        ),
-      });
-
-    let finalWorldRevision =
-      await this.#publishSystemDefinitions({
+    const planningInvocation =
+      await this.#invokeSystemPlanningModel({
         command: input.command,
-        modelReceipt,
-        proposals: definitions,
-        identities: proposalRuns.definitions,
+        interactionKind: input.interactionKind,
+        basisRevision: responseWorldRevision,
+      });
+    const eventRun = await this.#directorRuns.prepare({
+      command: input.command,
+      dialogueId: execution.dialogueId,
+      requestKind: "director.dialogue_events",
+    });
+    const eventReceipt = await this.#models.directorDialogueEvents({
+      worldId: input.command.session.worldId,
+      dialogueId: execution.dialogueId,
+      latestPlayerTurnId: execution.humanTurnId,
+      requestId: eventRun.modelRequestId,
+    });
+    assertDirectorDialogueReceiptIdentity({
+      command: input.command,
+      requestId: eventRun.modelRequestId,
+      receipt: eventReceipt,
+      expectedBasisRevision: responseWorldRevision,
+    });
+    const planningWorldRevision =
+      await this.#publishSystemPlanningDraft({
+        command: input.command,
+        planningInvocation,
         startingWorldRevision: responseWorldRevision,
       });
-    finalWorldRevision =
-      await this.#publishSystemGoalPlans({
-        command: input.command,
-        modelReceipt,
-        proposals: goalPlans,
-        identities: proposalRuns.goalPlans,
-        startingWorldRevision: finalWorldRevision,
-      });
-    finalWorldRevision =
-      await this.#publishDirectorEventCards({
-        command: input.command,
-        run,
-        modelReceipt,
-        startingWorldRevision: finalWorldRevision,
-        identities: proposalRuns.eventCards,
-      });
+    const finalWorldRevision = await this.#publishDirectorEventCards({
+      command: input.command,
+      run: eventRun,
+      modelReceipt: eventReceipt,
+      startingWorldRevision: planningWorldRevision,
+    });
 
     return this.#finalizer.completeDialogueAccepted({
       sessionId: input.command.session.sessionId,
@@ -698,117 +664,201 @@ class DefaultDialogueCommandOrchestrator
     }
   }
 
-  async #publishSystemDefinitions(input: {
+  async #invokeSystemPlanningModel(input: {
     readonly command: StoredReceivedCommand;
-    readonly modelReceipt: VerifiedModelInvocationReceipt;
-    readonly proposals: readonly JsonObject[];
-    readonly identities: readonly DialogueDefinitionRunRecord[];
-    readonly startingWorldRevision: number;
-  }): Promise<number> {
-    assertProposalIdentityOrder({
-      command: input.command,
-      proposals: input.proposals,
-      identities: input.identities,
-      proposalLabel: "DynamicDefinitionProposal",
-    });
-    let expectedWorldRevision = input.startingWorldRevision;
-    for (const [ordinal, proposal] of input.proposals.entries()) {
-      const identity = input.identities[
-        ordinal
-      ] as DialogueDefinitionRunRecord;
-      const receipt = await this.#rulePlugins.executeRecoverable({
-        requestId: identity.ruleRequestId,
-        candidateFactory: async () =>
-          this.#createDefinitionValidationRequest({
-            command: input.command,
-            proposal,
-            identity,
-            modelReceipt: input.modelReceipt,
-            expectedWorldRevision,
-          }),
-        modelInvocations: [input.modelReceipt],
-      });
-      await this.#assertDefinitionReceiptIdentity({
-        command: input.command,
-        proposal,
-        identity,
-        modelReceipt: input.modelReceipt,
-        receipt,
-        expectedWorldRevision,
-      });
-      if (receipt.proposal === undefined) {
-        continue;
-      }
-      const committed =
-        await this.#mutations.commitRulePluginReceipt(receipt);
-      expectedWorldRevision = assertNextCommittedRevision({
-        command: input.command,
-        committed: committed.value,
-        currentWorldRevision: expectedWorldRevision,
-        stage: "definition",
-        proposalId: identity.proposalId,
-      });
+    readonly interactionKind: DialogueInteractionKind;
+    readonly basisRevision: number;
+  }): Promise<SystemPlanningInvocation> {
+    if (input.interactionKind === "dialogue") {
+      return Object.freeze({ interactionKind: "dialogue" });
     }
-    return expectedWorldRevision;
+    const execution = requireDialogueExecution(input.command);
+    const requestKind =
+      input.interactionKind === "goal_plan"
+        ? "director.goal_plan"
+        : "director.definition_draft";
+    const run = await this.#directorRuns.prepare({
+      command: input.command,
+      dialogueId: execution.dialogueId,
+      requestKind,
+    });
+    const common = {
+      worldId: input.command.session.worldId,
+      dialogueId: execution.dialogueId,
+      playerEntityId: input.command.session.playerEntityId,
+      latestPlayerTurnId: execution.humanTurnId,
+      requestId: run.modelRequestId,
+    } as const;
+    const modelReceipt =
+      input.interactionKind === "goal_plan"
+        ? await this.#models.directorGoalPlan(common)
+        : await this.#models.directorDefinitionDraft({
+            ...common,
+            purpose: readDialogueCommandText(input.command),
+          });
+    assertDirectorPlanningReceiptIdentity({
+      command: input.command,
+      interactionKind: input.interactionKind,
+      requestId: run.modelRequestId,
+      receipt: modelReceipt,
+      expectedBasisRevision: input.basisRevision,
+    });
+    return Object.freeze({
+      interactionKind: input.interactionKind,
+      run,
+      modelReceipt,
+    });
   }
 
-  async #publishSystemGoalPlans(input: {
+  async #publishSystemPlanningDraft(input: {
     readonly command: StoredReceivedCommand;
-    readonly modelReceipt: VerifiedModelInvocationReceipt;
-    readonly proposals: readonly JsonObject[];
-    readonly identities: readonly DialogueGoalPlanRunRecord[];
+    readonly planningInvocation: SystemPlanningInvocation;
     readonly startingWorldRevision: number;
   }): Promise<number> {
-    assertProposalIdentityOrder({
-      command: input.command,
-      proposals: input.proposals,
-      identities: input.identities,
-      proposalLabel: "GoalPlanProposal",
+    if (input.planningInvocation.interactionKind === "dialogue") {
+      return input.startingWorldRevision;
+    }
+    const output = readModelOutput(
+      input.planningInvocation.modelReceipt,
+    );
+    const draft = expectJsonObject(
+      expectProperty(
+        output,
+        "draft",
+        input.planningInvocation.interactionKind === "goal_plan"
+          ? "DirectorGoalPlanOutput"
+          : "DirectorDefinitionDraftOutput",
+      ),
+      "Director planning output.draft",
+    );
+    const identities = await this.#directorRuns.prepareProposals({
+      run: input.planningInvocation.run,
     });
-    let expectedWorldRevision = input.startingWorldRevision;
-    for (const [ordinal, proposal] of input.proposals.entries()) {
-      const identity = input.identities[
-        ordinal
-      ] as DialogueGoalPlanRunRecord;
-      const receipt = await this.#rulePlugins.executeRecoverable({
-        requestId: identity.ruleRequestId,
-        candidateFactory: async () =>
-          this.#createGoalPlanValidationRequest({
-            command: input.command,
-            proposal,
-            identity,
-            modelReceipt: input.modelReceipt,
-            expectedWorldRevision,
-          }),
-        modelInvocations: [input.modelReceipt],
-      });
-      await this.#assertGoalPlanReceiptIdentity({
-        command: input.command,
-        proposal,
-        identity,
-        modelReceipt: input.modelReceipt,
-        receipt,
-        expectedWorldRevision,
-      });
-      if (receipt.proposal === undefined) {
-        continue;
+    if (input.planningInvocation.interactionKind === "goal_plan") {
+      const identity = identities.goalPlans[0];
+      if (
+        identity === undefined ||
+        identity.ordinal !== 0 ||
+        identities.goalPlans.length !== 1
+      ) {
+        throw commandIdentityFault(
+          input.command,
+          "Goal-plan Director run must own exactly one ordinal-zero proposal identity",
+          {},
+        );
       }
-      const committed =
-        await this.#mutations.commitRulePluginReceipt(receipt);
-      expectedWorldRevision = assertNextCommittedRevision({
+      return this.#publishSystemGoalPlan({
         command: input.command,
-        committed: committed.value,
-        currentWorldRevision: expectedWorldRevision,
-        stage: "goal_plan",
-        proposalId: identity.proposalId,
+        modelReceipt: input.planningInvocation.modelReceipt,
+        draft,
+        identity,
+        startingWorldRevision: input.startingWorldRevision,
       });
     }
-    return expectedWorldRevision;
+    const identity = identities.definitions[0];
+    if (
+      identity === undefined ||
+      identity.ordinal !== 0 ||
+      identities.definitions.length !== 1
+    ) {
+      throw commandIdentityFault(
+        input.command,
+        "Definition-draft Director run must own exactly one ordinal-zero proposal identity",
+        {},
+      );
+    }
+    return this.#publishSystemDefinition({
+      command: input.command,
+      modelReceipt: input.planningInvocation.modelReceipt,
+      draft,
+      identity,
+      startingWorldRevision: input.startingWorldRevision,
+    });
+  }
+
+  async #publishSystemDefinition(input: {
+    readonly command: StoredReceivedCommand;
+    readonly modelReceipt: VerifiedModelInvocationReceipt;
+    readonly draft: JsonObject;
+    readonly identity: DialogueDefinitionRunRecord;
+    readonly startingWorldRevision: number;
+  }): Promise<number> {
+    const receipt = await this.#rulePlugins.executeRecoverable({
+      requestId: input.identity.ruleRequestId,
+      candidateFactory: async () =>
+        this.#createDefinitionValidationRequest({
+          command: input.command,
+          draft: input.draft,
+          identity: input.identity,
+          modelReceipt: input.modelReceipt,
+          expectedWorldRevision: input.startingWorldRevision,
+        }),
+      modelInvocations: [input.modelReceipt],
+    });
+    await this.#assertDefinitionReceiptIdentity({
+      command: input.command,
+      identity: input.identity,
+      modelReceipt: input.modelReceipt,
+      receipt,
+      expectedWorldRevision: input.startingWorldRevision,
+    });
+    if (receipt.proposal === undefined) {
+      return input.startingWorldRevision;
+    }
+    const committed =
+      await this.#mutations.commitRulePluginReceipt(receipt);
+    return assertNextCommittedRevision({
+      command: input.command,
+      committed: committed.value,
+      currentWorldRevision: input.startingWorldRevision,
+      stage: "definition",
+      proposalId: input.identity.proposalId,
+    });
+  }
+
+  async #publishSystemGoalPlan(input: {
+    readonly command: StoredReceivedCommand;
+    readonly modelReceipt: VerifiedModelInvocationReceipt;
+    readonly draft: JsonObject;
+    readonly identity: DialogueGoalPlanRunRecord;
+    readonly startingWorldRevision: number;
+  }): Promise<number> {
+    const receipt = await this.#rulePlugins.executeRecoverable({
+      requestId: input.identity.ruleRequestId,
+      candidateFactory: async () =>
+        this.#createGoalPlanValidationRequest({
+          command: input.command,
+          draft: input.draft,
+          identity: input.identity,
+          modelReceipt: input.modelReceipt,
+          expectedWorldRevision: input.startingWorldRevision,
+        }),
+      modelInvocations: [input.modelReceipt],
+    });
+    await this.#assertGoalPlanReceiptIdentity({
+      command: input.command,
+      identity: input.identity,
+      modelReceipt: input.modelReceipt,
+      receipt,
+      expectedWorldRevision: input.startingWorldRevision,
+    });
+    if (receipt.proposal === undefined) {
+      return input.startingWorldRevision;
+    }
+    const committed =
+      await this.#mutations.commitRulePluginReceipt(receipt);
+    return assertNextCommittedRevision({
+      command: input.command,
+      committed: committed.value,
+      currentWorldRevision: input.startingWorldRevision,
+      stage: "goal_plan",
+      proposalId: input.identity.proposalId,
+    });
   }
 
   async #createDefinitionValidationRequest(input: {
     readonly command: StoredReceivedCommand;
-    readonly proposal: JsonObject;
+    readonly draft: JsonObject;
     readonly identity: DialogueDefinitionRunRecord;
     readonly modelReceipt: VerifiedModelInvocationReceipt;
     readonly expectedWorldRevision: number;
@@ -822,10 +872,18 @@ class DefaultDialogueCommandOrchestrator
       input.command,
       "definition",
     );
+    const candidate = materializeDefinitionCandidate({
+      catalog: this.#catalog,
+      contentBinding: binding.contentBinding,
+      command: input.command,
+      modelReceipt: input.modelReceipt,
+      proposalId: input.identity.proposalId,
+      draft: input.draft,
+    });
     const type = requireDefinitionProposalType({
       catalog: this.#catalog,
       contentBinding: binding.contentBinding,
-      proposal: input.proposal,
+      proposal: candidate,
       command: input.command,
     });
     const invocation = resolveRulePluginInvocationBinding({
@@ -860,7 +918,8 @@ class DefaultDialogueCommandOrchestrator
       operationKind: "definition.validate",
       input: Object.freeze({
         definition_id: input.identity.definitionId,
-        proposal: input.proposal,
+        draft_ordinal: input.identity.ordinal,
+        candidate,
         constraints,
         model_proof: input.modelReceipt.proof.value,
       }),
@@ -870,7 +929,7 @@ class DefaultDialogueCommandOrchestrator
 
   async #createGoalPlanValidationRequest(input: {
     readonly command: StoredReceivedCommand;
-    readonly proposal: JsonObject;
+    readonly draft: JsonObject;
     readonly identity: DialogueGoalPlanRunRecord;
     readonly modelReceipt: VerifiedModelInvocationReceipt;
     readonly expectedWorldRevision: number;
@@ -884,10 +943,20 @@ class DefaultDialogueCommandOrchestrator
       input.command,
       "goal_plan",
     );
+    const candidate = materializeGoalPlanCandidate({
+      catalog: this.#catalog,
+      contentBinding: binding.contentBinding,
+      command: input.command,
+      modelReceipt: input.modelReceipt,
+      proposalId: input.identity.proposalId,
+      ownerActorId: input.command.session.playerEntityId,
+      draft: input.draft,
+      localIds: this.#localIds,
+    });
     assertGoalPlanProposalSemantics({
       catalog: this.#catalog,
       contentBinding: binding.contentBinding,
-      proposal: input.proposal,
+      proposal: candidate,
       worldState: worldStateFromSnapshot(
         binding.record.snapshot.value,
       ),
@@ -909,7 +978,8 @@ class DefaultDialogueCommandOrchestrator
       operationKind: "goal_plan.validate",
       input: Object.freeze({
         plan_id: input.identity.planId,
-        proposal: input.proposal,
+        draft_ordinal: input.identity.ordinal,
+        candidate,
         model_proof: input.modelReceipt.proof.value,
       }),
       binding,
@@ -931,7 +1001,6 @@ class DefaultDialogueCommandOrchestrator
   }): JsonObject {
     const snapshot = input.binding.record.snapshot;
     const worldState = worldStateFromSnapshot(snapshot.value);
-    const output = readModelOutput(input.modelReceipt);
     const outputDigest = expectString(
       input.modelReceipt.proof.value,
       "output_digest",
@@ -943,9 +1012,12 @@ class DefaultDialogueCommandOrchestrator
       randomChoices: [],
       externalResults: [
         Object.freeze({
-          result_id: "director_system_dialogue_output",
+          result_id:
+            input.operationKind === "goal_plan.validate"
+              ? "director_goal_plan_output"
+              : "director_definition_draft_output",
           content_digest: outputDigest,
-          payload: output,
+          payload: readModelOutput(input.modelReceipt),
         }),
         Object.freeze({
           result_id: "system_provenance_created_at",
@@ -970,19 +1042,27 @@ class DefaultDialogueCommandOrchestrator
 
   async #assertDefinitionReceiptIdentity(input: {
     readonly command: StoredReceivedCommand;
-    readonly proposal: JsonObject;
     readonly identity: DialogueDefinitionRunRecord;
     readonly modelReceipt: VerifiedModelInvocationReceipt;
     readonly receipt: VerifiedRulePluginInvocationReceipt;
     readonly expectedWorldRevision: number;
   }): Promise<void> {
+    const requestInput = rulePluginRequestInput(input.receipt);
+    const candidate = expectJsonObject(
+      expectProperty(
+        requestInput,
+        "candidate",
+        "DefinitionValidationInput",
+      ),
+      "DefinitionValidationInput.candidate",
+    );
     const binding = await this.#worlds.resolveCurrent(
       input.command.session.worldId,
     );
     const type = requireDefinitionProposalType({
       catalog: this.#catalog,
       contentBinding: binding.contentBinding,
-      proposal: input.proposal,
+      proposal: candidate,
       command: input.command,
     });
     const invocation = resolveRulePluginInvocationBinding({
@@ -1016,7 +1096,8 @@ class DefaultDialogueCommandOrchestrator
       invocation,
       identityField: "definition_id",
       expectedWorldRecordId: input.identity.definitionId,
-      expectedProposal: input.proposal,
+      expectedProposalId: input.identity.proposalId,
+      expectedDraftOrdinal: input.identity.ordinal,
       expectedModelProof: input.modelReceipt.proof.value,
       expectedPreparedAt: input.identity.preparedAt,
       digest: this.#digest,
@@ -1026,19 +1107,27 @@ class DefaultDialogueCommandOrchestrator
 
   async #assertGoalPlanReceiptIdentity(input: {
     readonly command: StoredReceivedCommand;
-    readonly proposal: JsonObject;
     readonly identity: DialogueGoalPlanRunRecord;
     readonly modelReceipt: VerifiedModelInvocationReceipt;
     readonly receipt: VerifiedRulePluginInvocationReceipt;
     readonly expectedWorldRevision: number;
   }): Promise<void> {
+    const requestInput = rulePluginRequestInput(input.receipt);
+    const candidate = expectJsonObject(
+      expectProperty(
+        requestInput,
+        "candidate",
+        "GoalPlanValidateInput",
+      ),
+      "GoalPlanValidateInput.candidate",
+    );
     const binding = await this.#worlds.resolveCurrent(
       input.command.session.worldId,
     );
     assertGoalPlanProposalSemantics({
       catalog: this.#catalog,
       contentBinding: binding.contentBinding,
-      proposal: input.proposal,
+      proposal: candidate,
       worldState: worldStateFromSnapshot(
         expectJsonObject(
           expectProperty(
@@ -1066,7 +1155,8 @@ class DefaultDialogueCommandOrchestrator
       invocation,
       identityField: "plan_id",
       expectedWorldRecordId: input.identity.planId,
-      expectedProposal: input.proposal,
+      expectedProposalId: input.identity.proposalId,
+      expectedDraftOrdinal: input.identity.ordinal,
       expectedModelProof: input.modelReceipt.proof.value,
       expectedPreparedAt: input.identity.preparedAt,
       digest: this.#digest,
@@ -1079,10 +1169,9 @@ class DefaultDialogueCommandOrchestrator
     readonly run: DialogueDirectorRunRecord;
     readonly modelReceipt: VerifiedModelInvocationReceipt;
     readonly startingWorldRevision: number;
-    readonly identities?: readonly DialogueEventCardRunRecord[];
   }): Promise<number> {
     const output = readModelOutput(input.modelReceipt);
-    const proposals = asObjectArray(
+    const drafts = asObjectArray(
       expectProperty(
         output,
         "event_cards",
@@ -1090,40 +1179,20 @@ class DefaultDialogueCommandOrchestrator
       ),
       "DirectorDialogueEventsOutput.event_cards",
     );
-    const identities =
-      input.identities ??
-      (
-        await this.#directorRuns.prepareProposals({
-          run: input.run,
-          definitionProposalIds: [],
-          goalPlanProposalIds: [],
-          eventCardProposalIds: proposalIds(
-            proposals,
-            "EventCardProposal",
-          ),
-        })
-      ).eventCards;
-    assertProposalIdentityOrder({
-      command: input.command,
-      proposals,
-      identities,
-      proposalLabel: "EventCardProposal",
-    });
+    const identities = (
+      await this.#directorRuns.prepareProposals({
+        run: input.run,
+      })
+    ).eventCards;
 
     let expectedWorldRevision = input.startingWorldRevision;
-    for (const [ordinal, proposal] of proposals.entries()) {
+    for (const [ordinal, draft] of drafts.entries()) {
       const identity = identities[ordinal] as
         | DialogueEventCardRunRecord
         | undefined;
       if (
         identity === undefined ||
-        identity.ordinal !== ordinal ||
-        identity.proposalId !==
-          expectString(
-            proposal,
-            "proposal_id",
-            "EventCardProposal",
-          )
+        identity.ordinal !== ordinal
       ) {
         throw commandIdentityFault(
           input.command,
@@ -1136,7 +1205,9 @@ class DefaultDialogueCommandOrchestrator
         candidateFactory: async () =>
           this.#createEventCardPublishRequest({
             command: input.command,
-            proposal,
+            draft,
+            draftOrdinal: ordinal,
+            proposalId: identity.proposalId,
             modelReceipt: input.modelReceipt,
             requestId: identity.ruleRequestId,
             expectedWorldRevision,
@@ -1145,7 +1216,8 @@ class DefaultDialogueCommandOrchestrator
       });
       await this.#assertEventCardPublishReceiptIdentity({
         command: input.command,
-        proposal,
+        draftOrdinal: ordinal,
+        proposalId: identity.proposalId,
         modelReceipt: input.modelReceipt,
         receipt,
         requestId: identity.ruleRequestId,
@@ -1191,7 +1263,9 @@ class DefaultDialogueCommandOrchestrator
 
   async #createEventCardPublishRequest(input: {
     readonly command: StoredReceivedCommand;
-    readonly proposal: JsonObject;
+    readonly draft: JsonObject;
+    readonly draftOrdinal: number;
+    readonly proposalId: string;
     readonly modelReceipt: VerifiedModelInvocationReceipt;
     readonly requestId: string;
     readonly expectedWorldRevision: number;
@@ -1220,27 +1294,27 @@ class DefaultDialogueCommandOrchestrator
       ),
       "WorldSnapshot.world_state",
     );
+    const candidate = materializeEventCardCandidate({
+      command: input.command,
+      modelReceipt: input.modelReceipt,
+      worldState,
+      proposalId: input.proposalId,
+      draft: input.draft,
+      localIds: this.#localIds,
+    });
     const modelOutputDigest = expectString(
       input.modelReceipt.proof.value,
       "output_digest",
       "VerifiedModelOutputRef",
     );
     const modelOutput = readModelOutput(input.modelReceipt);
-    const requestKind = expectString(
-      input.modelReceipt.proof.value,
-      "request_kind",
-      "VerifiedModelOutputRef",
-    );
     const deterministicContext = this.#deterministicContexts.issue({
       worldId: input.command.session.worldId,
       logicalTime: expectProperty(worldState, "clock", "WorldState"),
       randomChoices: [],
       externalResults: [
         Object.freeze({
-          result_id:
-            requestKind === "director.system_dialogue"
-              ? "director_system_dialogue_output"
-              : "director_dialogue_events_output",
+          result_id: "director_dialogue_events_output",
           content_digest: modelOutputDigest,
           payload: modelOutput,
         }),
@@ -1257,10 +1331,11 @@ class DefaultDialogueCommandOrchestrator
       readonly_world: snapshot.value,
       deterministic_context: deterministicContext.value,
       input: Object.freeze({
+        draft_ordinal: input.draftOrdinal,
         control: Object.freeze({
           binding_id: input.command.session.controlBindingId,
         }),
-        proposal: input.proposal,
+        candidate,
         policy: binding.contentBinding.eventBudget,
         model_proof: input.modelReceipt.proof.value,
       }),
@@ -1269,7 +1344,8 @@ class DefaultDialogueCommandOrchestrator
 
   async #assertEventCardPublishReceiptIdentity(input: {
     readonly command: StoredReceivedCommand;
-    readonly proposal: JsonObject;
+    readonly draftOrdinal: number;
+    readonly proposalId: string;
     readonly modelReceipt: VerifiedModelInvocationReceipt;
     readonly receipt: VerifiedRulePluginInvocationReceipt;
     readonly requestId: string;
@@ -1305,6 +1381,14 @@ class DefaultDialogueCommandOrchestrator
       ),
       "EventCardPublishInput.control",
     );
+    const candidate = expectJsonObject(
+      expectProperty(
+        requestInput,
+        "candidate",
+        "EventCardPublishInput",
+      ),
+      "EventCardPublishInput.candidate",
+    );
     if (
       input.receipt.worldId !== input.command.session.worldId ||
       input.receipt.basisRevision !== input.expectedWorldRevision ||
@@ -1325,14 +1409,16 @@ class DefaultDialogueCommandOrchestrator
       ) !== input.expectedWorldRevision ||
       expectString(control, "binding_id", "ControlBindingRef") !==
         input.command.session.controlBindingId ||
-      !jsonEquals(
-        expectProperty(
-          requestInput,
-          "proposal",
-          "EventCardPublishInput",
-        ),
-        input.proposal,
-      ) ||
+      expectInteger(
+        requestInput,
+        "draft_ordinal",
+        "EventCardPublishInput",
+      ) !== input.draftOrdinal ||
+      expectString(
+        candidate,
+        "proposal_id",
+        "EventCardPublishCandidate",
+      ) !== input.proposalId ||
       !jsonEquals(
         expectProperty(
           requestInput,
@@ -1359,11 +1445,7 @@ class DefaultDialogueCommandOrchestrator
         "Recovered EventCard RulePlugin invocation differs from its Director proposal identity",
         {
           request_id: input.requestId,
-          proposal_id: expectString(
-            input.proposal,
-            "proposal_id",
-            "EventCardProposal",
-          ),
+          proposal_id: input.proposalId,
           expected_basis_revision: input.expectedWorldRevision,
         },
       );
@@ -1501,10 +1583,10 @@ class DefaultDialogueCommandOrchestrator
     const turn = expectJsonObject(
       expectProperty(
         input,
-        "turn",
+        "candidate",
         "CharacterDialogueTurnAppendInput",
       ),
-      "CharacterDialogueTurnAppendInput.turn",
+      "CharacterDialogueTurnAppendInput.candidate",
     );
     const speaker = requireEntityParticipant(
       expectJsonObject(
@@ -1757,11 +1839,12 @@ class DefaultDialogueCommandOrchestrator
         }),
       ],
     });
-    const characterTurn = createCharacterTurn({
+    const characterTurn = createCharacterTurnCandidate({
       contracts: this.#contracts,
       command,
       recipientEntityId,
       worldState,
+      dialogue,
       output,
       modelRequestId: expectString(
         modelReceipt.proof.value,
@@ -1769,7 +1852,7 @@ class DefaultDialogueCommandOrchestrator
         "VerifiedModelOutputRef",
       ),
       modelOutputDigest,
-      commitmentIds: this.#commitmentIds,
+      localIds: this.#localIds,
     });
 
     return Object.freeze({
@@ -1790,7 +1873,7 @@ class DefaultDialogueCommandOrchestrator
           "DialogueRecord",
         ),
         model_proof: modelReceipt.proof.value,
-        turn: characterTurn,
+        candidate: characterTurn,
       }),
     });
   }
@@ -1971,15 +2054,16 @@ function createHumanTurn(
   });
 }
 
-function createCharacterTurn(input: {
+function createCharacterTurnCandidate(input: {
   readonly contracts: ContractValidator;
   readonly command: StoredReceivedCommand;
   readonly recipientEntityId: string;
   readonly worldState: JsonObject;
+  readonly dialogue: JsonObject;
   readonly output: JsonObject;
   readonly modelRequestId: string;
   readonly modelOutputDigest: string;
-  readonly commitmentIds: DialogueCommitmentIdFactory;
+  readonly localIds: DialogueLocalIdFactory;
 }): JsonObject {
   const execution = requireDialogueExecution(input.command);
   const reply = expectJsonObject(
@@ -1998,7 +2082,7 @@ function createCharacterTurn(input: {
   const commitments = drafts.map((draft, index) => {
     const commitmentId = input.contracts.assert(
       CONTRACT_REF.uuid,
-      input.commitmentIds.createCommitmentId(),
+      input.localIds.createId(),
     ).value as string;
     if (
       commitmentId !== commitmentId.toLowerCase() ||
@@ -2015,7 +2099,45 @@ function createCharacterTurn(input: {
       );
     }
     usedIds.add(commitmentId);
-    return Object.freeze({ ...draft, commitment_id: commitmentId });
+    return Object.freeze({
+      commitment_id: commitmentId,
+      semantic_intent: expectString(
+        draft,
+        "semantic_intent",
+        "AgencyCommitmentSemanticDraft",
+      ),
+      subjects: materializeDialogueParticipantSubjects({
+        command: input.command,
+        worldState: input.worldState,
+        dialogue: input.dialogue,
+        indices: readModelIndices(
+          draft,
+          "subject_participant_indices",
+          "AgencyCommitmentSemanticDraft",
+          asObjectArray(
+            expectProperty(
+              input.dialogue,
+              "participants",
+              "DialogueRecord",
+            ),
+            "DialogueRecord.participants",
+          ).length,
+        ),
+      }),
+      stance: expectString(
+        draft,
+        "stance",
+        "AgencyCommitmentSemanticDraft",
+      ),
+      terms: expectJsonObject(
+        expectProperty(
+          draft,
+          "terms",
+          "AgencyCommitmentSemanticDraft",
+        ),
+        "AgencyCommitmentSemanticDraft.terms",
+      ),
+    });
   });
   const turn: Record<string, JsonValue> = {
     turn_id: execution.characterTurnId,
@@ -2023,7 +2145,11 @@ function createCharacterTurn(input: {
       input.command.session.worldId,
       input.recipientEntityId,
     ),
-    locale: expectString(reply, "locale", "DialogueReplyDraft"),
+    locale: expectString(
+      input.command.message,
+      "locale",
+      input.command.commandKind,
+    ),
     text: expectString(reply, "text", "DialogueReplyDraft"),
     occurred_at: expectProperty(input.worldState, "clock", "WorldState"),
     source: Object.freeze({
@@ -2065,7 +2191,11 @@ function createDirectorSystemTurn(input: {
       "response_turn_id",
     ),
     speaker: Object.freeze({ participant_kind: "system" }),
-    locale: expectString(reply, "locale", "DialogueReplyDraft"),
+    locale: expectString(
+      input.command.message,
+      "locale",
+      input.command.commandKind,
+    ),
     text: expectString(reply, "text", "DialogueReplyDraft"),
     occurred_at: expectProperty(
       input.worldState,
@@ -2631,7 +2761,6 @@ function resolveRecipientFromHumanInput(
 function assertCharacterModelReceiptIdentity(
   command: StoredReceivedCommand,
   recipientEntityId: string,
-  modelProfileId: string,
   receipt: Awaited<
     ReturnType<RuntimeModelFacades["characterDialogue"]>
   >,
@@ -2669,6 +2798,11 @@ function assertCharacterModelReceiptIdentity(
     ),
     "CharacterDialogueInput.dialogue",
   );
+  const dialogueTurns = asObjectArray(
+    expectProperty(dialogue, "turns", "DialogueRecord"),
+    "DialogueRecord.turns",
+  );
+  const latestTurn = dialogueTurns[dialogueTurns.length - 1];
   if (
     receipt.worldId !== command.session.worldId ||
     receipt.worldRevision !== expectedWorldRevision ||
@@ -2680,8 +2814,6 @@ function assertCharacterModelReceiptIdentity(
       execution.characterModelRequestId ||
     expectString(request, "request_kind", "ModelRequest") !==
       "character.dialogue" ||
-    expectString(request, "model_profile_id", "ModelRequest") !==
-      modelProfileId ||
     expectInteger(request, "basis_revision", "ModelRequest") !==
       expectedWorldRevision ||
     expectString(character, "world_id", "EntityRef") !==
@@ -2690,11 +2822,9 @@ function assertCharacterModelReceiptIdentity(
       recipientEntityId ||
     expectString(dialogue, "dialogue_id", "DialogueRecord") !==
       execution.dialogueId ||
-    expectString(
-      dynamicInput,
-      "latest_player_turn_id",
-      "CharacterDialogueInput",
-    ) !== execution.humanTurnId ||
+    latestTurn === undefined ||
+    expectString(latestTurn, "turn_id", "DialogueTurn") !==
+      execution.humanTurnId ||
     expectString(proof, "request_id", "VerifiedModelOutputRef") !==
       execution.characterModelRequestId ||
     expectString(proof, "request_kind", "VerifiedModelOutputRef") !==
@@ -2717,7 +2847,6 @@ function assertCharacterModelReceiptIdentity(
 function assertDirectorDialogueReceiptIdentity(input: {
   readonly command: StoredReceivedCommand;
   readonly requestId: string;
-  readonly modelProfileId: string;
   readonly receipt: Awaited<
     ReturnType<RuntimeModelFacades["directorDialogueEvents"]>
   >;
@@ -2750,8 +2879,6 @@ function assertDirectorDialogueReceiptIdentity(input: {
       input.requestId ||
     expectString(request, "request_kind", "ModelRequest") !==
       "director.dialogue_events" ||
-    expectString(request, "model_profile_id", "ModelRequest") !==
-      input.modelProfileId ||
     expectInteger(request, "basis_revision", "ModelRequest") !==
       input.expectedBasisRevision ||
     expectString(dialogue, "dialogue_id", "DialogueRecord") !==
@@ -2808,17 +2935,6 @@ function worldStateFromSnapshot(snapshot: JsonObject): JsonObject {
   );
 }
 
-function proposalIds(
-  proposals: readonly JsonObject[],
-  label: string,
-): readonly string[] {
-  return Object.freeze(
-    proposals.map((proposal) =>
-      expectString(proposal, "proposal_id", label),
-    ),
-  );
-}
-
 function requireSystemRunIdentity(
   command: StoredReceivedCommand,
   value: string | undefined,
@@ -2834,48 +2950,38 @@ function requireSystemRunIdentity(
   return value;
 }
 
-function assertProposalIdentityOrder(input: {
-  readonly command: StoredReceivedCommand;
-  readonly proposals: readonly JsonObject[];
-  readonly identities: readonly {
-    readonly proposalId: string;
-    readonly ordinal: number;
-  }[];
-  readonly proposalLabel: string;
-}): void {
-  if (input.identities.length !== input.proposals.length) {
+function readDialogueInteractionKind(
+  command: StoredReceivedCommand,
+): DialogueInteractionKind {
+  const value = expectString(
+    command.message,
+    "interaction_kind",
+    command.commandKind,
+  );
+  if (
+    value !== "dialogue" &&
+    value !== "goal_plan" &&
+    value !== "definition_draft"
+  ) {
     throw commandIdentityFault(
-      input.command,
-      "Persisted Director proposal identity count differs from the verified model response",
-      {
-        proposal_kind: input.proposalLabel,
-        proposal_count: input.proposals.length,
-        identity_count: input.identities.length,
-      },
+      command,
+      "Dialogue command contains an unknown interaction_kind",
+      { interaction_kind: value },
     );
   }
-  for (const [ordinal, proposal] of input.proposals.entries()) {
-    const identity = input.identities[ordinal];
-    if (
-      identity === undefined ||
-      identity.ordinal !== ordinal ||
-      identity.proposalId !==
-        expectString(
-          proposal,
-          "proposal_id",
-          input.proposalLabel,
-        )
-    ) {
-      throw commandIdentityFault(
-        input.command,
-        "Persisted Director proposal identity order differs from the verified model response",
-        {
-          proposal_kind: input.proposalLabel,
-          proposal_ordinal: ordinal,
-        },
-      );
-    }
-  }
+  return value;
+}
+
+function readDialogueCommandText(
+  command: StoredReceivedCommand,
+): string {
+  return expectString(command.message, "text", command.commandKind);
+}
+
+function readDialogueCommandLocale(
+  command: StoredReceivedCommand,
+): string {
+  return expectString(command.message, "locale", command.commandKind);
 }
 
 function assertNextCommittedRevision(input: {
@@ -2916,6 +3022,1278 @@ function assertNextCommittedRevision(input: {
     );
   }
   return nextRevision;
+}
+
+function materializeDefinitionCandidate(input: {
+  readonly catalog: ContentRuntimeCatalog;
+  readonly contentBinding: WorldContentBinding;
+  readonly command: StoredReceivedCommand;
+  readonly modelReceipt: VerifiedModelInvocationReceipt;
+  readonly proposalId: string;
+  readonly draft: JsonObject;
+}): JsonObject {
+  const selectionSpace = requirePlanningSelectionSpace({
+    catalog: input.catalog,
+    contentBinding: input.contentBinding,
+    command: input.command,
+  });
+  const requestInput = modelRequestInput(input.modelReceipt);
+  const locale = expectString(
+    requestInput,
+    "response_locale",
+    "DirectorDefinitionDraftInput",
+  );
+  const purpose = expectString(
+    requestInput,
+    "purpose",
+    "DirectorDefinitionDraftInput",
+  );
+  const definitionType = materializePlanningCatalogIndex({
+    catalog: input.catalog,
+    contentBinding: input.contentBinding,
+    command: input.command,
+    owner: input.draft,
+    indexField: "definition_type_index",
+    selectorLabel: "DynamicDefinitionSemanticDraft",
+    entries: selectionSpace.definitionTypes,
+    entryLabel: "TypeDefinition",
+    localIdField: "type_id",
+    expectedKind: "definition_type",
+  });
+  const components = asObjectArray(
+    expectProperty(
+      input.draft,
+      "components",
+      "DynamicDefinitionSemanticDraft",
+    ),
+    "DynamicDefinitionSemanticDraft.components",
+  ).map((component, ordinal) =>
+    Object.freeze({
+      component_type: materializePlanningCatalogIndex({
+        catalog: input.catalog,
+        contentBinding: input.contentBinding,
+        command: input.command,
+        owner: component,
+        indexField: "component_type_index",
+        selectorLabel: "DefinitionComponentSemanticDraft",
+        entries: selectionSpace.componentTypes,
+        entryLabel: "TypeDefinition",
+        localIdField: "type_id",
+        expectedKind: "component_type",
+      }),
+      ordinal,
+      value: expectJsonObject(
+        expectProperty(
+          component,
+          "value",
+          "DefinitionComponentSemanticDraft",
+        ),
+        "DefinitionComponentSemanticDraft.value",
+      ),
+    }),
+  );
+  return Object.freeze({
+    proposal_id: input.proposalId,
+    purpose: localizedText(locale, purpose),
+    draft: Object.freeze({
+      definition_type: definitionType,
+      name: localizedText(
+        locale,
+        expectString(
+          input.draft,
+          "name",
+          "DynamicDefinitionSemanticDraft",
+        ),
+      ),
+      summary: localizedText(
+        locale,
+        expectString(
+          input.draft,
+          "summary",
+          "DynamicDefinitionSemanticDraft",
+        ),
+      ),
+      components: Object.freeze(components),
+      rationale: expectString(
+        input.draft,
+        "rationale",
+        "DynamicDefinitionSemanticDraft",
+      ),
+    }),
+  });
+}
+
+function materializeGoalPlanCandidate(input: {
+  readonly catalog: ContentRuntimeCatalog;
+  readonly contentBinding: WorldContentBinding;
+  readonly command: StoredReceivedCommand;
+  readonly modelReceipt: VerifiedModelInvocationReceipt;
+  readonly proposalId: string;
+  readonly ownerActorId: string;
+  readonly draft: JsonObject;
+  readonly localIds: DialogueLocalIdFactory;
+}): JsonObject {
+  const selectionSpace = requirePlanningSelectionSpace({
+    catalog: input.catalog,
+    contentBinding: input.contentBinding,
+    command: input.command,
+  });
+  const requestInput = modelRequestInput(input.modelReceipt);
+  const locale = expectString(
+    requestInput,
+    "response_locale",
+    "DirectorGoalPlanInput",
+  );
+  const worldView = expectJsonObject(
+    expectProperty(
+      requestInput,
+      "world_view",
+      "DirectorGoalPlanInput",
+    ),
+    "DirectorGoalPlanInput.world_view",
+  );
+  const knowledgeView = expectJsonObject(
+    expectProperty(
+      requestInput,
+      "knowledge_view",
+      "DirectorGoalPlanInput",
+    ),
+    "DirectorGoalPlanInput.knowledge_view",
+  );
+  if (
+    expectString(
+      knowledgeView,
+      "viewer_entity_id",
+      "KnowledgeView",
+    ) !== input.ownerActorId
+  ) {
+    throw commandIdentityFault(
+      input.command,
+      "Goal-plan owner must be the exact verified knowledge-view owner",
+      { owner_actor_id: input.ownerActorId },
+    );
+  }
+  const nodes = asObjectArray(
+    expectProperty(
+      input.draft,
+      "nodes",
+      "GoalPlanSemanticDraft",
+    ),
+    "GoalPlanSemanticDraft.nodes",
+  );
+  const nodeKey = (ordinal: number): string => `node_${ordinal}`;
+  const materializedNodes = nodes.map((node, ordinal) => {
+    const requirement = expectJsonObject(
+      expectProperty(
+        node,
+        "capability_requirement",
+        "GoalNodeSemanticDraft",
+      ),
+      "GoalNodeSemanticDraft.capability_requirement",
+    );
+    const requirementKind = expectString(
+      requirement,
+      "requirement_kind",
+      "CapabilityRequirementSelector",
+    );
+    const capabilityRequirement =
+      requirementKind === "bound"
+        ? Object.freeze({
+            requirement_kind: "bound",
+            capability: materializePlanningCatalogIndex({
+              catalog: input.catalog,
+              contentBinding: input.contentBinding,
+              command: input.command,
+              owner: requirement,
+              indexField: "capability_index",
+              selectorLabel: "CapabilityRequirementSelector",
+              entries: selectionSpace.capabilities,
+              entryLabel: "Capability",
+              localIdField: "capability_id",
+              expectedKind: "capability",
+            }),
+          })
+        : materializeCapabilityDemand({
+            catalog: input.catalog,
+            contentBinding: input.contentBinding,
+            command: input.command,
+            selectionSpace,
+            locale,
+            localIds: input.localIds,
+            requirement,
+          });
+    return Object.freeze({
+      node_key: nodeKey(ordinal),
+      title: localizedText(
+        locale,
+        expectString(node, "title", "GoalNodeSemanticDraft"),
+      ),
+      capability_requirement: capabilityRequirement,
+      arguments: expectJsonObject(
+        expectProperty(
+          node,
+          "arguments",
+          "GoalNodeSemanticDraft",
+        ),
+        "GoalNodeSemanticDraft.arguments",
+      ),
+      depends_on: Object.freeze(
+        readModelIndices(
+          node,
+          "depends_on",
+          "GoalNodeSemanticDraft",
+          nodes.length,
+        ).map(nodeKey),
+      ),
+      completion_rules: materializeWorldLawIndices({
+        catalog: input.catalog,
+        contentBinding: input.contentBinding,
+        command: input.command,
+        owner: node,
+        indexField: "completion_rule_indices",
+        selectorLabel: "GoalNodeSemanticDraft",
+        laws: selectionSpace.worldLaws,
+      }),
+      alternative_node_keys: Object.freeze(
+        readModelIndices(
+          node,
+          "alternatives",
+          "GoalNodeSemanticDraft",
+          nodes.length,
+        ).map(nodeKey),
+      ),
+    });
+  });
+  const factRefs = asObjectArray(
+    expectProperty(
+      input.draft,
+      "facts",
+      "GoalPlanSemanticDraft",
+    ),
+    "GoalPlanSemanticDraft.facts",
+  ).map((selector, ordinal) =>
+    materializeFactSelector({
+      selector,
+      ordinal,
+      worldView,
+      knowledgeView,
+      command: input.command,
+    }),
+  );
+  if (new Set(factRefs).size !== factRefs.length) {
+    throw commandIdentityFault(
+      input.command,
+      "Goal-plan fact selectors resolve to duplicate authoritative facts",
+      {},
+    );
+  }
+  return Object.freeze({
+    proposal_id: input.proposalId,
+    owner_actor_id: input.ownerActorId,
+    draft: Object.freeze({
+      goal: localizedText(
+        locale,
+        expectString(input.draft, "goal", "GoalPlanSemanticDraft"),
+      ),
+      expected_state: expectJsonObject(
+        expectProperty(
+          input.draft,
+          "expected_state",
+          "GoalPlanSemanticDraft",
+        ),
+        "GoalPlanSemanticDraft.expected_state",
+      ),
+      fact_refs: Object.freeze(factRefs),
+      constraints: materializeWorldLawIndices({
+        catalog: input.catalog,
+        contentBinding: input.contentBinding,
+        command: input.command,
+        owner: input.draft,
+        indexField: "constraint_law_indices",
+        selectorLabel: "GoalPlanSemanticDraft",
+        laws: selectionSpace.worldLaws,
+      }),
+      nodes: Object.freeze(materializedNodes),
+      knowledge_scope: expectString(
+        input.draft,
+        "knowledge_scope",
+        "GoalPlanSemanticDraft",
+      ),
+    }),
+  });
+}
+
+function materializeEventCardCandidate(input: {
+  readonly command: StoredReceivedCommand;
+  readonly modelReceipt: VerifiedModelInvocationReceipt;
+  readonly worldState: JsonObject;
+  readonly proposalId: string;
+  readonly draft: JsonObject;
+  readonly localIds: DialogueLocalIdFactory;
+}): JsonObject {
+  const requestInput = modelRequestInput(input.modelReceipt);
+  const worldView = expectJsonObject(
+    expectProperty(
+      requestInput,
+      "world_view",
+      "DirectorDialogueEventsInput",
+    ),
+    "DirectorDialogueEventsInput.world_view",
+  );
+  const dialogue = expectJsonObject(
+    expectProperty(
+      requestInput,
+      "dialogue",
+      "DirectorDialogueEventsInput",
+    ),
+    "DirectorDialogueEventsInput.dialogue",
+  );
+  const locale = expectString(
+    requestInput,
+    "response_locale",
+    "DirectorDialogueEventsInput",
+  );
+  const actors = asObjectArray(
+    expectProperty(worldView, "actors", "DirectorWorldView"),
+    "DirectorWorldView.actors",
+  );
+  const situationDraft = expectJsonObject(
+    expectProperty(
+      input.draft,
+      "situation",
+      "EventCardSemanticDraft",
+    ),
+    "EventCardSemanticDraft.situation",
+  );
+  const situationActorIndices = readModelIndices(
+    situationDraft,
+    "subject_actor_indices",
+    "EventSituationSemanticDraft",
+    actors.length,
+  );
+  const situationActors = situationActorIndices.map(
+    (actorIndex) => actors[actorIndex] as JsonObject,
+  );
+  const optionDrafts = asObjectArray(
+    expectProperty(
+      input.draft,
+      "result_options",
+      "EventCardSemanticDraft",
+    ),
+    "EventCardSemanticDraft.result_options",
+  );
+  const gateDrafts = asObjectArray(
+    expectProperty(
+      input.draft,
+      "agency_gates",
+      "EventCardSemanticDraft",
+    ),
+    "EventCardSemanticDraft.agency_gates",
+  );
+  const gateIds = gateDrafts.map((_, ordinal) => `gate_${ordinal}`);
+  const flatOutcomeDrafts = optionDrafts.flatMap((option) =>
+    asObjectArray(
+      expectProperty(
+        option,
+        "outcomes",
+        "EventCardOutcomeSemanticDraft",
+      ),
+      "EventCardOutcomeSemanticDraft.outcomes",
+    ),
+  );
+  const outcomeIds = flatOutcomeDrafts.map(
+    (_, ordinal) => `outcome_${ordinal}`,
+  );
+  let flatOutcomeOrdinal = 0;
+  const resultOptions = optionDrafts.map((option, optionOrdinal) => {
+    const outcomes = asObjectArray(
+      expectProperty(
+        option,
+        "outcomes",
+        "EventCardOutcomeSemanticDraft",
+      ),
+      "EventCardOutcomeSemanticDraft.outcomes",
+    ).map((outcome) => {
+      const outcomeId = outcomeIds[flatOutcomeOrdinal];
+      if (outcomeId === undefined) {
+        throw commandIdentityFault(
+          input.command,
+          "EventCard outcome ordinal cannot be materialized",
+          { outcome_ordinal: flatOutcomeOrdinal },
+        );
+      }
+      const candidate = materializeSemanticOutcomeCandidate({
+        command: input.command,
+        worldId: input.command.session.worldId,
+        worldState: input.worldState,
+        actors: situationActors,
+        draft: outcome,
+        outcomeId,
+        gateIds,
+      });
+      flatOutcomeOrdinal += 1;
+      return candidate;
+    });
+    const presentationDraft = expectJsonObject(
+      expectProperty(
+        option,
+        "presentation",
+        "EventCardOutcomeSemanticDraft",
+      ),
+      "EventCardOutcomeSemanticDraft.presentation",
+    );
+    return Object.freeze({
+      option_id: `option_${optionOrdinal}`,
+      outcomes: Object.freeze(outcomes),
+      presentation: Object.freeze({
+        presentation_id: input.localIds.createId(),
+        segments: materializeNarrativeSegments({
+          command: input.command,
+          dialogue,
+          locale,
+          value: expectProperty(
+            presentationDraft,
+            "segments",
+            "EventResultPresentationSemanticDraft",
+          ),
+        }),
+      }),
+    });
+  });
+  const agencyGates = gateDrafts.map((gate, gateOrdinal) => {
+    const gateId = gateIds[gateOrdinal];
+    if (gateId === undefined) {
+      throw commandIdentityFault(
+        input.command,
+        "EventCard gate ordinal cannot be materialized",
+        { gate_ordinal: gateOrdinal },
+      );
+    }
+    return Object.freeze({
+      gate_id: gateId,
+      protected_outcome_ids: Object.freeze(
+        readModelIndices(
+          gate,
+          "protected_outcome_indices",
+          "EventCardAgencyGateSemanticDraft",
+          outcomeIds.length,
+        ).map((ordinal) => outcomeIds[ordinal] as string),
+      ),
+      participants: materializeActorSubjects({
+        command: input.command,
+        worldId: input.command.session.worldId,
+        worldState: input.worldState,
+        actors: situationActors,
+        indices: readModelIndices(
+          gate,
+          "participant_subject_indices",
+          "EventCardAgencyGateSemanticDraft",
+          situationActors.length,
+        ),
+      }).map(subjectEntityRef),
+      requirement: materializeAgencyRequirementCandidate({
+        command: input.command,
+        worldId: input.command.session.worldId,
+        worldState: input.worldState,
+        actors: situationActors,
+        draft: expectJsonObject(
+          expectProperty(
+            gate,
+            "requirement",
+            "EventCardAgencyGateSemanticDraft",
+          ),
+          "EventCardAgencyGateSemanticDraft.requirement",
+        ),
+      }),
+      policy: expectJsonObject(
+        expectProperty(
+          gate,
+          "policy",
+          "EventCardAgencyGateSemanticDraft",
+        ),
+        "EventCardAgencyGateSemanticDraft.policy",
+      ),
+      commitment_evidence: materializeCommitmentEvidence({
+        command: input.command,
+        dialogue,
+        value: expectProperty(
+          gate,
+          "commitment_evidence",
+          "EventCardAgencyGateSemanticDraft",
+        ),
+      }),
+    });
+  });
+  const dayCycle = expectJsonObject(
+    expectProperty(input.worldState, "day_cycle", "WorldState"),
+    "WorldState.day_cycle",
+  );
+  return Object.freeze({
+    proposal_id: input.proposalId,
+    source_dialogue_id: requireDialogueExecution(input.command).dialogueId,
+    day: expectInteger(dayCycle, "day", "DayCycleState"),
+    situation: Object.freeze({
+      event_type: expectString(
+        situationDraft,
+        "event_type",
+        "EventSituationSemanticDraft",
+      ),
+      summary: localizedText(
+        locale,
+        expectString(
+          situationDraft,
+          "summary",
+          "EventSituationSemanticDraft",
+        ),
+      ),
+      subjects: materializeActorSubjects({
+        command: input.command,
+        worldId: input.command.session.worldId,
+        worldState: input.worldState,
+        actors,
+        indices: situationActorIndices,
+      }),
+      context: expectJsonObject(
+        expectProperty(
+          situationDraft,
+          "context",
+          "EventSituationSemanticDraft",
+        ),
+        "EventSituationSemanticDraft.context",
+      ),
+    }),
+    title: localizedText(
+      locale,
+      expectString(input.draft, "title", "EventCardSemanticDraft"),
+    ),
+    summary: localizedText(
+      locale,
+      expectString(input.draft, "summary", "EventCardSemanticDraft"),
+    ),
+    result_options: Object.freeze(resultOptions),
+    agency_gates: Object.freeze(agencyGates),
+  });
+}
+
+function materializeSemanticOutcomeCandidate(input: {
+  readonly command: StoredReceivedCommand;
+  readonly worldId: string;
+  readonly worldState: JsonObject;
+  readonly actors: readonly JsonObject[];
+  readonly draft: JsonObject;
+  readonly outcomeId: string;
+  readonly gateIds: readonly string[];
+}): JsonObject {
+  const gateIndex = input.draft["requires_agency_gate_index"];
+  let gateId: string | undefined;
+  if (gateIndex !== undefined) {
+    if (
+      typeof gateIndex !== "number" ||
+      !Number.isSafeInteger(gateIndex) ||
+      gateIndex < 0 ||
+      gateIndex >= input.gateIds.length
+    ) {
+      throw commandIdentityFault(
+        input.command,
+        "Outcome agency-gate selector is outside the verified gate collection",
+        { gate_index: gateIndex as JsonValue },
+      );
+    }
+    gateId = input.gateIds[gateIndex];
+  }
+  return Object.freeze({
+    outcome_id: input.outcomeId,
+    outcome_type: expectString(
+      input.draft,
+      "outcome_type",
+      "SemanticOutcomeDraft",
+    ),
+    subjects: materializeActorSubjects({
+      command: input.command,
+      worldId: input.worldId,
+      worldState: input.worldState,
+      actors: input.actors,
+      indices: readModelIndices(
+        input.draft,
+        "subject_indices",
+        "SemanticOutcomeDraft",
+        input.actors.length,
+      ),
+    }),
+    parameters: expectJsonObject(
+      expectProperty(
+        input.draft,
+        "parameters",
+        "SemanticOutcomeDraft",
+      ),
+      "SemanticOutcomeDraft.parameters",
+    ),
+    ...(gateId === undefined
+      ? {}
+      : { requires_agency_gate_id: gateId }),
+  });
+}
+
+function materializeAgencyRequirementCandidate(input: {
+  readonly command: StoredReceivedCommand;
+  readonly worldId: string;
+  readonly worldState: JsonObject;
+  readonly actors: readonly JsonObject[];
+  readonly draft: JsonObject;
+}): JsonObject {
+  return Object.freeze({
+    semantic_intent: expectString(
+      input.draft,
+      "semantic_intent",
+      "AgencyRequirementSemanticDraft",
+    ),
+    subjects: materializeActorSubjects({
+      command: input.command,
+      worldId: input.worldId,
+      worldState: input.worldState,
+      actors: input.actors,
+      indices: readModelIndices(
+        input.draft,
+        "subject_indices",
+        "AgencyRequirementSemanticDraft",
+        input.actors.length,
+      ),
+    }),
+    terms: expectJsonObject(
+      expectProperty(
+        input.draft,
+        "terms",
+        "AgencyRequirementSemanticDraft",
+      ),
+      "AgencyRequirementSemanticDraft.terms",
+    ),
+  });
+}
+
+function materializeActorSubjects(input: {
+  readonly command: StoredReceivedCommand;
+  readonly worldId: string;
+  readonly worldState: JsonObject;
+  readonly actors: readonly JsonObject[];
+  readonly indices: readonly number[];
+}): readonly JsonObject[] {
+  const entities = asObjectArray(
+    expectProperty(input.worldState, "entities", "WorldState"),
+    "WorldState.entities",
+  );
+  return Object.freeze(
+    input.indices.map((actorIndex) => {
+      const actor = input.actors[actorIndex];
+      if (actor === undefined) {
+        throw commandIdentityFault(
+          input.command,
+          "Actor selector is outside the verified world-view collection",
+          { actor_index: actorIndex },
+        );
+      }
+      const entityId = expectString(
+        actor,
+        "entity_id",
+        "DirectorActorView",
+      );
+      const matches = entities.filter(
+        (entity) =>
+          expectString(entity, "entity_id", "EntityState") === entityId,
+      );
+      const entity = matches[0];
+      if (matches.length !== 1 || entity === undefined) {
+        throw commandIdentityFault(
+          input.command,
+          "Verified actor selector does not resolve exactly once in the locked WorldState",
+          { actor_index: actorIndex, entity_id: entityId },
+        );
+      }
+      return Object.freeze({
+        kind: "entity",
+        entity: Object.freeze({
+          world_id: input.worldId,
+          entity_id: entityId,
+          expected_revision: expectInteger(
+            entity,
+            "revision",
+            "EntityState",
+          ),
+        }),
+      });
+    }),
+  );
+}
+
+function materializeDialogueParticipantSubjects(input: {
+  readonly command: StoredReceivedCommand;
+  readonly worldState: JsonObject;
+  readonly dialogue: JsonObject;
+  readonly indices: readonly number[];
+}): readonly JsonObject[] {
+  const participants = asObjectArray(
+    expectProperty(
+      input.dialogue,
+      "participants",
+      "DialogueRecord",
+    ),
+    "DialogueRecord.participants",
+  );
+  const entities = asObjectArray(
+    expectProperty(input.worldState, "entities", "WorldState"),
+    "WorldState.entities",
+  );
+  return Object.freeze(
+    input.indices.map((participantIndex) => {
+      const participant = participants[participantIndex];
+      if (participant === undefined) {
+        throw commandIdentityFault(
+          input.command,
+          "Commitment participant selector is outside the verified dialogue collection",
+          { participant_index: participantIndex },
+        );
+      }
+      const entityRef = requireEntityParticipant(
+        participant,
+        `DialogueRecord.participants[${participantIndex}]`,
+      );
+      const entityId = expectString(
+        entityRef,
+        "entity_id",
+        "EntityRef",
+      );
+      const matches = entities.filter(
+        (entity) =>
+          expectString(entity, "entity_id", "EntityState") === entityId,
+      );
+      const entity = matches[0];
+      if (matches.length !== 1 || entity === undefined) {
+        throw commandIdentityFault(
+          input.command,
+          "Commitment participant does not resolve exactly once in locked WorldState",
+          { participant_index: participantIndex, entity_id: entityId },
+        );
+      }
+      return Object.freeze({
+        kind: "entity",
+        entity: Object.freeze({
+          world_id: input.command.session.worldId,
+          entity_id: entityId,
+          expected_revision: expectInteger(
+            entity,
+            "revision",
+            "EntityState",
+          ),
+        }),
+      });
+    }),
+  );
+}
+
+function subjectEntityRef(subject: JsonObject): JsonObject {
+  return expectJsonObject(
+    expectProperty(subject, "entity", "SubjectRef"),
+    "SubjectRef.entity",
+  );
+}
+
+function materializeCommitmentEvidence(input: {
+  readonly command: StoredReceivedCommand;
+  readonly dialogue: JsonObject;
+  readonly value: JsonValue;
+}): readonly JsonObject[] {
+  const turns = asObjectArray(
+    expectProperty(input.dialogue, "turns", "DialogueRecord"),
+    "DialogueRecord.turns",
+  );
+  const dialogueId = expectString(
+    input.dialogue,
+    "dialogue_id",
+    "DialogueRecord",
+  );
+  return Object.freeze(
+    asObjectArray(
+      input.value,
+      "EventCardAgencyGateSemanticDraft.commitment_evidence",
+    ).map((selector, ordinal) => {
+      const turnIndex = expectInteger(
+        selector,
+        "turn_index",
+        "DialogueCommitmentSelector",
+      );
+      const commitmentIndex = expectInteger(
+        selector,
+        "commitment_index",
+        "DialogueCommitmentSelector",
+      );
+      const turn = turns[turnIndex];
+      const commitments =
+        turn === undefined
+          ? []
+          : asObjectArray(
+              expectProperty(
+                turn,
+                "agency_commitments",
+                "DialogueTurn",
+              ),
+              "DialogueTurn.agency_commitments",
+            );
+      const commitment = commitments[commitmentIndex];
+      if (turn === undefined || commitment === undefined) {
+        throw commandIdentityFault(
+          input.command,
+          "Commitment selector is outside the verified dialogue collection",
+          {
+            selector_ordinal: ordinal,
+            turn_index: turnIndex,
+            commitment_index: commitmentIndex,
+          },
+        );
+      }
+      return Object.freeze({
+        dialogue_id: dialogueId,
+        turn_id: expectString(turn, "turn_id", "DialogueTurn"),
+        commitment_id: expectString(
+          commitment,
+          "commitment_id",
+          "AgencyCommitment",
+        ),
+      });
+    }),
+  );
+}
+
+function materializeNarrativeSegments(input: {
+  readonly command: StoredReceivedCommand;
+  readonly dialogue: JsonObject;
+  readonly locale: string;
+  readonly value: JsonValue;
+}): readonly JsonObject[] {
+  const turns = asObjectArray(
+    expectProperty(input.dialogue, "turns", "DialogueRecord"),
+    "DialogueRecord.turns",
+  );
+  const dialogueId = expectString(
+    input.dialogue,
+    "dialogue_id",
+    "DialogueRecord",
+  );
+  return Object.freeze(
+    asObjectArray(
+      input.value,
+      "EventResultPresentationSemanticDraft.segments",
+    ).map((segment, ordinal) => {
+      const segmentKind = expectString(
+        segment,
+        "segment_kind",
+        "NarrativeSegmentSemanticDraft",
+      );
+      if (segmentKind === "dialogue_quote") {
+        const turnIndex = expectInteger(
+          segment,
+          "turn_index",
+          "DialogueTurnQuoteSelector",
+        );
+        const turn = turns[turnIndex];
+        if (turn === undefined) {
+          throw commandIdentityFault(
+            input.command,
+            "Dialogue quote selector is outside the verified dialogue turn collection",
+            { segment_ordinal: ordinal, turn_index: turnIndex },
+          );
+        }
+        return Object.freeze({
+          segment_kind: "dialogue_quote",
+          dialogue_id: dialogueId,
+          turn_id: expectString(turn, "turn_id", "DialogueTurn"),
+        });
+      }
+      return Object.freeze({
+        segment_kind: segmentKind,
+        text: localizedText(
+          input.locale,
+          expectString(
+            segment,
+            "text",
+            "GeneratedNarrativeSegmentSemanticDraft",
+          ),
+        ),
+      });
+    }),
+  );
+}
+
+function materializeCapabilityDemand(input: {
+  readonly catalog: ContentRuntimeCatalog;
+  readonly contentBinding: WorldContentBinding;
+  readonly command: StoredReceivedCommand;
+  readonly selectionSpace: PlanningSelectionSpace;
+  readonly locale: string;
+  readonly localIds: DialogueLocalIdFactory;
+  readonly requirement: JsonObject;
+}): JsonObject {
+  if (
+    expectString(
+      input.requirement,
+      "requirement_kind",
+      "CapabilityRequirementSelector",
+    ) !== "demand"
+  ) {
+    throw commandIdentityFault(
+      input.command,
+      "Unknown capability requirement selector kind",
+      {},
+    );
+  }
+  return Object.freeze({
+    requirement_kind: "demand",
+    demand: Object.freeze({
+      demand_id: input.localIds.createId(),
+      semantic_intent: expectString(
+        input.requirement,
+        "semantic_intent",
+        "CapabilityRequirementSelector",
+      ),
+      description: localizedText(
+        input.locale,
+        expectString(
+          input.requirement,
+          "description",
+          "CapabilityRequirementSelector",
+        ),
+      ),
+      allowed_archetypes: Object.freeze(
+        readModelIndices(
+          input.requirement,
+          "allowed_archetype_indices",
+          "CapabilityRequirementSelector",
+          input.selectionSpace.generationArchetypes.length,
+        ).map((index) =>
+          materializePlanningCatalogEntry({
+            catalog: input.catalog,
+            contentBinding: input.contentBinding,
+            command: input.command,
+            entry: input.selectionSpace.generationArchetypes[index] as JsonObject,
+            entryLabel: "GenerationArchetype",
+            localIdField: "archetype_id",
+            expectedKind: "generation_archetype",
+          }),
+        ),
+      ),
+      constraints: materializeWorldLawIndices({
+        catalog: input.catalog,
+        contentBinding: input.contentBinding,
+        command: input.command,
+        owner: input.requirement,
+        indexField: "constraint_law_indices",
+        selectorLabel: "CapabilityRequirementSelector",
+        laws: input.selectionSpace.worldLaws,
+      }),
+    }),
+  });
+}
+
+interface PlanningSelectionSpace {
+  readonly definitionTypes: readonly JsonObject[];
+  readonly componentTypes: readonly JsonObject[];
+  readonly capabilities: readonly JsonObject[];
+  readonly worldLaws: readonly JsonObject[];
+  readonly generationArchetypes: readonly JsonObject[];
+}
+
+function requirePlanningSelectionSpace(input: {
+  readonly catalog: ContentRuntimeCatalog;
+  readonly contentBinding: WorldContentBinding;
+  readonly command: StoredReceivedCommand;
+}): PlanningSelectionSpace {
+  const registered = input.catalog.listModelSelectionCatalog({
+    bundle_id: input.contentBinding.packId,
+    bundle_digest: input.contentBinding.bundleDigest,
+  });
+  if (registered === undefined) {
+    throw new EngineFault(
+      "dialogue.orchestration.model_selection_catalog_missing",
+      "Locked ContentBundle model selection catalog is unavailable",
+      {
+        command_id: input.command.commandId,
+        bundle_id: input.contentBinding.packId,
+        bundle_digest: input.contentBinding.bundleDigest,
+      },
+    );
+  }
+  const worldDefinitionId = expectString(
+    input.contentBinding.worldDefinition,
+    "world_id",
+    "WorldDefinition",
+  );
+  const forCurrentWorld = (
+    entries: readonly JsonObject[],
+    label: string,
+  ): readonly JsonObject[] =>
+    Object.freeze(
+      entries.filter(
+        (entry) =>
+          expectString(entry, "world_id", label) === worldDefinitionId,
+      ),
+    );
+  return Object.freeze({
+    definitionTypes: Object.freeze(
+      registered.definitionTypes.filter(
+        (entry) =>
+          expectString(entry, "type_kind", "TypeDefinition") ===
+            "definition" &&
+          entry.runtime_creatable === true &&
+          entry.validator !== undefined,
+      ),
+    ),
+    componentTypes: Object.freeze(
+      registered.componentTypes.filter(
+        (entry) =>
+          expectString(entry, "type_kind", "TypeDefinition") ===
+          "component",
+      ),
+    ),
+    capabilities: forCurrentWorld(registered.capabilities, "Capability"),
+    worldLaws: forCurrentWorld(registered.worldLaws, "WorldLaw"),
+    generationArchetypes: forCurrentWorld(
+      registered.generationArchetypes,
+      "GenerationArchetype",
+    ),
+  });
+}
+
+function materializePlanningCatalogIndex(input: {
+  readonly catalog: ContentRuntimeCatalog;
+  readonly contentBinding: WorldContentBinding;
+  readonly command: StoredReceivedCommand;
+  readonly owner: JsonObject;
+  readonly indexField: string;
+  readonly selectorLabel: string;
+  readonly entries: readonly JsonObject[];
+  readonly entryLabel: string;
+  readonly localIdField: string;
+  readonly expectedKind:
+    | "definition_type"
+    | "component_type"
+    | "capability"
+    | "generation_archetype";
+}): JsonObject {
+  const index = readModelIndex(
+    input.owner,
+    input.indexField,
+    input.selectorLabel,
+    input.entries.length,
+  );
+  return materializePlanningCatalogEntry({
+    catalog: input.catalog,
+    contentBinding: input.contentBinding,
+    command: input.command,
+    entry: input.entries[index] as JsonObject,
+    entryLabel: input.entryLabel,
+    localIdField: input.localIdField,
+    expectedKind: input.expectedKind,
+  });
+}
+
+function materializePlanningCatalogEntry(input: {
+  readonly catalog: ContentRuntimeCatalog;
+  readonly contentBinding: WorldContentBinding;
+  readonly command: StoredReceivedCommand;
+  readonly entry: JsonObject;
+  readonly entryLabel: string;
+  readonly localIdField: string;
+  readonly expectedKind:
+    | "definition_type"
+    | "component_type"
+    | "capability"
+    | "generation_archetype";
+}): JsonObject {
+  const ref = Object.freeze({
+    bundle_id: input.contentBinding.packId,
+    bundle_digest: input.contentBinding.bundleDigest,
+    catalog_kind: input.expectedKind,
+    local_id: expectString(
+      input.entry,
+      input.localIdField,
+      input.entryLabel,
+    ),
+  });
+  requirePlanningCatalogEntry({
+    catalog: input.catalog,
+    contentBinding: input.contentBinding,
+    ref,
+    expectedKind: input.expectedKind,
+    command: input.command,
+  });
+  return ref;
+}
+
+function materializeWorldLawIndices(input: {
+  readonly catalog: ContentRuntimeCatalog;
+  readonly contentBinding: WorldContentBinding;
+  readonly command: StoredReceivedCommand;
+  readonly owner: JsonObject;
+  readonly indexField: string;
+  readonly selectorLabel: string;
+  readonly laws: readonly JsonObject[];
+}): readonly JsonObject[] {
+  return Object.freeze(
+    readModelIndices(
+      input.owner,
+      input.indexField,
+      input.selectorLabel,
+      input.laws.length,
+    ).map((index) => {
+      const law = input.laws[index] as JsonObject;
+      const ruleId = expectString(
+        law,
+        "law_id",
+        "WorldLaw",
+      );
+      const ref = Object.freeze({
+        bundle_id: input.contentBinding.packId,
+        bundle_digest: input.contentBinding.bundleDigest,
+        rule_id: ruleId,
+      });
+      if (
+        input.catalog.resolveRuleEvaluationBinding(ref) === undefined
+      ) {
+        throw commandIdentityFault(
+          input.command,
+          "Selected WorldLaw does not resolve in the locked root ContentBundle",
+          {
+            bundle_id: input.contentBinding.packId,
+            rule_id: ruleId,
+            field: `${input.selectorLabel}.${input.indexField}`,
+          },
+        );
+      }
+      return ref;
+    }),
+  );
+}
+
+function materializeFactSelector(input: {
+  readonly selector: JsonObject;
+  readonly ordinal: number;
+  readonly worldView: JsonObject;
+  readonly knowledgeView: JsonObject;
+  readonly command: StoredReceivedCommand;
+}): string {
+  const source = expectString(
+    input.selector,
+    "source",
+    "FactSelector",
+  );
+  const index = expectInteger(
+    input.selector,
+    "index",
+    "FactSelector",
+  );
+  const facts =
+    source === "knowledge"
+      ? asObjectArray(
+          expectProperty(
+            input.knowledgeView,
+            "facts",
+            "KnowledgeView",
+          ),
+          "KnowledgeView.facts",
+        )
+      : source === "world"
+        ? asObjectArray(
+            expectProperty(
+              input.worldView,
+              "facts",
+              "DirectorWorldView",
+            ),
+            "DirectorWorldView.facts",
+          )
+        : undefined;
+  const fact = facts?.[index];
+  if (fact === undefined) {
+    throw commandIdentityFault(
+      input.command,
+      "Fact selector is outside its verified request collection",
+      {
+        selector_ordinal: input.ordinal,
+        source,
+        index,
+      },
+    );
+  }
+  return expectString(fact, "fact_id", "FactRecord");
+}
+
+function readModelIndices(
+  object: JsonObject,
+  field: string,
+  label: string,
+  collectionLength: number,
+): readonly number[] {
+  const value = expectProperty(object, field, label);
+  if (!Array.isArray(value)) {
+    throw new EngineFault(
+      "dialogue.orchestration.model_index_array_invalid",
+      `${label}.${field} must be an array`,
+      { field },
+    );
+  }
+  return Object.freeze(
+    value.map((entry, ordinal) => {
+      if (
+        typeof entry !== "number" ||
+        !Number.isSafeInteger(entry) ||
+        entry < 0 ||
+        entry >= collectionLength
+      ) {
+        throw new EngineFault(
+          "dialogue.orchestration.model_index_out_of_range",
+          `${label}.${field} contains an out-of-range model index`,
+          {
+            field,
+            ordinal,
+            index: entry as JsonValue,
+            collection_length: collectionLength,
+          },
+        );
+      }
+      return entry;
+    }),
+  );
+}
+
+function readModelIndex(
+  object: JsonObject,
+  field: string,
+  label: string,
+  collectionLength: number,
+): number {
+  const index = expectInteger(object, field, label);
+  if (index >= collectionLength) {
+    throw new EngineFault(
+      "dialogue.orchestration.model_index_out_of_range",
+      `${label}.${field} contains an out-of-range model index`,
+      {
+        field,
+        index,
+        collection_length: collectionLength,
+      },
+    );
+  }
+  return index;
+}
+
+function localizedText(locale: string, text: string): JsonObject {
+  return Object.freeze({ locale, text });
+}
+
+function modelRequestInput(
+  receipt: VerifiedModelInvocationReceipt,
+): JsonObject {
+  return expectJsonObject(
+    expectProperty(receipt.request.value, "input", "ModelRequest"),
+    "ModelRequest.input",
+  );
 }
 
 function requireDefinitionProposalType(input: {
@@ -2977,6 +4355,7 @@ function requirePlanningCatalogEntry(input: {
   readonly ref: JsonObject;
   readonly expectedKind:
     | "definition_type"
+    | "component_type"
     | "capability"
     | "generation_archetype";
   readonly command: StoredReceivedCommand;
@@ -3049,21 +4428,11 @@ function worldLawRefs(
   contentBinding: WorldContentBinding,
   command: StoredReceivedCommand,
 ): readonly JsonObject[] {
-  const laws = catalog.listWorldLaws({
-    bundle_id: contentBinding.packId,
-    bundle_digest: contentBinding.bundleDigest,
-  });
-  if (laws === undefined) {
-    throw new EngineFault(
-      "dialogue.orchestration.world_law_catalog_missing",
-      "Locked world-law catalog is unavailable for System planning validation",
-      {
-        command_id: command.commandId,
-        bundle_id: contentBinding.packId,
-        bundle_digest: contentBinding.bundleDigest,
-      },
-    );
-  }
+  const laws = requirePlanningSelectionSpace({
+    catalog,
+    contentBinding,
+    command,
+  }).worldLaws;
   return Object.freeze(
     laws.map((law) =>
       Object.freeze({
@@ -3437,7 +4806,8 @@ function assertSystemPlanningReceiptIdentity(input: {
   readonly invocation: RuntimeRulePluginInvocationBinding;
   readonly identityField: "definition_id" | "plan_id";
   readonly expectedWorldRecordId: string;
-  readonly expectedProposal: JsonObject;
+  readonly expectedProposalId: string;
+  readonly expectedDraftOrdinal: number;
   readonly expectedModelProof: JsonObject;
   readonly expectedPreparedAt: string;
   readonly digest: JsonDigest;
@@ -3453,6 +4823,14 @@ function assertSystemPlanningReceiptIdentity(input: {
   });
   const request = input.receipt.request.value;
   const requestInput = rulePluginRequestInput(input.receipt);
+  const candidate = expectJsonObject(
+    expectProperty(
+      requestInput,
+      "candidate",
+      input.operationKind,
+    ),
+    `${input.operationKind}.candidate`,
+  );
   const deterministicContext = expectJsonObject(
     expectProperty(
       request,
@@ -3483,14 +4861,13 @@ function assertSystemPlanningReceiptIdentity(input: {
       input.identityField,
       input.operationKind,
     ) !== input.expectedWorldRecordId ||
-    !jsonEquals(
-      expectProperty(
-        requestInput,
-        "proposal",
-        input.operationKind,
-      ),
-      input.expectedProposal,
-    ) ||
+    expectInteger(
+      requestInput,
+      "draft_ordinal",
+      input.operationKind,
+    ) !== input.expectedDraftOrdinal ||
+    expectString(candidate, "proposal_id", "SystemProposal") !==
+      input.expectedProposalId ||
     !jsonEquals(
       expectProperty(
         requestInput,
@@ -3523,11 +4900,7 @@ function assertSystemPlanningReceiptIdentity(input: {
       {
         request_id: input.expectedRequestId,
         operation_kind: input.operationKind,
-        proposal_id: expectString(
-          input.expectedProposal,
-          "proposal_id",
-          "SystemProposal",
-        ),
+        proposal_id: input.expectedProposalId,
       },
     );
   }
@@ -3536,7 +4909,6 @@ function assertSystemPlanningReceiptIdentity(input: {
 function assertDirectorSystemReceiptIdentity(input: {
   readonly command: StoredReceivedCommand;
   readonly requestId: string;
-  readonly modelProfileId: string;
   readonly receipt: VerifiedModelInvocationReceipt;
   readonly expectedBasisRevision: number;
 }): void {
@@ -3575,8 +4947,6 @@ function assertDirectorSystemReceiptIdentity(input: {
       input.requestId ||
     expectString(request, "request_kind", "ModelRequest") !==
       "director.system_dialogue" ||
-    expectString(request, "model_profile_id", "ModelRequest") !==
-      input.modelProfileId ||
     expectInteger(request, "basis_revision", "ModelRequest") !==
       input.expectedBasisRevision ||
     expectString(dialogue, "dialogue_id", "DialogueRecord") !==
@@ -3601,6 +4971,99 @@ function assertDirectorSystemReceiptIdentity(input: {
         expected_world_revision: input.expectedBasisRevision,
         dialogue_id: execution.dialogueId,
         player_entity_id: input.command.session.playerEntityId,
+      },
+    );
+  }
+}
+
+function assertDirectorPlanningReceiptIdentity(input: {
+  readonly command: StoredReceivedCommand;
+  readonly interactionKind: "goal_plan" | "definition_draft";
+  readonly requestId: string;
+  readonly receipt: VerifiedModelInvocationReceipt;
+  readonly expectedBasisRevision: number;
+}): void {
+  const execution = requireDialogueExecution(input.command);
+  const expectedRequestKind =
+    input.interactionKind === "goal_plan"
+      ? "director.goal_plan"
+      : "director.definition_draft";
+  const request = input.receipt.request.value;
+  const proof = input.receipt.proof.value;
+  const snapshot = input.receipt.snapshot.value;
+  const dynamicInput = expectJsonObject(
+    expectProperty(request, "input", "ModelRequest"),
+    "ModelRequest.input",
+  );
+  const dialogue = expectJsonObject(
+    expectProperty(
+      dynamicInput,
+      "dialogue",
+      "Director planning input",
+    ),
+    "Director planning input.dialogue",
+  );
+  const knowledgeView = expectJsonObject(
+    expectProperty(
+      dynamicInput,
+      "knowledge_view",
+      "Director planning input",
+    ),
+    "Director planning input.knowledge_view",
+  );
+  const purposeMatches =
+    input.interactionKind !== "definition_draft" ||
+    expectString(
+      dynamicInput,
+      "purpose",
+      "DirectorDefinitionDraftInput",
+    ) === readDialogueCommandText(input.command);
+  if (
+    input.receipt.worldId !== input.command.session.worldId ||
+    input.receipt.worldRevision !== input.expectedBasisRevision ||
+    expectString(snapshot, "world_id", "WorldSnapshot") !==
+      input.command.session.worldId ||
+    expectInteger(snapshot, "world_revision", "WorldSnapshot") !==
+      input.expectedBasisRevision ||
+    expectString(request, "request_id", "ModelRequest") !==
+      input.requestId ||
+    expectString(request, "request_kind", "ModelRequest") !==
+      expectedRequestKind ||
+    expectInteger(request, "basis_revision", "ModelRequest") !==
+      input.expectedBasisRevision ||
+    expectString(dialogue, "dialogue_id", "DialogueRecord") !==
+      execution.dialogueId ||
+    expectString(
+      dynamicInput,
+      "response_locale",
+      "DirectorDialogueEventsInput",
+    ) !== readDialogueCommandLocale(input.command) ||
+    expectString(
+      knowledgeView,
+      "viewer_entity_id",
+      "KnowledgeView",
+    ) !== input.command.session.playerEntityId ||
+    expectString(
+      dynamicInput,
+      "response_locale",
+      "Director planning input",
+    ) !== readDialogueCommandLocale(input.command) ||
+    !purposeMatches ||
+    expectString(proof, "request_id", "VerifiedModelOutputRef") !==
+      input.requestId ||
+    expectString(proof, "request_kind", "VerifiedModelOutputRef") !==
+      expectedRequestKind ||
+    expectInteger(proof, "basis_revision", "VerifiedModelOutputRef") !==
+      input.expectedBasisRevision
+  ) {
+    throw commandIdentityFault(
+      input.command,
+      "Director planning receipt differs from its explicit GUI interaction identity",
+      {
+        expected_request_id: input.requestId,
+        expected_request_kind: expectedRequestKind,
+        expected_world_revision: input.expectedBasisRevision,
+        dialogue_id: execution.dialogueId,
       },
     );
   }

@@ -1,5 +1,6 @@
 import {
   EngineFault,
+  expectJsonObject,
   expectProperty,
   expectString,
   type JsonDigest,
@@ -14,7 +15,9 @@ import type {
 export type DirectorMode =
   | "daily_settlement"
   | "dialogue_events"
-  | "system_dialogue";
+  | "system_dialogue"
+  | "goal_plan"
+  | "definition_draft";
 
 export type CharacterMode = "dialogue" | "react";
 
@@ -28,13 +31,6 @@ export interface MaterializedPromptBlock {
 export interface MaterializedResidentContext {
   readonly resident_context: JsonObject;
   readonly ordered_blocks: readonly MaterializedPromptBlock[];
-  readonly event_context?: {
-    readonly capability_catalog_digest: string;
-    readonly world_law_catalog_digest: string;
-    readonly content_bundle_digest: string;
-    readonly event_contract_digest: string;
-    readonly context_digest: string;
-  };
 }
 
 export interface PromptMaterializer {
@@ -84,7 +80,7 @@ class DefaultPromptMaterializer implements PromptMaterializer {
       expectProperty(profile, "core_prompt_ids", "DirectorProfile"),
       "DirectorProfile.core_prompt_ids",
     );
-    const commonBlocks = coreIds.map((promptId) =>
+    const directorCoreBlocks = coreIds.map((promptId) =>
       this.#materializeFragment({
         bundle_id: packId,
         bundle_digest: bundleDigest,
@@ -92,13 +88,28 @@ class DefaultPromptMaterializer implements PromptMaterializer {
         expectedPurposePrefix: "director_",
       }),
     );
+    const systemPersonaBlock =
+      input.mode === "system_dialogue"
+        ? this.#materializeFragment({
+            bundle_id: packId,
+            bundle_digest: bundleDigest,
+            prompt_id: expectString(
+              expectJsonObject(
+                expectProperty(
+                  input.contentBinding.worldDefinition,
+                  "system",
+                  "WorldDefinition",
+                ),
+                "WorldDefinition.system",
+              ),
+              "persona_prompt_id",
+              "WorldDefinition.system",
+            ),
+            expectedPurposePrefix: "system_",
+          })
+        : undefined;
 
-    const modePromptField =
-      input.mode === "daily_settlement"
-        ? "daily_settlement_prompt_id"
-        : input.mode === "dialogue_events"
-          ? "dialogue_events_prompt_id"
-          : "system_dialogue_prompt_id";
+    const modePromptField = directorModePromptField(input.mode);
     const modePromptId = expectString(
       profile,
       modePromptField,
@@ -110,22 +121,47 @@ class DefaultPromptMaterializer implements PromptMaterializer {
       prompt_id: modePromptId,
       expectedPurposePrefix: "director_",
     });
+    const selectionSpaceBlock =
+      this.#materializeSelectionSpace(
+        input.contentBinding,
+        input.mode,
+      );
 
-    const eventContext = this.#materializeEventContext({
-      bundle_id: packId,
-      bundle_digest: bundleDigest,
-    });
-
-    const ordered_blocks = Object.freeze([...commonBlocks, modeBlock]);
-    const commonRefs = commonBlocks.map((block) => cacheBlockRef(block));
+    const ordered_blocks = Object.freeze([
+      ...directorCoreBlocks,
+      ...(systemPersonaBlock === undefined
+        ? []
+        : [systemPersonaBlock]),
+      ...(selectionSpaceBlock === undefined
+        ? []
+        : [selectionSpaceBlock]),
+      modeBlock,
+    ]);
+    const coreRefs = directorCoreBlocks.map((block) =>
+      cacheBlockRef(block),
+    );
+    const systemPersonaRef =
+      systemPersonaBlock === undefined
+        ? undefined
+        : cacheBlockRef(systemPersonaBlock);
+    const selectionSpaceRef =
+      selectionSpaceBlock === undefined
+        ? undefined
+        : cacheBlockRef(selectionSpaceBlock);
     const modeRef = cacheBlockRef(modeBlock);
+    const residentDigestInput: Record<string, JsonValue> = {
+      core_blocks: coreRefs,
+      mode: input.mode,
+      mode_block: modeRef,
+    };
+    if (systemPersonaRef !== undefined) {
+      residentDigestInput.system_persona_block = systemPersonaRef;
+    }
+    if (selectionSpaceRef !== undefined) {
+      residentDigestInput.selection_space_block = selectionSpaceRef;
+    }
     const resident_digest = this.#digest.sha256(
-      Object.freeze({
-        common_blocks: commonRefs,
-        event_context: eventContext.ref,
-        mode: input.mode,
-        mode_block: modeRef,
-      }),
+      Object.freeze(residentDigestInput),
     );
     const resident_key = namespacedKey([
       packId,
@@ -134,21 +170,26 @@ class DefaultPromptMaterializer implements PromptMaterializer {
       input.mode,
     ]);
 
-    const resident_context: JsonObject = Object.freeze({
+    const residentContext: Record<string, JsonValue> = {
       context_kind: "director",
       resident_key,
       resident_digest,
       director_id: directorProfileId,
-      common_blocks: commonRefs,
-      event_context: eventContext.ref,
+      core_blocks: coreRefs,
       mode: input.mode,
       mode_block: modeRef,
-    });
+    };
+    if (systemPersonaRef !== undefined) {
+      residentContext.system_persona_block = systemPersonaRef;
+    }
+    if (selectionSpaceRef !== undefined) {
+      residentContext.selection_space_block = selectionSpaceRef;
+    }
+    const resident_context: JsonObject = Object.freeze(residentContext);
 
     return Object.freeze({
       resident_context,
       ordered_blocks,
-      event_context: eventContext.payload,
     });
   }
 
@@ -190,14 +231,6 @@ class DefaultPromptMaterializer implements PromptMaterializer {
       );
     }
 
-    const commonBlocks = [
-      this.#materializeFragment({
-        bundle_id: packId,
-        bundle_digest: bundleDigest,
-        prompt_id: personaIds[0] as string,
-        expectedPurposePrefix: "character_",
-      }),
-    ];
     const personaBlocks = personaIds.map((promptId) =>
       this.#materializeFragment({
         bundle_id: packId,
@@ -220,11 +253,9 @@ class DefaultPromptMaterializer implements PromptMaterializer {
     });
 
     const ordered_blocks = Object.freeze([
-      ...commonBlocks,
       ...personaBlocks,
       modeBlock,
     ]);
-    const commonRefs = commonBlocks.map((block) => cacheBlockRef(block));
     const personaRefs = personaBlocks.map((block) => cacheBlockRef(block));
     const modeRef = cacheBlockRef(modeBlock);
     const mind_profile: JsonObject = Object.freeze({
@@ -237,7 +268,6 @@ class DefaultPromptMaterializer implements PromptMaterializer {
       Object.freeze({
         entity_id: input.entityId,
         mind_profile,
-        common_blocks: commonRefs,
         persona_blocks: personaRefs,
         mode: input.mode,
         mode_block: modeRef,
@@ -256,7 +286,6 @@ class DefaultPromptMaterializer implements PromptMaterializer {
       resident_digest,
       entity_id: input.entityId,
       mind_profile,
-      common_blocks: commonRefs,
       persona_blocks: personaRefs,
       mode: input.mode,
       mode_block: modeRef,
@@ -317,60 +346,303 @@ class DefaultPromptMaterializer implements PromptMaterializer {
     });
   }
 
-  #materializeEventContext(input: {
-    readonly bundle_id: string;
-    readonly bundle_digest: string;
-  }): {
-    readonly ref: JsonObject;
-    readonly payload: MaterializedResidentContext["event_context"] & object;
-  } {
-    const capabilities = this.#catalog.listCapabilities(input);
-    const worldLaws = this.#catalog.listWorldLaws(input);
-    if (capabilities === undefined || worldLaws === undefined) {
+  #materializeSelectionSpace(
+    contentBinding: WorldContentBinding,
+    mode: DirectorMode,
+  ): MaterializedPromptBlock | undefined {
+    if (
+      mode !== "goal_plan" &&
+      mode !== "definition_draft"
+    ) {
+      return undefined;
+    }
+    const ref = {
+      bundle_id: contentBinding.packId,
+      bundle_digest: contentBinding.bundleDigest,
+    };
+    const catalog = this.#catalog.listModelSelectionCatalog(ref);
+    if (catalog === undefined) {
       throw unresolved(
-        "event_catalog",
-        input.bundle_id,
-        input.bundle_digest,
-        input.bundle_id,
+        "model_selection_catalog",
+        ref.bundle_id,
+        ref.bundle_digest,
+        ref.bundle_id,
       );
     }
-
-    const capability_catalog_digest = this.#digest.sha256(
-      capabilities as JsonValue,
+    const worldId = expectString(
+      contentBinding.worldDefinition,
+      "world_id",
+      "WorldDefinition",
     );
-    const world_law_catalog_digest = this.#digest.sha256(worldLaws as JsonValue);
-    const content_bundle_digest = input.bundle_digest;
-    const event_contract_digest = this.#digest.sha256(
-      Object.freeze({
-        contract: "model-protocol.v1",
-        event_context: "director.event_invocation",
-      }),
-    );
-    const context_digest = this.#digest.sha256(
-      Object.freeze({
-        event_contract_digest,
-        content_bundle_digest,
-        capability_catalog_digest,
-        world_law_catalog_digest,
-      }),
-    );
-    const ref: JsonObject = Object.freeze({
-      context_digest,
-      event_contract_digest,
-      content_bundle_digest,
-      capability_catalog_digest,
-      world_law_catalog_digest,
-    });
+    const selectionSpace =
+      mode === "goal_plan"
+        ? this.#goalPlanSelectionSpace(
+            ref,
+            worldId,
+            catalog,
+          )
+        : definitionSelectionSpace(catalog);
+    const text =
+      "Use only zero-based indices from this immutable ContentBundle selection space. " +
+      "Never invent catalog or rule identifiers. " +
+      JSON.stringify(selectionSpace);
     return Object.freeze({
-      ref,
-      payload: Object.freeze({
-        capability_catalog_digest,
-        world_law_catalog_digest,
-        content_bundle_digest,
-        event_contract_digest,
-        context_digest,
-      }),
+      block_id: namespacedKey([
+        ref.bundle_id,
+        "director",
+        mode,
+        "selection_space",
+      ]),
+      content_digest: this.#digest.sha256(text),
+      text,
+      purpose: `director_${mode}_selection_space`,
     });
+  }
+
+  #goalPlanSelectionSpace(
+    ref: {
+      readonly bundle_id: string;
+      readonly bundle_digest: string;
+    },
+    worldId: string,
+    catalog: ReturnType<
+      ContentRuntimeCatalog["listModelSelectionCatalog"]
+    > & object,
+  ): JsonObject {
+    const capabilities = catalog.capabilities.filter(
+      (entry) =>
+        expectString(entry, "world_id", "Capability") ===
+        worldId,
+    );
+    const worldLaws = catalog.worldLaws.filter(
+      (entry) =>
+        expectString(entry, "world_id", "WorldLaw") === worldId,
+    );
+    const generationArchetypes =
+      catalog.generationArchetypes.filter(
+        (entry) =>
+          expectString(
+            entry,
+            "world_id",
+            "GenerationArchetype",
+          ) === worldId,
+      );
+    if (
+      worldLaws.length === 0 ||
+      (capabilities.length === 0 &&
+        generationArchetypes.length === 0)
+    ) {
+      throw new EngineFault(
+        "prompt.materializer.selection_space_empty",
+        "Goal planning requires at least one world law and one capability or generation archetype",
+        {
+          bundle_id: ref.bundle_id,
+          bundle_digest: ref.bundle_digest,
+          world_id: worldId,
+          capability_count: capabilities.length,
+          world_law_count: worldLaws.length,
+          generation_archetype_count:
+            generationArchetypes.length,
+        },
+      );
+    }
+    return Object.freeze({
+      selection_space_kind: "goal_plan",
+      capabilities: Object.freeze(
+        capabilities.map((entry, index) =>
+          Object.freeze({
+            index,
+            name: expectProperty(entry, "name", "Capability"),
+            description: expectProperty(
+              entry,
+              "description",
+              "Capability",
+            ),
+            ...(entry.planning_prompt_id === undefined
+              ? {}
+              : {
+                  planning_guidance: this.#promptText(
+                    ref,
+                    expectString(
+                      entry,
+                      "planning_prompt_id",
+                      "Capability",
+                    ),
+                  ),
+                }),
+          }),
+        ),
+      ),
+      world_laws: Object.freeze(
+        worldLaws.map((entry, index) =>
+          Object.freeze({
+            index,
+            name: expectProperty(entry, "name", "WorldLaw"),
+            description: expectProperty(
+              entry,
+              "description",
+              "WorldLaw",
+            ),
+            law_mode: expectString(
+              entry,
+              "law_mode",
+              "WorldLaw",
+            ),
+            priority: expectProperty(
+              entry,
+              "priority",
+              "WorldLaw",
+            ),
+            ...(entry.explanation_prompt_id === undefined
+              ? {}
+              : {
+                  explanation: this.#promptText(
+                    ref,
+                    expectString(
+                      entry,
+                      "explanation_prompt_id",
+                      "WorldLaw",
+                    ),
+                  ),
+                }),
+          }),
+        ),
+      ),
+      generation_archetypes: Object.freeze(
+        generationArchetypes.map((entry, index) =>
+          Object.freeze({
+            index,
+            name: expectProperty(
+              entry,
+              "name",
+              "GenerationArchetype",
+            ),
+            description: expectProperty(
+              entry,
+              "description",
+              "GenerationArchetype",
+            ),
+            result_kind: expectString(
+              entry,
+              "result_kind",
+              "GenerationArchetype",
+            ),
+            guidance: this.#promptText(
+              ref,
+              expectString(
+                entry,
+                "prompt_fragment_id",
+                "GenerationArchetype",
+              ),
+            ),
+          }),
+        ),
+      ),
+    });
+  }
+
+  #promptText(
+    ref: {
+      readonly bundle_id: string;
+      readonly bundle_digest: string;
+    },
+    promptId: string,
+  ): string {
+    const fragment = this.#catalog.findPromptFragment({
+      ...ref,
+      prompt_id: promptId,
+    });
+    if (fragment === undefined) {
+      throw unresolved(
+        "prompt_fragment",
+        ref.bundle_id,
+        ref.bundle_digest,
+        promptId,
+      );
+    }
+    return expectString(fragment, "text", "PromptFragment");
+  }
+}
+
+function definitionSelectionSpace(
+  catalog: ReturnType<
+    ContentRuntimeCatalog["listModelSelectionCatalog"]
+  > & object,
+): JsonObject {
+  const definitionTypes = catalog.definitionTypes.filter(
+    (entry) =>
+      entry.runtime_creatable === true &&
+      entry.validator !== undefined,
+  );
+  if (definitionTypes.length === 0) {
+    throw new EngineFault(
+      "prompt.materializer.selection_space_empty",
+      "Definition drafting requires at least one runtime-creatable definition type with an explicit validator",
+    );
+  }
+  return Object.freeze({
+    selection_space_kind: "definition_draft",
+    definition_types: Object.freeze(
+      definitionTypes.map((entry, index) =>
+        Object.freeze({
+          index,
+          name: expectProperty(
+            entry,
+            "name",
+            "TypeDefinition",
+          ),
+          description: expectProperty(
+            entry,
+            "description",
+            "TypeDefinition",
+          ),
+        }),
+      ),
+    ),
+    component_types: Object.freeze(
+      catalog.componentTypes.map((entry, index) =>
+        Object.freeze({
+          index,
+          name: expectProperty(
+            entry,
+            "name",
+            "TypeDefinition",
+          ),
+          description: expectProperty(
+            entry,
+            "description",
+            "TypeDefinition",
+          ),
+          cardinality: expectString(
+            entry,
+            "component_cardinality",
+            "TypeDefinition",
+          ),
+        }),
+      ),
+    ),
+  });
+}
+
+function directorModePromptField(
+  mode: DirectorMode,
+):
+  | "daily_settlement_prompt_id"
+  | "dialogue_events_prompt_id"
+  | "system_dialogue_prompt_id"
+  | "goal_plan_prompt_id"
+  | "definition_draft_prompt_id" {
+  switch (mode) {
+    case "daily_settlement":
+      return "daily_settlement_prompt_id";
+    case "dialogue_events":
+      return "dialogue_events_prompt_id";
+    case "system_dialogue":
+      return "system_dialogue_prompt_id";
+    case "goal_plan":
+      return "goal_plan_prompt_id";
+    case "definition_draft":
+      return "definition_draft_prompt_id";
   }
 }
 

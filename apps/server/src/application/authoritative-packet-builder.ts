@@ -300,8 +300,6 @@ class DefaultAuthoritativePacketBuilder implements AuthoritativePacketBuilder {
             ),
             source_request_id: requestId,
             acceptance_id: acceptanceId,
-            scope: "session",
-            state: "active",
           },
         },
       ],

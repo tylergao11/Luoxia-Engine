@@ -496,12 +496,10 @@ class PostgresLockedWorldTransaction implements LockedWorldTransaction {
         ? await this.#client.query(
             `UPDATE luoxia_engine.worlds
                 SET revision = $2::bigint,
-                    event_cursor = $2::bigint,
                     state_document = $3::jsonb,
                     updated_at = $4::timestamptz
               WHERE world_id = $1::uuid
-                AND revision = $5::bigint
-                AND event_cursor = $5::bigint`,
+                AND revision = $5::bigint`,
             [
               worldId,
               revisionAfter.toString(),
@@ -604,23 +602,7 @@ async function lockWorld(
       { requested_world_id: worldId, locked_world_id: row.world_id },
     );
   }
-  const revision = parseSafeRevision(row.revision_text, worldId, "revision");
-  const eventCursor = parseSafeRevision(
-    row.event_cursor_text,
-    worldId,
-    "event_cursor",
-  );
-  if (eventCursor !== revision) {
-    throw new EngineFault(
-      "world.atomic_store.database_corrupt",
-      "Locked world event_cursor does not match its revision",
-      {
-        world_id: worldId,
-        revision,
-        event_cursor: eventCursor,
-      },
-    );
-  }
+  const revision = parseWorldRevision(row.revision_text, worldId);
   const saveEnvelope = assembleSaveEnvelope(contracts, row);
   const source = expectJsonObject(
     expectProperty(packet, "source", "ContentPacket"),
@@ -784,13 +766,10 @@ async function updateContentUpgradeWorld(
             dependency_bundle_locks_document = $7::jsonb,
             rule_plugin_locks_document = $8::jsonb,
             stage_module_locks_document = $9::jsonb,
-            event_cursor = $10::bigint,
-            asset_hashes_document = $11::jsonb,
-            migration_history_document = $12::jsonb,
-            updated_at = $13::timestamptz
+            migration_history_document = $10::jsonb,
+            updated_at = $11::timestamptz
       WHERE world_id = $1::uuid
-        AND revision = $14::bigint
-        AND event_cursor = $14::bigint`,
+        AND revision = $12::bigint`,
     [
       expectString(value, "world_id", "SaveEnvelope"),
       expectInteger(value, "world_revision", "SaveEnvelope").toString(),
@@ -809,8 +788,6 @@ async function updateContentUpgradeWorld(
       JSON.stringify(
         expectProperty(value, "stage_module_locks", "SaveEnvelope"),
       ),
-      expectInteger(value, "event_cursor", "SaveEnvelope").toString(),
-      JSON.stringify(expectProperty(value, "asset_hashes", "SaveEnvelope")),
       JSON.stringify(
         expectProperty(value, "migration_history", "SaveEnvelope"),
       ),
@@ -880,24 +857,20 @@ function assertMaterializationRequestIdentity(
   }
 }
 
-function parseSafeRevision(
-  value: string,
-  worldId: string,
-  field: "revision" | "event_cursor",
-): number {
+function parseWorldRevision(value: string, worldId: string): number {
   if (!/^(0|[1-9][0-9]*)$/u.test(value)) {
     throw new EngineFault(
       "world.atomic_store.database_corrupt",
-      `World ${field} is not an unsigned integer`,
-      { world_id: worldId, [field]: value },
+      "World revision is not an unsigned integer",
+      { world_id: worldId, revision: value },
     );
   }
   const revision = BigInt(value);
   if (revision > MAX_SAFE_REVISION) {
     throw new EngineFault(
       "world.atomic_store.database_corrupt",
-      `World ${field} exceeds the JavaScript safe integer range`,
-      { world_id: worldId, [field]: value },
+      "World revision exceeds the JavaScript safe integer range",
+      { world_id: worldId, revision: value },
     );
   }
   return Number(revision);

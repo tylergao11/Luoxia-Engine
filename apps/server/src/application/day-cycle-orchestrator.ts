@@ -11,7 +11,8 @@ import {
 import type {
   ContentRulePluginOperationBinding,
   DeterministicContextAuthority,
-} from "@luoxia/world-core/composition";
+  StateMachineContractAuthority,
+} from "@luoxia/world-core";
 
 import type { DayCycleExecutionIdentityJournal } from "./day-cycle-execution-identity.js";
 import type {
@@ -35,6 +36,10 @@ import type {
   RuntimeWorldBinding,
   RuntimeWorldBindingResolver,
 } from "./runtime-world-binding.js";
+import type {
+  DailySettlementProposalIdentity,
+  DailySettlementRunJournal,
+} from "./runtime-persistence.js";
 import type { WorldMutationOrchestrator } from "./world-mutation-orchestrator.js";
 import type { WorldExtensionOrchestrator } from "./world-extension-orchestrator.js";
 
@@ -79,11 +84,11 @@ export interface DayCycleOrchestratorDependencies {
   readonly rulePluginAbi: RulePluginAbiRegistry;
   readonly rulePlugins: RulePluginExecutor;
   readonly deterministicContexts: DeterministicContextAuthority;
+  readonly stateMachineContracts: StateMachineContractAuthority;
   readonly models: RuntimeModelFacades;
+  readonly dailySettlements: DailySettlementRunJournal;
   readonly mutations: WorldMutationOrchestrator;
   readonly worldExtensions: WorldExtensionOrchestrator;
-  readonly directorDailySettlementModelProfileId: string;
-  readonly characterReactModelProfileId: string;
 }
 
 interface DayCycleState {
@@ -98,6 +103,13 @@ interface DayCycleState {
 interface CharacterReactionRun {
   readonly entityId: string;
   readonly receipt: VerifiedModelInvocationReceipt;
+  readonly eventOrdinalByProposalId: ReadonlyMap<string, number>;
+}
+
+interface MaterializedAutomaticEventRun {
+  readonly draftOrdinal: number;
+  readonly candidate: JsonObject;
+  readonly characterEvent: JsonObject | undefined;
 }
 
 export function createDayCycleOrchestrator(
@@ -112,11 +124,11 @@ class DefaultDayCycleOrchestrator implements DayCycleOrchestrator {
   readonly #rulePluginAbi: RulePluginAbiRegistry;
   readonly #rulePlugins: RulePluginExecutor;
   readonly #deterministicContexts: DeterministicContextAuthority;
+  readonly #stateMachineContracts: StateMachineContractAuthority;
   readonly #models: RuntimeModelFacades;
+  readonly #dailySettlements: DailySettlementRunJournal;
   readonly #mutations: WorldMutationOrchestrator;
   readonly #worldExtensions: WorldExtensionOrchestrator;
-  readonly #directorDailySettlementModelProfileId: string;
-  readonly #characterReactModelProfileId: string;
 
   public constructor(dependencies: DayCycleOrchestratorDependencies) {
     this.#worlds = dependencies.worlds;
@@ -124,13 +136,11 @@ class DefaultDayCycleOrchestrator implements DayCycleOrchestrator {
     this.#rulePluginAbi = dependencies.rulePluginAbi;
     this.#rulePlugins = dependencies.rulePlugins;
     this.#deterministicContexts = dependencies.deterministicContexts;
+    this.#stateMachineContracts = dependencies.stateMachineContracts;
     this.#models = dependencies.models;
+    this.#dailySettlements = dependencies.dailySettlements;
     this.#mutations = dependencies.mutations;
     this.#worldExtensions = dependencies.worldExtensions;
-    this.#directorDailySettlementModelProfileId =
-      dependencies.directorDailySettlementModelProfileId;
-    this.#characterReactModelProfileId =
-      dependencies.characterReactModelProfileId;
   }
 
   public async endPlayerDay(input: {
@@ -215,9 +225,25 @@ class DefaultDayCycleOrchestrator implements DayCycleOrchestrator {
     }
     const directorReceipt = await this.#models.directorDailySettlement({
       worldId: current.worldId,
-      model_profile_id: this.#directorDailySettlementModelProfileId,
     });
-    const automaticEvents = readDirectorAutomaticEvents(directorReceipt);
+    const automaticEventDrafts =
+      readDirectorAutomaticEvents(directorReceipt);
+    const proposalIdentities =
+      await this.#dailySettlements.prepareDailyProposals(
+        expectString(
+          directorReceipt.proof.value,
+          "request_id",
+          "VerifiedModelOutputRef",
+        ),
+      );
+    const automaticEvents = materializeAutomaticEvents({
+      worldId: current.worldId,
+      expectedDay: current.day,
+      locale: current.binding.contentBinding.defaultLocale,
+      receipt: directorReceipt,
+      drafts: automaticEventDrafts,
+      proposalIdentities,
+    });
     const reactions = await this.#runCharacterReactions(
       current.worldId,
       current.day,
@@ -276,7 +302,24 @@ class DefaultDayCycleOrchestrator implements DayCycleOrchestrator {
         "local_id",
         "StateMachineCatalogRef",
       );
-      assertMachineContentLock(initial, machineRef, machineId);
+      if (hasRetiredCharacterOwner(initial.worldState, machine)) {
+        continue;
+      }
+      const resolvedMachine = this.#stateMachineContracts.assertBoundInstance({
+        contentBinding: initial.binding.contentBinding,
+        worldId: initial.worldId,
+        instance: machine,
+      });
+      const currentStateId = expectString(
+        machine,
+        "state_id",
+        "StateMachineInstanceState",
+      );
+      if (
+        resolvedMachine.listOutgoingTransitions(currentStateId).length === 0
+      ) {
+        continue;
+      }
       const requestId = await this.#identities.reserve({
         worldId: initial.worldId,
         day: initial.day,
@@ -304,13 +347,32 @@ class DefaultDayCycleOrchestrator implements DayCycleOrchestrator {
           assertSameAutonomousDay(initial, state),
         requestInput: Object.freeze({
           machine_instance_id: instanceId,
-          day: initial.day,
+          machine_definition: resolvedMachine.definition,
         }),
       });
-      requireProposal(receipt, "state_machine.advance", {
-        machine_instance_id: instanceId,
-        day: initial.day,
-      });
+      if (receipt.proposal === undefined) {
+        const output = expectJsonObject(
+          expectProperty(
+            receipt.response.value,
+            "output",
+            "RulePluginResponse",
+          ),
+          "RulePluginResponse.output",
+        );
+        if (
+          expectString(
+            output,
+            "output_kind",
+            "RulePluginResponse.output",
+          ) === "state_machine.unchanged"
+        ) {
+          continue;
+        }
+        requireProposal(receipt, "state_machine.advance", {
+          machine_instance_id: instanceId,
+          day: initial.day,
+        });
+      }
       await this.#mutations.commitRulePluginReceipt(receipt);
     }
   }
@@ -318,39 +380,54 @@ class DefaultDayCycleOrchestrator implements DayCycleOrchestrator {
   async #runCharacterReactions(
     worldId: string,
     day: number,
-    automaticEvents: readonly JsonObject[],
+    automaticEvents: readonly MaterializedAutomaticEventRun[],
   ): Promise<ReadonlyMap<string, CharacterReactionRun>> {
-    const grouped = new Map<string, JsonObject[]>();
-    for (const proposal of automaticEvents) {
-      if (
-        expectString(
-          proposal,
-          "proposal_kind",
-          "AutomaticEventProposal",
-        ) !== "automatic.character"
-      ) {
+    const grouped = new Map<
+      string,
+      {
+        readonly events: JsonObject[];
+        readonly eventOrdinalByProposalId: Map<string, number>;
+      }
+    >();
+    for (const event of automaticEvents) {
+      if (event.characterEvent === undefined) {
         continue;
       }
-      const stimulus = toCharacterStimulus(proposal);
+      const proposalId = expectString(
+        event.candidate,
+        "proposal_id",
+        "MaterializedCharacterAutomaticEventCandidate",
+      );
       for (const entityId of asStringArray(
         expectProperty(
-          proposal,
+          event.candidate,
           "target_entity_ids",
-          "CharacterAutomaticEventProposal",
+          "MaterializedCharacterAutomaticEventCandidate",
         ),
-        "CharacterAutomaticEventProposal.target_entity_ids",
+        "MaterializedCharacterAutomaticEventCandidate.target_entity_ids",
       )) {
-        const events = grouped.get(entityId);
-        if (events === undefined) {
-          grouped.set(entityId, [stimulus]);
-        } else {
-          events.push(stimulus);
+        let group = grouped.get(entityId);
+        if (group === undefined) {
+          group = {
+            events: [],
+            eventOrdinalByProposalId: new Map<string, number>(),
+          };
+          grouped.set(entityId, group);
         }
+        if (group.eventOrdinalByProposalId.has(proposalId)) {
+          throw new EngineFault(
+            "day_cycle.orchestration.reaction_event_duplicate",
+            "A character reaction run cannot contain the same automatic proposal twice",
+            { entity_id: entityId, proposal_id: proposalId },
+          );
+        }
+        group.eventOrdinalByProposalId.set(proposalId, group.events.length);
+        group.events.push(event.characterEvent);
       }
     }
 
     const runs = await Promise.all(
-      [...grouped.entries()].map(async ([entityId, events]) => {
+      [...grouped.entries()].map(async ([entityId, group]) => {
         const requestId = await this.#identities.reserve({
           worldId,
           day,
@@ -360,11 +437,15 @@ class DefaultDayCycleOrchestrator implements DayCycleOrchestrator {
         const receipt = await this.#models.characterReact({
           worldId,
           entityId,
-          events: Object.freeze([...events]),
+          day,
+          events: Object.freeze([...group.events]),
           requestId,
-          model_profile_id: this.#characterReactModelProfileId,
         });
-        return Object.freeze({ entityId, receipt });
+        return Object.freeze({
+          entityId,
+          receipt,
+          eventOrdinalByProposalId: group.eventOrdinalByProposalId,
+        });
       }),
     );
     return new Map(runs.map((run) => [run.entityId, run]));
@@ -373,15 +454,16 @@ class DefaultDayCycleOrchestrator implements DayCycleOrchestrator {
   async #resolveAutomaticEvents(input: {
     readonly worldId: string;
     readonly day: number;
-    readonly automaticEvents: readonly JsonObject[];
+    readonly automaticEvents: readonly MaterializedAutomaticEventRun[];
     readonly directorReceipt: VerifiedModelInvocationReceipt;
     readonly reactions: ReadonlyMap<string, CharacterReactionRun>;
   }): Promise<void> {
-    for (const proposal of input.automaticEvents) {
+    for (const event of input.automaticEvents) {
+      const proposal = event.candidate;
       const proposalId = expectString(
         proposal,
         "proposal_id",
-        "AutomaticEventProposal",
+        "MaterializedAutomaticEventCandidate",
       );
       const requestId = await this.#identities.reserve({
         worldId: input.worldId,
@@ -392,7 +474,7 @@ class DefaultDayCycleOrchestrator implements DayCycleOrchestrator {
       const proposalKind = expectString(
         proposal,
         "proposal_kind",
-        "AutomaticEventProposal",
+        "MaterializedAutomaticEventCandidate",
       );
       if (proposalKind === "automatic.world") {
         const receipt = await this.#executeRulePlugin({
@@ -404,7 +486,8 @@ class DefaultDayCycleOrchestrator implements DayCycleOrchestrator {
           assertBasis: (state) =>
             assertSettlementDay(state, input.day),
           requestInput: Object.freeze({
-            proposal,
+            draft_ordinal: event.draftOrdinal,
+            candidate: proposal,
             model_proof: input.directorReceipt.proof.value,
           }),
         });
@@ -427,9 +510,9 @@ class DefaultDayCycleOrchestrator implements DayCycleOrchestrator {
         expectProperty(
           proposal,
           "target_entity_ids",
-          "CharacterAutomaticEventProposal",
+          "MaterializedCharacterAutomaticEventCandidate",
         ),
-        "CharacterAutomaticEventProposal.target_entity_ids",
+        "MaterializedCharacterAutomaticEventCandidate.target_entity_ids",
       );
       const targetRuns = targetIds.map((entityId) => {
         const run = input.reactions.get(entityId);
@@ -443,7 +526,7 @@ class DefaultDayCycleOrchestrator implements DayCycleOrchestrator {
         return run;
       });
       const batches = targetRuns.map((run) =>
-        createReactionBatch(input.worldId, proposalId, run),
+        createReactionBatch(proposalId, run),
       );
       const modelInvocations = [
         input.directorReceipt,
@@ -458,7 +541,8 @@ class DefaultDayCycleOrchestrator implements DayCycleOrchestrator {
         assertBasis: (state) =>
           assertSettlementDay(state, input.day),
         requestInput: Object.freeze({
-          proposal,
+          draft_ordinal: event.draftOrdinal,
+          candidate: proposal,
           character_reactions: Object.freeze(batches),
           director_proof: input.directorReceipt.proof.value,
         }),
@@ -725,8 +809,8 @@ function requireProposal(
     "RulePluginResponse.output",
   );
   throw new EngineFault(
-    "day_cycle.orchestration.stage_unresolved",
-    "A required day-cycle RulePlugin stage did not produce a ContentPacket proposal",
+    "day_cycle.orchestration.required_operation_unresolved",
+    "A required day-cycle RulePlugin operation did not produce a ContentPacket proposal",
     {
       operation_kind: operationKind,
       output_kind: expectString(
@@ -777,42 +861,679 @@ function readDirectorAutomaticEvents(
   );
 }
 
-function toCharacterStimulus(proposal: JsonObject): JsonObject {
-  return Object.freeze({
-    stimulus_kind: "automatic",
-    proposal_id: expectString(
-      proposal,
-      "proposal_id",
-      "CharacterAutomaticEventProposal",
+function materializeAutomaticEvents(input: {
+  readonly worldId: string;
+  readonly expectedDay: number;
+  readonly locale: string;
+  readonly receipt: VerifiedModelInvocationReceipt;
+  readonly drafts: readonly JsonObject[];
+  readonly proposalIdentities: readonly DailySettlementProposalIdentity[];
+}): readonly MaterializedAutomaticEventRun[] {
+  const requestInput = modelRequestInput(input.receipt);
+  const worldView = expectJsonObject(
+    expectProperty(
+      requestInput,
+      "world_view",
+      "DirectorDailySettlementInput",
     ),
-    day: expectInteger(
-      proposal,
-      "day",
-      "CharacterAutomaticEventProposal",
-    ),
-    situation: expectProperty(
-      proposal,
+    "DirectorDailySettlementInput.world_view",
+  );
+  const actors = asObjectArray(
+    expectProperty(worldView, "actors", "DirectorWorldView"),
+    "DirectorWorldView.actors",
+  );
+  const snapshot = input.receipt.snapshot.value;
+  const worldState = expectJsonObject(
+    expectProperty(snapshot, "world_state", "WorldSnapshot"),
+    "WorldSnapshot.world_state",
+  );
+  const dayCycle = expectJsonObject(
+    expectProperty(worldState, "day_cycle", "WorldState"),
+    "WorldState.day_cycle",
+  );
+  const snapshotWorldId = expectString(
+    snapshot,
+    "world_id",
+    "WorldSnapshot",
+  );
+  const snapshotDay = expectInteger(dayCycle, "day", "DayCycleState");
+  const viewDay = expectInteger(worldView, "day", "DirectorWorldView");
+  if (
+    snapshotWorldId !== input.worldId ||
+    input.receipt.worldId !== input.worldId ||
+    snapshotDay !== input.expectedDay ||
+    viewDay !== input.expectedDay
+  ) {
+    throw new EngineFault(
+      "day_cycle.orchestration.director_basis_mismatch",
+      "Verified daily Director request does not match its settlement basis",
+      {
+        world_id: input.worldId,
+        snapshot_world_id: snapshotWorldId,
+        receipt_world_id: input.receipt.worldId,
+        expected_day: input.expectedDay,
+        snapshot_day: snapshotDay,
+        view_day: viewDay,
+      },
+    );
+  }
+  if (input.proposalIdentities.length !== input.drafts.length) {
+    throw new EngineFault(
+      "day_cycle.orchestration.proposal_identity_count_mismatch",
+      "Daily proposal identities do not cover the verified Director drafts",
+      {
+        model_request_id: expectString(
+          input.receipt.proof.value,
+          "request_id",
+          "VerifiedModelOutputRef",
+        ),
+        draft_count: input.drafts.length,
+        identity_count: input.proposalIdentities.length,
+      },
+    );
+  }
+
+  return Object.freeze(
+    input.drafts.map((draft, draftOrdinal) => {
+      const identity = input.proposalIdentities[draftOrdinal];
+      if (
+        identity === undefined ||
+        identity.ordinal !== draftOrdinal
+      ) {
+        throw new EngineFault(
+          "day_cycle.orchestration.proposal_identity_ordinal_mismatch",
+          "Daily proposal identity is not aligned with its Director draft",
+          {
+            draft_ordinal: draftOrdinal,
+            identity_ordinal:
+              identity === undefined ? null : identity.ordinal,
+          },
+        );
+      }
+      const candidate = materializeAutomaticEventCandidate({
+        worldId: input.worldId,
+        day: input.expectedDay,
+        locale: input.locale,
+        worldState,
+        actors,
+        draft,
+        proposalId: identity.proposalId,
+      });
+      return Object.freeze({
+        draftOrdinal,
+        candidate,
+        characterEvent:
+          expectString(
+            candidate,
+            "proposal_kind",
+            "MaterializedAutomaticEventCandidate",
+          ) === "automatic.character"
+            ? projectCharacterReactEvent(candidate)
+            : undefined,
+      });
+    }),
+  );
+}
+
+function materializeAutomaticEventCandidate(input: {
+  readonly worldId: string;
+  readonly day: number;
+  readonly locale: string;
+  readonly worldState: JsonObject;
+  readonly actors: readonly JsonObject[];
+  readonly draft: JsonObject;
+  readonly proposalId: string;
+}): JsonObject {
+  const situationDraft = expectJsonObject(
+    expectProperty(
+      input.draft,
       "situation",
-      "CharacterAutomaticEventProposal",
+      "AutomaticEventSemanticDraft",
     ),
-    candidate_outcomes: expectProperty(
-      proposal,
+    "AutomaticEventSemanticDraft.situation",
+  );
+  const situationActorIndices = readModelIndices(
+    situationDraft,
+    "subject_actor_indices",
+    "EventSituationSemanticDraft",
+    input.actors.length,
+  );
+  const situationActors = situationActorIndices.map(
+    (actorIndex) => input.actors[actorIndex] as JsonObject,
+  );
+  const situationEntityRefs = Object.freeze(
+    situationActors.map((actor, actorOrdinal) =>
+      materializeActorEntityRef({
+        worldId: input.worldId,
+        worldState: input.worldState,
+        actor,
+        label: `AutomaticEventSemanticDraft.situation.actors[${actorOrdinal}]`,
+      }),
+    ),
+  );
+  const outcomeDrafts = asObjectArray(
+    expectProperty(
+      input.draft,
       "candidate_outcomes",
-      "CharacterAutomaticEventProposal",
+      "AutomaticEventSemanticDraft",
     ),
-    agency_gates: expectProperty(
-      proposal,
+    "AutomaticEventSemanticDraft.candidate_outcomes",
+  );
+  const eventScope = expectString(
+    input.draft,
+    "event_scope",
+    "AutomaticEventSemanticDraft",
+  );
+  const gateDrafts =
+    eventScope === "character"
+      ? asObjectArray(
+          expectProperty(
+            input.draft,
+            "agency_gates",
+            "CharacterAutomaticEventSemanticDraft",
+          ),
+          "CharacterAutomaticEventSemanticDraft.agency_gates",
+        )
+      : eventScope === "world"
+        ? Object.freeze([] as JsonObject[])
+        : undefined;
+  if (gateDrafts === undefined) {
+    throw new EngineFault(
+      "day_cycle.orchestration.event_scope_invalid",
+      "Verified daily Director draft has an unknown event scope",
+      { proposal_id: input.proposalId, event_scope: eventScope },
+    );
+  }
+  const outcomeIds = outcomeDrafts.map(
+    (_, ordinal) => `outcome_${ordinal}`,
+  );
+  const gateIds = gateDrafts.map((_, ordinal) => `gate_${ordinal}`);
+  const candidateOutcomes = Object.freeze(
+    outcomeDrafts.map((draft, ordinal) =>
+      materializeAutomaticOutcome({
+        draft,
+        outcomeId: outcomeIds[ordinal] as string,
+        gateIds,
+        situationEntityRefs,
+      }),
+    ),
+  );
+  const situation = Object.freeze({
+    event_type: expectString(
+      situationDraft,
+      "event_type",
+      "EventSituationSemanticDraft",
+    ),
+    summary: localizedText(
+      input.locale,
+      expectString(
+        situationDraft,
+        "summary",
+        "EventSituationSemanticDraft",
+      ),
+    ),
+    subjects: Object.freeze(
+      situationEntityRefs.map(subjectFromEntityRef),
+    ),
+    context: expectJsonObject(
+      expectProperty(
+        situationDraft,
+        "context",
+        "EventSituationSemanticDraft",
+      ),
+      "EventSituationSemanticDraft.context",
+    ),
+  });
+
+  if (eventScope === "world") {
+    return Object.freeze({
+      proposal_kind: "automatic.world",
+      proposal_id: input.proposalId,
+      day: input.day,
+      situation,
+      candidate_outcomes: candidateOutcomes,
+    });
+  }
+
+  const targetEntityIds = Object.freeze(
+    readModelIndices(
+      input.draft,
+      "target_subject_indices",
+      "CharacterAutomaticEventSemanticDraft",
+      situationEntityRefs.length,
+    ).map((ordinal) =>
+      expectString(
+        situationEntityRefs[ordinal] as JsonObject,
+        "entity_id",
+        "EntityRef",
+      ),
+    ),
+  );
+  const agencyGates = Object.freeze(
+    gateDrafts.map((gate, ordinal) =>
+      materializeAutomaticAgencyGate({
+        draft: gate,
+        gateId: gateIds[ordinal] as string,
+        outcomeIds,
+        situationEntityRefs,
+      }),
+    ),
+  );
+  return Object.freeze({
+    proposal_kind: "automatic.character",
+    proposal_id: input.proposalId,
+    day: input.day,
+    situation,
+    target_entity_ids: targetEntityIds,
+    candidate_outcomes: candidateOutcomes,
+    agency_gates: agencyGates,
+  });
+}
+
+function materializeAutomaticOutcome(input: {
+  readonly draft: JsonObject;
+  readonly outcomeId: string;
+  readonly gateIds: readonly string[];
+  readonly situationEntityRefs: readonly JsonObject[];
+}): JsonObject {
+  const gateIndex = input.draft["requires_agency_gate_index"];
+  let gateId: string | undefined;
+  if (gateIndex !== undefined) {
+    gateId = input.gateIds[
+      readModelIndex(
+        gateIndex,
+        "SemanticOutcomeDraft.requires_agency_gate_index",
+        input.gateIds.length,
+      )
+    ];
+  }
+  return Object.freeze({
+    outcome_id: input.outcomeId,
+    outcome_type: expectString(
+      input.draft,
+      "outcome_type",
+      "SemanticOutcomeDraft",
+    ),
+    subjects: Object.freeze(
+      readModelIndices(
+        input.draft,
+        "subject_indices",
+        "SemanticOutcomeDraft",
+        input.situationEntityRefs.length,
+      ).map((ordinal) =>
+        subjectFromEntityRef(
+          input.situationEntityRefs[ordinal] as JsonObject,
+        ),
+      ),
+    ),
+    parameters: expectJsonObject(
+      expectProperty(
+        input.draft,
+        "parameters",
+        "SemanticOutcomeDraft",
+      ),
+      "SemanticOutcomeDraft.parameters",
+    ),
+    ...(gateId === undefined
+      ? {}
+      : { requires_agency_gate_id: gateId }),
+  });
+}
+
+function materializeAutomaticAgencyGate(input: {
+  readonly draft: JsonObject;
+  readonly gateId: string;
+  readonly outcomeIds: readonly string[];
+  readonly situationEntityRefs: readonly JsonObject[];
+}): JsonObject {
+  const requirementDraft = expectJsonObject(
+    expectProperty(
+      input.draft,
+      "requirement",
+      "AutomaticAgencyGateSemanticDraft",
+    ),
+    "AutomaticAgencyGateSemanticDraft.requirement",
+  );
+  return Object.freeze({
+    gate_id: input.gateId,
+    protected_outcome_ids: Object.freeze(
+      readModelIndices(
+        input.draft,
+        "protected_outcome_indices",
+        "AutomaticAgencyGateSemanticDraft",
+        input.outcomeIds.length,
+      ).map((ordinal) => input.outcomeIds[ordinal] as string),
+    ),
+    participants: Object.freeze(
+      readModelIndices(
+        input.draft,
+        "participant_subject_indices",
+        "AutomaticAgencyGateSemanticDraft",
+        input.situationEntityRefs.length,
+      ).map(
+        (ordinal) =>
+          input.situationEntityRefs[ordinal] as JsonObject,
+      ),
+    ),
+    requirement: Object.freeze({
+      semantic_intent: expectString(
+        requirementDraft,
+        "semantic_intent",
+        "AgencyRequirementSemanticDraft",
+      ),
+      subjects: Object.freeze(
+        readModelIndices(
+          requirementDraft,
+          "subject_indices",
+          "AgencyRequirementSemanticDraft",
+          input.situationEntityRefs.length,
+        ).map((ordinal) =>
+          subjectFromEntityRef(
+            input.situationEntityRefs[ordinal] as JsonObject,
+          ),
+        ),
+      ),
+      terms: expectJsonObject(
+        expectProperty(
+          requirementDraft,
+          "terms",
+          "AgencyRequirementSemanticDraft",
+        ),
+        "AgencyRequirementSemanticDraft.terms",
+      ),
+    }),
+    policy: expectJsonObject(
+      expectProperty(
+        input.draft,
+        "policy",
+        "AutomaticAgencyGateSemanticDraft",
+      ),
+      "AutomaticAgencyGateSemanticDraft.policy",
+    ),
+    commitment_evidence: Object.freeze([]),
+  });
+}
+
+function materializeActorEntityRef(input: {
+  readonly worldId: string;
+  readonly worldState: JsonObject;
+  readonly actor: JsonObject;
+  readonly label: string;
+}): JsonObject {
+  const entityId = expectString(
+    input.actor,
+    "entity_id",
+    "DirectorActorView",
+  );
+  const matches = asObjectArray(
+    expectProperty(input.worldState, "entities", "WorldState"),
+    "WorldState.entities",
+  ).filter(
+    (entity) =>
+      expectString(entity, "entity_id", "EntityState") === entityId,
+  );
+  const entity = matches[0];
+  if (matches.length !== 1 || entity === undefined) {
+    throw new EngineFault(
+      "day_cycle.orchestration.actor_resolution_invalid",
+      "Verified Director actor does not resolve exactly once in its locked WorldState",
+      { label: input.label, entity_id: entityId, matches: matches.length },
+    );
+  }
+  return Object.freeze({
+    world_id: input.worldId,
+    entity_id: entityId,
+    expected_revision: expectInteger(entity, "revision", "EntityState"),
+  });
+}
+
+function subjectFromEntityRef(entity: JsonObject): JsonObject {
+  return Object.freeze({ kind: "entity", entity });
+}
+
+function projectCharacterReactEvent(candidate: JsonObject): JsonObject {
+  const situation = expectJsonObject(
+    expectProperty(
+      candidate,
+      "situation",
+      "MaterializedCharacterAutomaticEventCandidate",
+    ),
+    "MaterializedCharacterAutomaticEventCandidate.situation",
+  );
+  const outcomes = asObjectArray(
+    expectProperty(
+      candidate,
+      "candidate_outcomes",
+      "MaterializedCharacterAutomaticEventCandidate",
+    ),
+    "MaterializedCharacterAutomaticEventCandidate.candidate_outcomes",
+  );
+  const gates = asObjectArray(
+    expectProperty(
+      candidate,
       "agency_gates",
-      "CharacterAutomaticEventProposal",
+      "MaterializedCharacterAutomaticEventCandidate",
+    ),
+    "MaterializedCharacterAutomaticEventCandidate.agency_gates",
+  );
+  return Object.freeze({
+    situation: Object.freeze({
+      event_type: expectString(
+        situation,
+        "event_type",
+        "MaterializedEventSituationCandidate",
+      ),
+      summary: expectJsonObject(
+        expectProperty(
+          situation,
+          "summary",
+          "MaterializedEventSituationCandidate",
+        ),
+        "MaterializedEventSituationCandidate.summary",
+      ),
+      subject_entity_ids: Object.freeze(
+        asObjectArray(
+          expectProperty(
+            situation,
+            "subjects",
+            "MaterializedEventSituationCandidate",
+          ),
+          "MaterializedEventSituationCandidate.subjects",
+        ).map((subject, ordinal) =>
+          entityIdFromSubject(
+            subject,
+            `MaterializedEventSituationCandidate.subjects[${ordinal}]`,
+          ),
+        ),
+      ),
+      context: expectJsonObject(
+        expectProperty(
+          situation,
+          "context",
+          "MaterializedEventSituationCandidate",
+        ),
+        "MaterializedEventSituationCandidate.context",
+      ),
+    }),
+    candidate_outcomes: Object.freeze(
+      outcomes.map((outcome, ordinal) =>
+        projectCharacterReactOutcome(outcome, ordinal),
+      ),
+    ),
+    agency_gates: Object.freeze(
+      gates.map((gate, ordinal) =>
+        projectCharacterReactGate(gate, ordinal),
+      ),
     ),
   });
 }
 
+function projectCharacterReactOutcome(
+  outcome: JsonObject,
+  ordinal: number,
+): JsonObject {
+  const requiresGateId = outcome["requires_agency_gate_id"];
+  return Object.freeze({
+    outcome_id: expectString(
+      outcome,
+      "outcome_id",
+      "MaterializedSemanticOutcomeCandidate",
+    ),
+    outcome_type: expectString(
+      outcome,
+      "outcome_type",
+      "MaterializedSemanticOutcomeCandidate",
+    ),
+    subject_entity_ids: Object.freeze(
+      asObjectArray(
+        expectProperty(
+          outcome,
+          "subjects",
+          "MaterializedSemanticOutcomeCandidate",
+        ),
+        "MaterializedSemanticOutcomeCandidate.subjects",
+      ).map((subject, subjectOrdinal) =>
+        entityIdFromSubject(
+          subject,
+          `candidate_outcomes[${ordinal}].subjects[${subjectOrdinal}]`,
+        ),
+      ),
+    ),
+    parameters: expectJsonObject(
+      expectProperty(
+        outcome,
+        "parameters",
+        "MaterializedSemanticOutcomeCandidate",
+      ),
+      "MaterializedSemanticOutcomeCandidate.parameters",
+    ),
+    ...(requiresGateId === undefined
+      ? {}
+      : {
+          requires_agency_gate_id: expectString(
+            outcome,
+            "requires_agency_gate_id",
+            "MaterializedSemanticOutcomeCandidate",
+          ),
+        }),
+  });
+}
+
+function projectCharacterReactGate(
+  gate: JsonObject,
+  ordinal: number,
+): JsonObject {
+  const requirement = expectJsonObject(
+    expectProperty(
+      gate,
+      "requirement",
+      "MaterializedAgencyGateCandidate",
+    ),
+    "MaterializedAgencyGateCandidate.requirement",
+  );
+  return Object.freeze({
+    gate_id: expectString(
+      gate,
+      "gate_id",
+      "MaterializedAgencyGateCandidate",
+    ),
+    protected_outcome_ids: Object.freeze(
+      asStringArray(
+        expectProperty(
+          gate,
+          "protected_outcome_ids",
+          "MaterializedAgencyGateCandidate",
+        ),
+        "MaterializedAgencyGateCandidate.protected_outcome_ids",
+      ),
+    ),
+    participant_entity_ids: Object.freeze(
+      asObjectArray(
+        expectProperty(
+          gate,
+          "participants",
+          "MaterializedAgencyGateCandidate",
+        ),
+        "MaterializedAgencyGateCandidate.participants",
+      ).map((participant, participantOrdinal) =>
+        expectString(
+          participant,
+          "entity_id",
+          `agency_gates[${ordinal}].participants[${participantOrdinal}]`,
+        ),
+      ),
+    ),
+    requirement: Object.freeze({
+      semantic_intent: expectString(
+        requirement,
+        "semantic_intent",
+        "AgencyRequirement",
+      ),
+      subject_entity_ids: Object.freeze(
+        asObjectArray(
+          expectProperty(
+            requirement,
+            "subjects",
+            "AgencyRequirement",
+          ),
+          "AgencyRequirement.subjects",
+        ).map((subject, subjectOrdinal) =>
+          entityIdFromSubject(
+            subject,
+            `agency_gates[${ordinal}].requirement.subjects[${subjectOrdinal}]`,
+          ),
+        ),
+      ),
+      terms: expectJsonObject(
+        expectProperty(requirement, "terms", "AgencyRequirement"),
+        "AgencyRequirement.terms",
+      ),
+    }),
+    policy: expectJsonObject(
+      expectProperty(gate, "policy", "MaterializedAgencyGateCandidate"),
+      "MaterializedAgencyGateCandidate.policy",
+    ),
+  });
+}
+
+function entityIdFromSubject(subject: JsonObject, path: string): string {
+  if (expectString(subject, "kind", path) !== "entity") {
+    throw new EngineFault(
+      "day_cycle.orchestration.character_event_subject_invalid",
+      "Character reaction events can contain only entity subjects",
+      { path },
+    );
+  }
+  return expectString(
+    expectJsonObject(
+      expectProperty(subject, "entity", path),
+      `${path}.entity`,
+    ),
+    "entity_id",
+    "EntityRef",
+  );
+}
+
 function createReactionBatch(
-  worldId: string,
   proposalId: string,
   run: CharacterReactionRun,
 ): JsonObject {
+  const requestInput = modelRequestInput(run.receipt);
+  const events = asObjectArray(
+    expectProperty(requestInput, "events", "CharacterReactInput"),
+    "CharacterReactInput.events",
+  );
+  const draftOrdinal = run.eventOrdinalByProposalId.get(proposalId);
+  if (draftOrdinal === undefined) {
+    throw new EngineFault(
+      "day_cycle.orchestration.reaction_coverage_invalid",
+      "Character reaction run has no locally owned event ordinal for the automatic proposal",
+      {
+        proposal_id: proposalId,
+        entity_id: run.entityId,
+      },
+    );
+  }
   const output = expectJsonObject(
     expectProperty(run.receipt.response.value, "output", "ModelResponse"),
     "ModelResponse.output",
@@ -820,37 +1541,249 @@ function createReactionBatch(
   const reactions = asObjectArray(
     expectProperty(output, "reactions", "CharacterReactOutput"),
     "CharacterReactOutput.reactions",
-  ).filter((reaction) => {
-    const source = expectJsonObject(
-      expectProperty(
-        reaction,
-        "source_event",
-        "CharacterReactionProposal",
-      ),
-      "CharacterReactionProposal.source_event",
-    );
-    return (
-      expectString(source, "proposal_id", "CharacterEventRef") === proposalId
-    );
-  });
-  if (reactions.length !== 1) {
+  );
+  if (reactions.length !== events.length) {
     throw new EngineFault(
-      "day_cycle.orchestration.reaction_coverage_invalid",
-      "Character reaction output must contain exactly one reaction for the automatic event",
+      "day_cycle.orchestration.reaction_ordinal_mismatch",
+      "Character reaction drafts must align one-to-one with request events",
+      {
+        entity_id: run.entityId,
+        event_count: events.length,
+        reaction_count: reactions.length,
+      },
+    );
+  }
+  const reaction = reactions[draftOrdinal];
+  const event = events[draftOrdinal];
+  if (reaction === undefined || event === undefined) {
+    throw new EngineFault(
+      "day_cycle.orchestration.reaction_ordinal_missing",
+      "Character reaction ordinal has no matching event and draft",
       {
         proposal_id: proposalId,
         entity_id: run.entityId,
-        reactions: reactions.length,
+        draft_ordinal: draftOrdinal,
+      },
+    );
+  }
+  const subjectiveView = expectJsonObject(
+    expectProperty(
+      requestInput,
+      "subjective_view",
+      "CharacterReactInput",
+    ),
+    "CharacterReactInput.subjective_view",
+  );
+  const character = expectJsonObject(
+    expectProperty(
+      subjectiveView,
+      "character",
+      "CharacterSubjectiveView",
+    ),
+    "CharacterSubjectiveView.character",
+  );
+  if (
+    expectString(character, "entity_id", "EntityRef") !== run.entityId
+  ) {
+    throw new EngineFault(
+      "day_cycle.orchestration.reaction_character_mismatch",
+      "Character reaction receipt belongs to another character",
+      {
+        proposal_id: proposalId,
+        expected_entity_id: run.entityId,
+        receipt_entity_id: expectString(
+          character,
+          "entity_id",
+          "EntityRef",
+        ),
       },
     );
   }
   return Object.freeze({
-    character: Object.freeze({
-      world_id: worldId,
-      entity_id: run.entityId,
-    }),
+    character,
     model_proof: run.receipt.proof.value,
-    reactions: Object.freeze(reactions),
+    candidates: Object.freeze([
+      Object.freeze({
+        draft_ordinal: draftOrdinal,
+        candidate: materializeCharacterReactionCandidate({
+          draft: reaction,
+          event,
+          subjectiveView,
+        }),
+      }),
+    ]),
+  });
+}
+
+function materializeCharacterReactionCandidate(input: {
+  readonly draft: JsonObject;
+  readonly event: JsonObject;
+  readonly subjectiveView: JsonObject;
+}): JsonObject {
+  const gates = asObjectArray(
+    expectProperty(
+      input.event,
+      "agency_gates",
+      "CharacterReactEventInput",
+    ),
+    "CharacterReactEventInput.agency_gates",
+  );
+  const gateIds = gates.map((gate) =>
+    expectString(gate, "gate_id", "CharacterReactAgencyGateInput"),
+  );
+  const agencyDecisions = Object.freeze(
+    asObjectArray(
+      expectProperty(
+        input.draft,
+        "agency_decisions",
+        "CharacterReactionSemanticDraft",
+      ),
+      "CharacterReactionSemanticDraft.agency_decisions",
+    ).map((decision, ordinal) => {
+      const gateIndex = readModelIndex(
+        expectProperty(
+          decision,
+          "gate_index",
+          "AgencyDecisionSemanticDraft",
+        ),
+        `AgencyDecisionSemanticDraft[${ordinal}].gate_index`,
+        gateIds.length,
+      );
+      return Object.freeze({
+        gate_id: gateIds[gateIndex] as string,
+        stance: expectString(
+          decision,
+          "stance",
+          "AgencyDecisionSemanticDraft",
+        ),
+        terms: expectJsonObject(
+          expectProperty(
+            decision,
+            "terms",
+            "AgencyDecisionSemanticDraft",
+          ),
+          "AgencyDecisionSemanticDraft.terms",
+        ),
+      });
+    }),
+  );
+  const selfOutcomes = Object.freeze(
+    asObjectArray(
+      expectProperty(
+        input.draft,
+        "self_outcomes",
+        "CharacterReactionSemanticDraft",
+      ),
+      "CharacterReactionSemanticDraft.self_outcomes",
+    ).map((outcome, ordinal) =>
+      Object.freeze({
+        outcome_id: `self_outcome_${ordinal}`,
+        outcome_type: expectString(
+          outcome,
+          "outcome_type",
+          "SelfSubjectiveOutcomeSemanticDraft",
+        ),
+        parameters: expectJsonObject(
+          expectProperty(
+            outcome,
+            "parameters",
+            "SelfSubjectiveOutcomeSemanticDraft",
+          ),
+          "SelfSubjectiveOutcomeSemanticDraft.parameters",
+        ),
+      }),
+    ),
+  );
+  return Object.freeze({
+    impact: expectString(
+      input.draft,
+      "impact",
+      "CharacterReactionSemanticDraft",
+    ),
+    agency_decisions: agencyDecisions,
+    self_outcomes: selfOutcomes,
+    machine_decision: materializeMachineDecision(
+      expectJsonObject(
+        expectProperty(
+          input.draft,
+          "machine_decision",
+          "CharacterReactionSemanticDraft",
+        ),
+        "CharacterReactionSemanticDraft.machine_decision",
+      ),
+      input.subjectiveView,
+    ),
+    source_event: Object.freeze({
+      source_kind: "automatic",
+      proposal_id: expectString(
+        input.event,
+        "proposal_id",
+        "CharacterReactEventInput",
+      ),
+    }),
+  });
+}
+
+function materializeMachineDecision(
+  draft: JsonObject,
+  subjectiveView: JsonObject,
+): JsonObject {
+  const decisionKind = expectString(
+    draft,
+    "decision_kind",
+    "MachineDecisionSelector",
+  );
+  if (decisionKind === "keep") {
+    return Object.freeze({ decision_kind: "keep" });
+  }
+  if (decisionKind !== "transition") {
+    throw new EngineFault(
+      "day_cycle.orchestration.machine_decision_invalid",
+      "Character reaction has an unknown machine decision",
+      { decision_kind: decisionKind },
+    );
+  }
+  const actionMachine = expectJsonObject(
+    expectProperty(
+      subjectiveView,
+      "action_machine",
+      "CharacterSubjectiveView",
+    ),
+    "CharacterSubjectiveView.action_machine",
+  );
+  const outgoingTransitions = asObjectArray(
+    expectProperty(
+      actionMachine,
+      "outgoing_transitions",
+      "StateMachineModelView",
+    ),
+    "StateMachineModelView.outgoing_transitions",
+  );
+  const transitionIndex = readModelIndex(
+    expectProperty(
+      draft,
+      "transition_index",
+      "MachineDecisionSelector",
+    ),
+    "MachineDecisionSelector.transition_index",
+    outgoingTransitions.length,
+  );
+  const transitionView = outgoingTransitions[transitionIndex] as JsonObject;
+  const transition = expectJsonObject(
+    expectProperty(
+      transitionView,
+      "transition",
+      "StateMachineTransitionModelView",
+    ),
+    "StateMachineTransitionModelView.transition",
+  );
+  return Object.freeze({
+    decision_kind: "transition",
+    transition_id: expectString(
+      transition,
+      "transition_id",
+      "MachineTransitionDefinition",
+    ),
   });
 }
 
@@ -926,31 +1859,36 @@ function assertPlayerBudget(
   }
 }
 
-function assertMachineContentLock(
-  state: DayCycleState,
-  machineRef: JsonObject,
-  machineId: string,
-): void {
-  if (
-    expectString(machineRef, "catalog_kind", "StateMachineCatalogRef") !==
-      "state_machine" ||
-    expectString(machineRef, "bundle_id", "StateMachineCatalogRef") !==
-      state.binding.contentBinding.packId ||
-    expectString(
-      machineRef,
-      "bundle_digest",
-      "StateMachineCatalogRef",
-    ) !== state.binding.contentBinding.bundleDigest
-  ) {
+function hasRetiredCharacterOwner(
+  worldState: JsonObject,
+  instance: JsonObject,
+): boolean {
+  const owner = expectJsonObject(
+    expectProperty(instance, "owner", "StateMachineInstanceState"),
+    "StateMachineInstanceState.owner",
+  );
+  if (expectString(owner, "owner_kind", "StateMachineOwner") !== "character") {
+    return false;
+  }
+  const entityId = expectString(owner, "entity_id", "StateMachineOwner");
+  const matches = asObjectArray(
+    expectProperty(worldState, "entities", "WorldState"),
+    "WorldState.entities",
+  ).filter(
+    (entity) =>
+      expectString(entity, "entity_id", "EntityState") === entityId,
+  );
+  if (matches.length !== 1) {
     throw new EngineFault(
-      "day_cycle.orchestration.machine_content_mismatch",
-      "Runtime state machine does not belong to the world's locked ContentBundle",
-      {
-        world_id: state.worldId,
-        machine_id: machineId,
-      },
+      "day_cycle.orchestration.machine_owner_invalid",
+      "Character-owned state machine must resolve to exactly one Entity",
+      { entity_id: entityId, matches: matches.length },
     );
   }
+  return (
+    expectString(matches[0] as JsonObject, "state", "EntityState") ===
+    "retired"
+  );
 }
 
 function assertSameAutonomousDay(
@@ -963,7 +1901,7 @@ function assertSameAutonomousDay(
     actual.phase !== "autonomous"
   ) {
     throw new EngineFault(
-      "day_cycle.orchestration.stage_basis_changed",
+      "day_cycle.orchestration.basis_changed",
       "State-machine advancement no longer owns the expected autonomous day",
       {
         world_id: expected.worldId,
@@ -978,7 +1916,7 @@ function assertSameAutonomousDay(
 function assertSettlementDay(state: DayCycleState, day: number): void {
   if (state.day !== day || state.phase !== "director_settlement") {
     throw new EngineFault(
-      "day_cycle.orchestration.stage_basis_changed",
+      "day_cycle.orchestration.basis_changed",
       "Automatic event resolution no longer owns the expected Director settlement day",
       {
         world_id: state.worldId,
@@ -1052,6 +1990,68 @@ function playerResult(state: DayCycleState): DayCycleAdvanceResult {
     day: state.day,
     phase: "player" as const,
   });
+}
+
+function modelRequestInput(
+  receipt: VerifiedModelInvocationReceipt,
+): JsonObject {
+  return expectJsonObject(
+    expectProperty(receipt.request.value, "input", "ModelRequest"),
+    "ModelRequest.input",
+  );
+}
+
+function localizedText(locale: string, text: string): JsonObject {
+  return Object.freeze({ [locale]: text });
+}
+
+function readModelIndices(
+  object: JsonObject,
+  field: string,
+  label: string,
+  collectionLength: number,
+): readonly number[] {
+  const value = expectProperty(object, field, label);
+  if (!Array.isArray(value)) {
+    throw new EngineFault(
+      "day_cycle.orchestration.model_index_array_invalid",
+      `${label}.${field} must be an array`,
+      { field },
+    );
+  }
+  return Object.freeze(
+    value.map((entry, ordinal) =>
+      readModelIndex(
+        entry,
+        `${label}.${field}[${ordinal}]`,
+        collectionLength,
+      ),
+    ),
+  );
+}
+
+function readModelIndex(
+  value: JsonValue,
+  path: string,
+  collectionLength: number,
+): number {
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value < 0 ||
+    value >= collectionLength
+  ) {
+    throw new EngineFault(
+      "day_cycle.orchestration.model_index_out_of_range",
+      `${path} is outside its verified collection`,
+      {
+        path,
+        index: value,
+        collection_length: collectionLength,
+      },
+    );
+  }
+  return value;
 }
 
 function asObjectArray(

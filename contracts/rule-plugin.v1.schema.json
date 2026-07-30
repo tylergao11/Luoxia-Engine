@@ -153,7 +153,8 @@
       "additionalProperties": false,
       "required": [
         "definition_id",
-        "proposal",
+        "draft_ordinal",
+        "candidate",
         "constraints",
         "model_proof"
       ],
@@ -161,7 +162,11 @@
         "definition_id": {
           "$ref": "common.v1.schema.json#/$defs/Uuid"
         },
-        "proposal": {
+        "draft_ordinal": {
+          "type": "integer",
+          "const": 0
+        },
+        "candidate": {
           "$ref": "world-runtime.v1.schema.json#/$defs/DynamicDefinitionProposal"
         },
         "constraints": {
@@ -171,7 +176,7 @@
           }
         },
         "model_proof": {
-          "$ref": "#/$defs/DirectorSystemProofRef"
+          "$ref": "#/$defs/DirectorDefinitionDraftProofRef"
         }
       }
     },
@@ -1289,14 +1294,348 @@
       "additionalProperties": false,
       "required": [
         "machine_instance_id",
-        "day"
+        "machine_definition"
       ],
       "properties": {
         "machine_instance_id": {
           "$ref": "common.v1.schema.json#/$defs/Uuid"
         },
+        "machine_definition": {
+          "$ref": "content-bundle.v1.schema.json#/$defs/StateMachineDefinition"
+        }
+      }
+    },
+    "MaterializedEventSituationCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event_type",
+        "summary",
+        "subjects",
+        "context"
+      ],
+      "properties": {
+        "event_type": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "summary": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "subjects": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/SubjectRef"
+          }
+        },
+        "context": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        }
+      }
+    },
+    "MaterializedSemanticOutcomeCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcome_id",
+        "outcome_type",
+        "subjects",
+        "parameters"
+      ],
+      "properties": {
+        "outcome_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "outcome_type": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "subjects": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/SubjectRef"
+          }
+        },
+        "parameters": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        },
+        "requires_agency_gate_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        }
+      }
+    },
+    "MaterializedAgencyGateCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "gate_id",
+        "protected_outcome_ids",
+        "participants",
+        "requirement",
+        "policy",
+        "commitment_evidence"
+      ],
+      "properties": {
+        "gate_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "protected_outcome_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/Identifier"
+          }
+        },
+        "participants": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/EntityRef"
+          }
+        },
+        "requirement": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/AgencyRequirement"
+        },
+        "policy": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/AgencyPolicy"
+        },
+        "commitment_evidence": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "world-runtime.v1.schema.json#/$defs/AgencyCommitmentRef"
+          }
+        }
+      }
+    },
+    "MaterializedWorldAutomaticEventCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "proposal_kind",
+        "proposal_id",
+        "day",
+        "situation",
+        "candidate_outcomes"
+      ],
+      "properties": {
+        "proposal_kind": {
+          "const": "automatic.world"
+        },
+        "proposal_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
         "day": {
           "$ref": "common.v1.schema.json#/$defs/DayNumber"
+        },
+        "situation": {
+          "$ref": "#/$defs/MaterializedEventSituationCandidate"
+        },
+        "candidate_outcomes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/MaterializedSemanticOutcomeCandidate"
+          }
+        }
+      }
+    },
+    "MaterializedCharacterAutomaticEventCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "proposal_kind",
+        "proposal_id",
+        "day",
+        "situation",
+        "target_entity_ids",
+        "candidate_outcomes",
+        "agency_gates"
+      ],
+      "properties": {
+        "proposal_kind": {
+          "const": "automatic.character"
+        },
+        "proposal_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "day": {
+          "$ref": "common.v1.schema.json#/$defs/DayNumber"
+        },
+        "situation": {
+          "$ref": "#/$defs/MaterializedEventSituationCandidate"
+        },
+        "target_entity_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/Uuid"
+          }
+        },
+        "candidate_outcomes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MaterializedSemanticOutcomeCandidate"
+          }
+        },
+        "agency_gates": {
+          "type": "array",
+          "items": {
+            "allOf": [
+              {
+                "$ref": "#/$defs/MaterializedAgencyGateCandidate"
+              },
+              {
+                "properties": {
+                  "commitment_evidence": {
+                    "maxItems": 0
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "MaterializedEventCardOutcomeCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "option_id",
+        "outcomes",
+        "presentation"
+      ],
+      "properties": {
+        "option_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "outcomes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/MaterializedSemanticOutcomeCandidate"
+          }
+        },
+        "presentation": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/EventResultPresentation"
+        }
+      }
+    },
+    "EventCardPublishCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "proposal_id",
+        "source_dialogue_id",
+        "day",
+        "situation",
+        "title",
+        "summary",
+        "result_options",
+        "agency_gates"
+      ],
+      "properties": {
+        "proposal_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "source_dialogue_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "day": {
+          "$ref": "common.v1.schema.json#/$defs/DayNumber"
+        },
+        "situation": {
+          "$ref": "#/$defs/MaterializedEventSituationCandidate"
+        },
+        "title": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "summary": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "result_options": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/MaterializedEventCardOutcomeCandidate"
+          }
+        },
+        "agency_gates": {
+          "type": "array",
+          "items": {
+            "allOf": [
+              {
+                "$ref": "#/$defs/MaterializedAgencyGateCandidate"
+              },
+              {
+                "properties": {
+                  "commitment_evidence": {
+                    "minItems": 1
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "MaterializedSelfSubjectiveOutcomeCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcome_id",
+        "outcome_type",
+        "parameters"
+      ],
+      "properties": {
+        "outcome_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "outcome_type": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "parameters": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        }
+      }
+    },
+    "MaterializedCharacterReactionCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "impact",
+        "agency_decisions",
+        "self_outcomes",
+        "machine_decision",
+        "source_event"
+      ],
+      "properties": {
+        "impact": {
+          "enum": [
+            "none",
+            "changed"
+          ]
+        },
+        "agency_decisions": {
+          "type": "array",
+          "items": {
+            "$ref": "world-runtime.v1.schema.json#/$defs/AgencyDecision"
+          }
+        },
+        "self_outcomes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MaterializedSelfSubjectiveOutcomeCandidate"
+          }
+        },
+        "machine_decision": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/MachineDecision"
+        },
+        "source_event": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/CharacterEventRef"
         }
       }
     },
@@ -1304,12 +1643,16 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "proposal",
+        "draft_ordinal",
+        "candidate",
         "model_proof"
       ],
       "properties": {
-        "proposal": {
-          "$ref": "world-runtime.v1.schema.json#/$defs/WorldAutomaticEventProposal"
+        "draft_ordinal": {
+          "$ref": "model-protocol.v1.schema.json#/$defs/ModelIndex"
+        },
+        "candidate": {
+          "$ref": "#/$defs/MaterializedWorldAutomaticEventCandidate"
         },
         "model_proof": {
           "$ref": "#/$defs/DirectorDailyProofRef"
@@ -1320,11 +1663,15 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "proposal",
+        "draft_ordinal",
+        "candidate",
         "character_reactions",
         "director_proof"
       ],
       "properties": {
+        "draft_ordinal": {
+          "$ref": "model-protocol.v1.schema.json#/$defs/ModelIndex"
+        },
         "character_reactions": {
           "type": "array",
           "items": {
@@ -1332,8 +1679,8 @@
           },
           "minItems": 1
         },
-        "proposal": {
-          "$ref": "world-runtime.v1.schema.json#/$defs/CharacterAutomaticEventProposal"
+        "candidate": {
+          "$ref": "#/$defs/MaterializedCharacterAutomaticEventCandidate"
         },
         "director_proof": {
           "$ref": "#/$defs/DirectorDailyProofRef"
@@ -1344,14 +1691,18 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "draft_ordinal",
         "control",
-        "proposal",
+        "candidate",
         "policy",
         "model_proof"
       ],
       "properties": {
-        "proposal": {
-          "$ref": "world-runtime.v1.schema.json#/$defs/EventCardProposal"
+        "draft_ordinal": {
+          "$ref": "model-protocol.v1.schema.json#/$defs/ModelIndex"
+        },
+        "candidate": {
+          "$ref": "#/$defs/EventCardPublishCandidate"
         },
         "policy": {
           "$ref": "content-bundle.v1.schema.json#/$defs/EventBudgetPolicy"
@@ -1389,18 +1740,23 @@
       "additionalProperties": false,
       "required": [
         "plan_id",
-        "proposal",
+        "draft_ordinal",
+        "candidate",
         "model_proof"
       ],
       "properties": {
         "plan_id": {
           "$ref": "common.v1.schema.json#/$defs/Uuid"
         },
-        "proposal": {
+        "draft_ordinal": {
+          "type": "integer",
+          "const": 0
+        },
+        "candidate": {
           "$ref": "world-runtime.v1.schema.json#/$defs/GoalPlanProposal"
         },
         "model_proof": {
-          "$ref": "#/$defs/DirectorSystemProofRef"
+          "$ref": "#/$defs/DirectorGoalPlanProofRef"
         }
       }
     },
@@ -1521,10 +1877,7 @@
           ],
           "properties": {
             "request_kind": {
-              "enum": [
-                "director.dialogue_events",
-                "director.system_dialogue"
-              ]
+              "const": "director.dialogue_events"
             }
           }
         }
@@ -1543,6 +1896,42 @@
           "properties": {
             "request_kind": {
               "const": "director.system_dialogue"
+            }
+          }
+        }
+      ]
+    },
+    "DirectorGoalPlanProofRef": {
+      "allOf": [
+        {
+          "$ref": "model-protocol.v1.schema.json#/$defs/VerifiedModelOutputRef"
+        },
+        {
+          "type": "object",
+          "required": [
+            "request_kind"
+          ],
+          "properties": {
+            "request_kind": {
+              "const": "director.goal_plan"
+            }
+          }
+        }
+      ]
+    },
+    "DirectorDefinitionDraftProofRef": {
+      "allOf": [
+        {
+          "$ref": "model-protocol.v1.schema.json#/$defs/VerifiedModelOutputRef"
+        },
+        {
+          "type": "object",
+          "required": [
+            "request_kind"
+          ],
+          "properties": {
+            "request_kind": {
+              "const": "director.definition_draft"
             }
           }
         }
@@ -1584,13 +1973,29 @@
         }
       ]
     },
+    "OrdinalCharacterReactionCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "draft_ordinal",
+        "candidate"
+      ],
+      "properties": {
+        "draft_ordinal": {
+          "$ref": "model-protocol.v1.schema.json#/$defs/ModelIndex"
+        },
+        "candidate": {
+          "$ref": "#/$defs/MaterializedCharacterReactionCandidate"
+        }
+      }
+    },
     "CharacterReactionBatch": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "character",
         "model_proof",
-        "reactions"
+        "candidates"
       ],
       "properties": {
         "character": {
@@ -1599,11 +2004,11 @@
         "model_proof": {
           "$ref": "#/$defs/CharacterReactProofRef"
         },
-        "reactions": {
+        "candidates": {
           "type": "array",
           "minItems": 1,
           "items": {
-            "$ref": "world-runtime.v1.schema.json#/$defs/CharacterReactionProposal"
+            "$ref": "#/$defs/OrdinalCharacterReactionCandidate"
           }
         }
       }
@@ -1633,6 +2038,87 @@
         }
       }
     },
+    "MaterializedAgencyCommitmentCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "commitment_id",
+        "semantic_intent",
+        "subjects",
+        "stance",
+        "terms"
+      ],
+      "properties": {
+        "commitment_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "semantic_intent": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "subjects": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/SubjectRef"
+          }
+        },
+        "stance": {
+          "enum": [
+            "accept",
+            "counter"
+          ]
+        },
+        "terms": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        }
+      }
+    },
+    "CharacterDialogueTurnCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "turn_id",
+        "speaker",
+        "locale",
+        "text",
+        "occurred_at",
+        "source",
+        "agency_commitments"
+      ],
+      "properties": {
+        "turn_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "speaker": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/DialogueParticipantRef"
+        },
+        "locale": {
+          "type": "string",
+          "pattern": "^[a-z]{2,3}(?:-[A-Z]{2})?$"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000
+        },
+        "emotion_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "occurred_at": {
+          "$ref": "common.v1.schema.json#/$defs/LogicalTime"
+        },
+        "source": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/DialogueTurnSource"
+        },
+        "agency_commitments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MaterializedAgencyCommitmentCandidate"
+          }
+        }
+      }
+    },
     "CharacterDialogueTurnAppendInput": {
       "type": "object",
       "additionalProperties": false,
@@ -1640,7 +2126,7 @@
         "dialogue_id",
         "expected_revision",
         "model_proof",
-        "turn"
+        "candidate"
       ],
       "properties": {
         "dialogue_id": {
@@ -1653,8 +2139,8 @@
         "model_proof": {
           "$ref": "#/$defs/CharacterDialogueProofRef"
         },
-        "turn": {
-          "$ref": "world-runtime.v1.schema.json#/$defs/CharacterMindDialogueTurn"
+        "candidate": {
+          "$ref": "#/$defs/CharacterDialogueTurnCandidate"
         }
       }
     },
@@ -2019,13 +2505,25 @@
                   "type": "array",
                   "minItems": 1,
                   "items": {
-                    "$ref": "world-runtime.v1.schema.json#/$defs/StateMachineSetStateOp"
+                    "$ref": "world-runtime.v1.schema.json#/$defs/StateMachineTransitionOp"
                   },
                   "maxItems": 1
                 }
               }
             }
           ]
+        }
+      }
+    },
+    "StateMachineUnchangedOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "output_kind"
+      ],
+      "properties": {
+        "output_kind": {
+          "const": "state_machine.unchanged"
         }
       }
     },
@@ -2340,6 +2838,9 @@
       "oneOf": [
         {
           "$ref": "#/$defs/RejectOutput"
+        },
+        {
+          "$ref": "#/$defs/StateMachineUnchangedOutput"
         },
         {
           "$ref": "#/$defs/StateMachinePacketOutput"

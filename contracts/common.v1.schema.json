@@ -29,22 +29,6 @@
       "type": "string",
       "pattern": "^[a-f0-9]{64}$"
     },
-    "Digest": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "algorithm",
-        "value"
-      ],
-      "properties": {
-        "algorithm": {
-          "const": "sha256"
-        },
-        "value": {
-          "$ref": "#/$defs/Sha256"
-        }
-      }
-    },
     "LocalizedText": {
       "type": "object",
       "minProperties": 1,
@@ -502,10 +486,6 @@
       }
     },
     "DayNumber": {
-      "type": "integer",
-      "minimum": 1
-    },
-    "DayDuration": {
       "type": "integer",
       "minimum": 1
     }

@@ -21,6 +21,7 @@ import {
   type ModelInvocationProvenanceVerifier,
   type ModelRequestDocument,
   type ModelResponseDocument,
+  type ProviderUsageObservation,
   type PreparedModelInvocation,
   type VerifiedModelInvocationReceipt,
   type VerifiedModelOutputDocument,
@@ -28,11 +29,10 @@ import {
 } from "../../application/model-gateway.js";
 import type {
   AuthorizedModelDispatch,
-  AuthorizedDailyDirectorDispatch,
-  DailySettlementRunJournal,
+  DailySettlementProposalIdentity,
   DailySettlementRunRecord,
-  ModelInvocationJournal,
   RecordedModelInvocationVerifier,
+  RuntimeModelInvocationJournal,
   StoredAmbiguousModelInvocation,
   StoredModelInvocation,
   StoredVerifiedModelInvocation,
@@ -59,8 +59,7 @@ export interface PostgresRuntimeInvocationJournalDependencies {
 }
 
 export interface PostgresRuntimeInvocationJournal
-  extends ModelInvocationJournal,
-    DailySettlementRunJournal {}
+  extends RuntimeModelInvocationJournal {}
 
 export function createPostgresRuntimeInvocationJournal(
   dependencies: PostgresRuntimeInvocationJournalDependencies,
@@ -138,7 +137,6 @@ class PostgresRuntimeInvocationJournalAdapter
     invocation: PreparedModelInvocation,
   ): Promise<AuthorizedModelDispatch> {
     assertPrepared(this.#modelProvenance, invocation);
-    assertGenericInvocationKind(invocation.request);
     validatePreparedDocuments(this.#contracts, invocation);
     let stored: StoredAmbiguousModelInvocation;
     try {
@@ -146,16 +144,35 @@ class PostgresRuntimeInvocationJournalAdapter
         this.#pool,
         "BEGIN ISOLATION LEVEL READ COMMITTED",
         async (client) => {
-          const current = await readModelInvocationByRequestIdLocked(
-            client,
-            this.#contracts,
+          const requestId = expectString(
+            invocation.request.value,
+            "request_id",
+            "ModelRequest",
+          );
+          const run =
             expectString(
               invocation.request.value,
-              "request_id",
+              "request_kind",
               "ModelRequest",
-            ),
-          );
-          assertInvocationMatchesPrepared(current, invocation);
+            ) === DAILY_REQUEST_KIND
+              ? await readDailyRunByModelRequestIdLocked(
+                  client,
+                  this.#contracts,
+                  requestId,
+                )
+              : undefined;
+          const current =
+            run?.invocation ??
+            (await readModelInvocationByRequestIdLocked(
+              client,
+              this.#contracts,
+              requestId,
+            ));
+          if (run === undefined) {
+            assertInvocationMatchesPrepared(current, invocation);
+          } else {
+            assertRunMatchesPrepared(run, invocation);
+          }
           return markPreparedInvocationDispatched(
             client,
             this.#contracts,
@@ -175,26 +192,51 @@ class PostgresRuntimeInvocationJournalAdapter
 
   public async recordVerified(
     receipt: VerifiedModelInvocationReceipt,
+    usage: ProviderUsageObservation,
   ): Promise<StoredVerifiedModelInvocation> {
     assertVerified(this.#modelProvenance, receipt);
-    assertGenericInvocationKind(receipt.request);
     const documents = validateVerifiedDocuments(this.#contracts, receipt);
     try {
       return await withPostgresTransaction(
         this.#pool,
         "BEGIN ISOLATION LEVEL READ COMMITTED",
         async (client) => {
-          const current = await readModelInvocationByRequestIdLocked(
-            client,
-            this.#contracts,
-            expectString(receipt.request.value, "request_id", "ModelRequest"),
+          const requestId = expectString(
+            receipt.request.value,
+            "request_id",
+            "ModelRequest",
           );
-          assertInvocationMatchesVerified(current, receipt);
+          const requestKind = expectString(
+            receipt.request.value,
+            "request_kind",
+            "ModelRequest",
+          );
+          const run =
+            requestKind === DAILY_REQUEST_KIND
+              ? await readDailyRunByModelRequestIdLocked(
+                  client,
+                  this.#contracts,
+                  requestId,
+                )
+              : undefined;
+          const current =
+            run?.invocation ??
+            (await readModelInvocationByRequestIdLocked(
+              client,
+              this.#contracts,
+              requestId,
+            ));
+          if (run === undefined) {
+            assertInvocationMatchesVerified(current, receipt);
+          } else {
+            assertRunMatchesVerified(run, receipt);
+          }
           return persistVerifiedInvocation(
             client,
             this.#contracts,
             current,
             documents,
+            usage,
           );
         },
       );
@@ -212,7 +254,6 @@ class PostgresRuntimeInvocationJournalAdapter
       documents.request.value,
       documents.snapshot.value,
     );
-    const runId = randomUUID();
 
     try {
       return await withPostgresTransaction(
@@ -242,9 +283,8 @@ class PostgresRuntimeInvocationJournalAdapter
             documents.request,
           );
 
-          const inserted = await client.query<{ readonly run_id: string }>(
+          await client.query(
             `INSERT INTO luoxia_engine.daily_settlement_runs (
-               run_id,
                world_id,
                day,
                model_request_id,
@@ -252,30 +292,19 @@ class PostgresRuntimeInvocationJournalAdapter
                created_at
              ) VALUES (
                $1::uuid,
-               $2::uuid,
-               $3::bigint,
-               $4::uuid,
-               $5,
+               $2::bigint,
+               $3::uuid,
+               $4,
                clock_timestamp()
              )
-             ON CONFLICT DO NOTHING
-             RETURNING run_id::text AS run_id`,
+             ON CONFLICT DO NOTHING`,
             [
-              runId,
               invocation.worldId,
               day.toString(),
               storedInvocation.requestId,
               DAILY_REQUEST_KIND,
             ],
           );
-          if (inserted.rowCount === 1) {
-            return readDailyRunByIdLocked(
-              client,
-              this.#contracts,
-              runId,
-            );
-          }
-
           const existing = await readDailyRunByWorldDayLocked(
             client,
             this.#contracts,
@@ -322,75 +351,94 @@ class PostgresRuntimeInvocationJournalAdapter
     }
   }
 
-  public async markDirectorDispatched(
-    runId: string,
-    invocation: PreparedModelInvocation,
-  ): Promise<AuthorizedDailyDirectorDispatch> {
-    const verifiedRunId = assertUuid(this.#contracts, runId);
-    assertPrepared(this.#modelProvenance, invocation);
-    validatePreparedDocuments(this.#contracts, invocation);
-
-    let run: DailySettlementRunRecord;
-    try {
-      run = await withPostgresTransaction(
-        this.#pool,
-        "BEGIN ISOLATION LEVEL READ COMMITTED",
-        async (client) => {
-          const current = await readDailyRunByIdLocked(
-            client,
-            this.#contracts,
-            verifiedRunId,
-          );
-          assertRunMatchesPrepared(current, invocation);
-          await markPreparedInvocationDispatched(
-            client,
-            this.#contracts,
-            current.invocation,
-          );
-          return readDailyRunByIdLocked(
-            client,
-            this.#contracts,
-            verifiedRunId,
-          );
-        },
-      );
-    } catch (error: unknown) {
-      throw normalizeInvocationJournalError(error);
-    }
-
-    const authorization = this.#dispatchIssuer.issue(invocation);
-    return Object.freeze({ run, authorization });
-  }
-
-  public async recordDirectorVerified(
-    runId: string,
-    receipt: VerifiedModelInvocationReceipt,
-  ): Promise<DailySettlementRunRecord> {
-    const verifiedRunId = assertUuid(this.#contracts, runId);
-    assertVerified(this.#modelProvenance, receipt);
-    const documents = validateVerifiedDocuments(this.#contracts, receipt);
-
+  public async prepareDailyProposals(
+    modelRequestId: string,
+  ): Promise<readonly DailySettlementProposalIdentity[]> {
+    const verifiedModelRequestId = assertUuid(
+      this.#contracts,
+      modelRequestId,
+    );
     try {
       return await withPostgresTransaction(
         this.#pool,
         "BEGIN ISOLATION LEVEL READ COMMITTED",
         async (client) => {
-          const current = await readDailyRunByIdLocked(
+          const run = await readDailyRunByModelRequestIdLocked(
             client,
             this.#contracts,
-            verifiedRunId,
+            verifiedModelRequestId,
           );
-          assertRunMatchesVerified(current, receipt);
-          await persistVerifiedInvocation(
+          if (run.phase !== "response_verified") {
+            throw new EngineFault(
+              "runtime.daily_settlement.response_not_verified",
+              "Daily proposal identities require a verified Director response",
+              {
+                model_request_id: verifiedModelRequestId,
+                phase: run.phase,
+              },
+            );
+          }
+          const verifiedProposalCount =
+            extractVerifiedDailyProposalCount(run);
+
+          const existing = await readDailyProposalIdentities(
             client,
-            this.#contracts,
-            current.invocation,
-            documents,
+            verifiedModelRequestId,
           );
-          return readDailyRunByIdLocked(
-            client,
+          if (existing.length > 0 || verifiedProposalCount === 0) {
+            return validateDailyProposalIdentities(
+              this.#contracts,
+              existing,
+              verifiedModelRequestId,
+              verifiedProposalCount,
+            );
+          }
+
+          for (
+            let ordinal = 0;
+            ordinal < verifiedProposalCount;
+            ordinal += 1
+          ) {
+            const proposalId = assertUuid(
+              this.#contracts,
+              randomUUID(),
+            );
+            const insert = await client.query(
+              `INSERT INTO luoxia_engine.daily_settlement_proposal_runs (
+                 model_request_id,
+                 proposal_ordinal,
+                 proposal_id
+               ) VALUES (
+                 $1::uuid,
+                 $2::integer,
+                 $3::uuid
+               )`,
+              [
+                verifiedModelRequestId,
+                ordinal,
+                proposalId,
+              ],
+            );
+            if (insert.rowCount !== 1) {
+              throw new EngineFault(
+                "runtime.daily_settlement.database_corrupt",
+                "Daily proposal identity INSERT did not affect exactly one row",
+                {
+                  model_request_id: verifiedModelRequestId,
+                  proposal_ordinal: ordinal,
+                },
+              );
+            }
+          }
+
+          return validateDailyProposalIdentities(
             this.#contracts,
-            verifiedRunId,
+            await readDailyProposalIdentities(
+              client,
+              verifiedModelRequestId,
+            ),
+            verifiedModelRequestId,
+            verifiedProposalCount,
           );
         },
       );
@@ -484,14 +532,24 @@ interface ModelInvocationRow {
   readonly request_document: unknown;
   readonly response_document: unknown | null;
   readonly proof_document: unknown | null;
+  readonly provider_kind: string | null;
+  readonly provider_model: string | null;
+  readonly token_usage_status: string | null;
+  readonly input_tokens_text: string | null;
+  readonly cached_input_tokens_text: string | null;
+  readonly output_tokens_text: string | null;
 }
 
 interface DailySettlementRunRow extends ModelInvocationRow {
-  readonly run_id: string;
   readonly run_world_id: string;
   readonly day_text: string;
   readonly model_request_id: string;
   readonly run_request_kind: string;
+}
+
+interface DailySettlementProposalIdentityRow {
+  readonly proposal_ordinal: number;
+  readonly proposal_id: string;
 }
 
 const MODEL_INVOCATION_SELECT = `SELECT
@@ -503,11 +561,16 @@ const MODEL_INVOCATION_SELECT = `SELECT
   snapshot_document,
   request_document,
   response_document,
-  proof_document
+  proof_document,
+  provider_kind,
+  provider_model,
+  token_usage_status,
+  input_tokens::text AS input_tokens_text,
+  cached_input_tokens::text AS cached_input_tokens_text,
+  output_tokens::text AS output_tokens_text
 FROM luoxia_engine.model_invocations`;
 
 const DAILY_RUN_SELECT = `SELECT
-  run.run_id::text AS run_id,
   run.world_id::text AS run_world_id,
   run.day::text AS day_text,
   run.model_request_id::text AS model_request_id,
@@ -520,7 +583,13 @@ const DAILY_RUN_SELECT = `SELECT
   invocation.snapshot_document,
   invocation.request_document,
   invocation.response_document,
-  invocation.proof_document
+  invocation.proof_document,
+  invocation.provider_kind,
+  invocation.provider_model,
+  invocation.token_usage_status,
+  invocation.input_tokens::text AS input_tokens_text,
+  invocation.cached_input_tokens::text AS cached_input_tokens_text,
+  invocation.output_tokens::text AS output_tokens_text
 FROM luoxia_engine.daily_settlement_runs AS run
 JOIN luoxia_engine.model_invocations AS invocation
   ON invocation.request_id = run.model_request_id
@@ -556,6 +625,12 @@ async function insertOrMatchPreparedInvocation(
        request_document,
        response_document,
        proof_document,
+       provider_kind,
+       provider_model,
+       token_usage_status,
+       input_tokens,
+       cached_input_tokens,
+       output_tokens,
        prepared_at,
        dispatched_at,
        verified_at
@@ -567,6 +642,12 @@ async function insertOrMatchPreparedInvocation(
        'prepared',
        $5::jsonb,
        $6::jsonb,
+       NULL,
+       NULL,
+       NULL,
+       NULL,
+       NULL,
+       NULL,
        NULL,
        NULL,
        clock_timestamp(),
@@ -705,6 +786,7 @@ async function persistVerifiedInvocation(
   contracts: ContractValidator,
   current: StoredModelInvocation,
   documents: VerifiedDocuments,
+  usage: ProviderUsageObservation,
 ): Promise<StoredVerifiedModelInvocation> {
   if (current.phase === "prepared") {
     throw new EngineFault(
@@ -727,6 +809,12 @@ async function persistVerifiedInvocation(
         SET invocation_status = 'verified',
             response_document = $2::jsonb,
             proof_document = $3::jsonb,
+            provider_kind = $4,
+            provider_model = $5,
+            token_usage_status = $6,
+            input_tokens = $7::bigint,
+            cached_input_tokens = $8::bigint,
+            output_tokens = $9::bigint,
             verified_at = clock_timestamp()
       WHERE request_id = $1::uuid
         AND invocation_status = 'dispatched_ambiguous'`,
@@ -734,6 +822,18 @@ async function persistVerifiedInvocation(
       current.requestId,
       JSON.stringify(documents.response.value),
       JSON.stringify(documents.proof.value),
+      usage.providerKind,
+      usage.providerModel,
+      usage.status,
+      usage.status === "complete" || usage.status === "partial"
+        ? usage.inputTokens.toString()
+        : null,
+      usage.status === "complete"
+        ? usage.cachedInputTokens.toString()
+        : null,
+      usage.status === "complete" || usage.status === "partial"
+        ? usage.outputTokens.toString()
+        : null,
     ],
   );
   if (update.rowCount !== 1) {
@@ -825,33 +925,6 @@ async function assertCurrentWorldSnapshot(
   }
 }
 
-async function readDailyRunByIdLocked(
-  client: PoolClient,
-  contracts: ContractValidator,
-  runId: string,
-): Promise<DailySettlementRunRecord> {
-  const query = await client.query<DailySettlementRunRow>(
-    `${DAILY_RUN_SELECT}
-      WHERE run.run_id = $1::uuid
-      FOR UPDATE OF run, invocation`,
-    [runId],
-  );
-  const row = requireAtMostOne(
-    query.rows,
-    "runtime.daily_settlement.database_corrupt",
-    "run_id lookup returned more than one daily settlement",
-    { run_id: runId },
-  );
-  if (row === undefined) {
-    throw new EngineFault(
-      "runtime.daily_settlement.missing",
-      "Daily settlement run does not exist",
-      { run_id: runId },
-    );
-  }
-  return validateDailyRunRow(contracts, row);
-}
-
 async function readDailyRunByWorldDayLocked(
   client: PoolClient,
   contracts: ContractValidator,
@@ -872,6 +945,139 @@ async function readDailyRunByWorldDayLocked(
     { world_id: worldId, day },
   );
   return row === undefined ? undefined : validateDailyRunRow(contracts, row);
+}
+
+async function readDailyRunByModelRequestIdLocked(
+  client: PoolClient,
+  contracts: ContractValidator,
+  modelRequestId: string,
+): Promise<DailySettlementRunRecord> {
+  const query = await client.query<DailySettlementRunRow>(
+    `${DAILY_RUN_SELECT}
+      WHERE run.model_request_id = $1::uuid
+      FOR UPDATE OF run, invocation`,
+    [modelRequestId],
+  );
+  const row = requireAtMostOne(
+    query.rows,
+    "runtime.daily_settlement.database_corrupt",
+    "model_request_id lookup returned more than one daily settlement",
+    { model_request_id: modelRequestId },
+  );
+  if (row === undefined) {
+    throw new EngineFault(
+      "runtime.daily_settlement.missing",
+      "Daily settlement run does not exist",
+      { model_request_id: modelRequestId },
+    );
+  }
+  return validateDailyRunRow(contracts, row);
+}
+
+function extractVerifiedDailyProposalCount(
+  run: DailySettlementRunRecord,
+): number {
+  if (
+    run.phase !== "response_verified" ||
+    run.invocation.phase !== "verified"
+  ) {
+    throw new EngineFault(
+      "runtime.daily_settlement.database_corrupt",
+      "Verified daily settlement run is missing its verified invocation",
+      { model_request_id: run.invocation.requestId },
+    );
+  }
+  const output = expectJsonObject(
+    expectProperty(
+      run.invocation.response.value,
+      "output",
+      "ModelResponse",
+    ),
+    "ModelResponse.output",
+  );
+  const outputKind = expectString(
+    output,
+    "output_kind",
+    "DirectorDailySettlementOutput",
+  );
+  if (outputKind !== DAILY_REQUEST_KIND) {
+    throw new EngineFault(
+      "runtime.daily_settlement.database_corrupt",
+      "Verified daily settlement output kind does not match its run",
+      {
+        model_request_id: run.invocation.requestId,
+        output_kind: outputKind,
+      },
+    );
+  }
+  const automaticEvents = expectProperty(
+    output,
+    "automatic_events",
+    "DirectorDailySettlementOutput",
+  );
+  if (!Array.isArray(automaticEvents)) {
+    throw new EngineFault(
+      "runtime.daily_settlement.database_corrupt",
+      "Verified daily settlement automatic_events must be an array",
+      { model_request_id: run.invocation.requestId },
+    );
+  }
+  return automaticEvents.length;
+}
+
+async function readDailyProposalIdentities(
+  client: PoolClient,
+  modelRequestId: string,
+): Promise<readonly DailySettlementProposalIdentityRow[]> {
+  const query = await client.query<DailySettlementProposalIdentityRow>(
+    `SELECT proposal_ordinal,
+            proposal_id::text AS proposal_id
+       FROM luoxia_engine.daily_settlement_proposal_runs
+      WHERE model_request_id = $1::uuid
+      ORDER BY proposal_ordinal`,
+    [modelRequestId],
+  );
+  return query.rows;
+}
+
+function validateDailyProposalIdentities(
+  contracts: ContractValidator,
+  rows: readonly DailySettlementProposalIdentityRow[],
+  modelRequestId: string,
+  expectedCount: number,
+): readonly DailySettlementProposalIdentity[] {
+  const identities = rows.map((row, ordinal) => {
+    if (
+      !Number.isSafeInteger(row.proposal_ordinal) ||
+      row.proposal_ordinal !== ordinal
+    ) {
+      throw new EngineFault(
+        "runtime.daily_settlement.database_corrupt",
+        "Daily proposal identity ordinals must be contiguous from zero",
+        {
+          model_request_id: modelRequestId,
+          expected_ordinal: ordinal,
+          stored_ordinal: row.proposal_ordinal,
+        },
+      );
+    }
+    return Object.freeze({
+      ordinal,
+      proposalId: assertUuid(contracts, row.proposal_id),
+    });
+  });
+  if (identities.length !== expectedCount) {
+    throw new EngineFault(
+      "runtime.daily_settlement.proposal_identity_conflict",
+      "Daily settlement proposal identities are already bound to another count",
+      {
+        model_request_id: modelRequestId,
+        expected_count: expectedCount,
+        stored_count: identities.length,
+      },
+    );
+  }
+  return Object.freeze(identities);
 }
 
 async function readDailyRunByWorldDay(
@@ -904,13 +1110,13 @@ function validateDailyRunRow(
     row.day_text,
     "runtime.daily_settlement.database_corrupt",
     "Daily settlement day",
-    { run_id: row.run_id, day: row.day_text },
+    { world_id: row.run_world_id, day: row.day_text },
   );
   if (day < 1) {
     throw new EngineFault(
       "runtime.daily_settlement.database_corrupt",
       "Daily settlement day must be positive",
-      { run_id: row.run_id, day },
+      { world_id: row.run_world_id, day },
     );
   }
   const requestDay = extractDailySettlementDay(
@@ -927,13 +1133,16 @@ function validateDailyRunRow(
     throw new EngineFault(
       "runtime.daily_settlement.database_corrupt",
       "Daily settlement run identity does not match its model invocation",
-      { run_id: row.run_id },
+      {
+        world_id: row.run_world_id,
+        day,
+        model_request_id: row.model_request_id,
+      },
     );
   }
 
   if (invocation.phase === "prepared") {
     return Object.freeze({
-      runId: row.run_id,
       worldId: row.run_world_id,
       day,
       phase: "prepared",
@@ -942,7 +1151,6 @@ function validateDailyRunRow(
   }
   if (invocation.phase === "dispatched_ambiguous") {
     return Object.freeze({
-      runId: row.run_id,
       worldId: row.run_world_id,
       day,
       phase: "blocked_ambiguous",
@@ -950,7 +1158,6 @@ function validateDailyRunRow(
     });
   }
   return Object.freeze({
-    runId: row.run_id,
     worldId: row.run_world_id,
     day,
     phase: "response_verified",
@@ -1004,13 +1211,21 @@ function validateModelInvocationRow(
     request,
   });
   if (row.invocation_status === "prepared") {
-    if (row.response_document !== null || row.proof_document !== null) {
+    if (
+      row.response_document !== null ||
+      row.proof_document !== null ||
+      hasProviderUsageColumns(row)
+    ) {
       throw modelInvocationShapeFault(row);
     }
     return Object.freeze({ ...base, phase: "prepared" as const });
   }
   if (row.invocation_status === "dispatched_ambiguous") {
-    if (row.response_document !== null || row.proof_document !== null) {
+    if (
+      row.response_document !== null ||
+      row.proof_document !== null ||
+      hasProviderUsageColumns(row)
+    ) {
       throw modelInvocationShapeFault(row);
     }
     return Object.freeze({
@@ -1030,6 +1245,7 @@ function validateModelInvocationRow(
       CONTRACT_REF.verifiedModelOutput,
       row.proof_document,
     );
+    readStoredProviderUsage(row);
     assertStoredResponseIdentity(row, response, proof, worldRevision);
     return Object.freeze({
       ...base,
@@ -1077,6 +1293,126 @@ function modelInvocationShapeFault(row: ModelInvocationRow): EngineFault {
       request_id: row.request_id,
       invocation_status: row.invocation_status,
     },
+  );
+}
+
+function hasProviderUsageColumns(row: ModelInvocationRow): boolean {
+  return (
+    row.provider_kind !== null ||
+    row.provider_model !== null ||
+    row.token_usage_status !== null ||
+    row.input_tokens_text !== null ||
+    row.cached_input_tokens_text !== null ||
+    row.output_tokens_text !== null
+  );
+}
+
+function readStoredProviderUsage(
+  row: ModelInvocationRow,
+): ProviderUsageObservation {
+  const providerKind = readStoredProviderKind(row);
+  const providerModel = row.provider_model;
+  const status = row.token_usage_status;
+  if (
+    providerModel === null ||
+    providerModel.length === 0 ||
+    providerModel.length > 256 ||
+    providerModel !== providerModel.trim() ||
+    /[\r\n]/u.test(providerModel) ||
+    status === null
+  ) {
+    throw modelInvocationShapeFault(row);
+  }
+  const inputTokens = readStoredTokenCount(
+    row,
+    row.input_tokens_text,
+    "input_tokens",
+  );
+  const cachedInputTokens = readStoredTokenCount(
+    row,
+    row.cached_input_tokens_text,
+    "cached_input_tokens",
+  );
+  const outputTokens = readStoredTokenCount(
+    row,
+    row.output_tokens_text,
+    "output_tokens",
+  );
+
+  if (
+    status === "complete" &&
+    inputTokens !== undefined &&
+    cachedInputTokens !== undefined &&
+    outputTokens !== undefined &&
+    cachedInputTokens <= inputTokens
+  ) {
+    return Object.freeze({
+      providerKind,
+      providerModel,
+      status,
+      inputTokens,
+      cachedInputTokens,
+      outputTokens,
+    });
+  }
+  if (
+    status === "partial" &&
+    inputTokens !== undefined &&
+    cachedInputTokens === undefined &&
+    outputTokens !== undefined
+  ) {
+    return Object.freeze({
+      providerKind,
+      providerModel,
+      status,
+      inputTokens,
+      outputTokens,
+    });
+  }
+  if (
+    (status === "absent" || status === "invalid") &&
+    inputTokens === undefined &&
+    cachedInputTokens === undefined &&
+    outputTokens === undefined
+  ) {
+    return Object.freeze({
+      providerKind,
+      providerModel,
+      status,
+    });
+  }
+  throw modelInvocationShapeFault(row);
+}
+
+function readStoredProviderKind(
+  row: ModelInvocationRow,
+): string {
+  const providerKind = row.provider_kind;
+  if (
+    providerKind === null ||
+    providerKind.length === 0 ||
+    providerKind.length > 64 ||
+    providerKind !== providerKind.trim() ||
+    /[\r\n\u0000]/u.test(providerKind)
+  ) {
+    throw modelInvocationShapeFault(row);
+  }
+  return providerKind;
+}
+
+function readStoredTokenCount(
+  row: ModelInvocationRow,
+  candidate: string | null,
+  field: string,
+): number | undefined {
+  if (candidate === null) {
+    return undefined;
+  }
+  return parseSafeUnsignedInteger(
+    candidate,
+    "model.invocation.database_corrupt",
+    `Model invocation ${field}`,
+    { request_id: row.request_id, field, value: candidate },
   );
 }
 
@@ -1323,7 +1659,11 @@ function assertRunMatchesPrepared(
     throw new EngineFault(
       "runtime.daily_settlement.identity_conflict",
       "Daily settlement run is bound to a different Director invocation",
-      { run_id: run.runId },
+      {
+        world_id: run.worldId,
+        day: run.day,
+        model_request_id: run.invocation.requestId,
+      },
     );
   }
 }
@@ -1340,7 +1680,11 @@ function assertRunMatchesVerified(
     throw new EngineFault(
       "runtime.daily_settlement.identity_conflict",
       "Daily settlement run is bound to a different Director receipt",
-      { run_id: run.runId },
+      {
+        world_id: run.worldId,
+        day: run.day,
+        model_request_id: run.invocation.requestId,
+      },
     );
   }
 }
@@ -1389,13 +1733,25 @@ function normalizeInvocationJournalError(error: unknown): Error {
   }
   if (
     constraint === "daily_settlement_runs_pkey" ||
-    constraint === "daily_settlement_runs_world_day_unique" ||
     constraint === "daily_settlement_runs_model_request_unique" ||
     constraint === "daily_settlement_runs_model_invocation_foreign_key"
   ) {
     return new EngineFault(
       "runtime.daily_settlement.identity_conflict",
       "PostgreSQL rejected a conflicting daily settlement identity",
+      { postgres_code: error.code, constraint },
+    );
+  }
+  if (
+    constraint === "daily_settlement_proposal_runs_pkey" ||
+    constraint ===
+      "daily_settlement_proposal_runs_proposal_id_unique" ||
+    constraint ===
+      "daily_settlement_proposal_runs_model_request_foreign_key"
+  ) {
+    return new EngineFault(
+      "runtime.daily_settlement.proposal_identity_conflict",
+      "PostgreSQL rejected a conflicting daily proposal identity",
       { postgres_code: error.code, constraint },
     );
   }

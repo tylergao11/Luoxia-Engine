@@ -121,7 +121,8 @@ class DefaultPlayerDayCommandOrchestrator
     } catch (error: unknown) {
       if (
         !(error instanceof EngineFault) ||
-        error.code !== "day_cycle.orchestration.stage_unresolved"
+        error.code !==
+          "day_cycle.orchestration.required_operation_unresolved"
       ) {
         throw error;
       }
@@ -129,7 +130,7 @@ class DefaultPlayerDayCommandOrchestrator
         return await this.#finalizer.completeRejected({
           sessionId: stored.session.sessionId,
           commandId: stored.commandId,
-          code: "day_cycle.stage_unresolved",
+          code: "day_cycle.required_operation_unresolved",
         });
       } catch (finalizationError: unknown) {
         if (
@@ -143,7 +144,7 @@ class DefaultPlayerDayCommandOrchestrator
             {
               session_id: stored.session.sessionId,
               command_id: stored.commandId,
-              stage_fault: error.code,
+              operation_fault: error.code,
               ...(error.details ?? {}),
             },
           );

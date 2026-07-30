@@ -147,46 +147,6 @@
         }
       }
     },
-    "StageInput": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "basis_token",
-        "stage_instance_id",
-        "stage_revision",
-        "local_sequence",
-        "input_type",
-        "payload"
-      ],
-      "properties": {
-        "type": {
-          "const": "stage.input"
-        },
-        "basis_token": {
-          "type": "string",
-          "minLength": 32,
-          "maxLength": 512
-        },
-        "stage_instance_id": {
-          "$ref": "common.v1.schema.json#/$defs/Uuid"
-        },
-        "stage_revision": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "local_sequence": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "input_type": {
-          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
-        },
-        "payload": {
-          "$ref": "common.v1.schema.json#/$defs/JsonObject"
-        }
-      }
-    },
     "StageOutcomeProposal": {
       "type": "object",
       "additionalProperties": false,
@@ -257,9 +217,6 @@
           "$ref": "#/$defs/SessionViewMessage"
         },
         {
-          "$ref": "#/$defs/SessionDeltaMessage"
-        },
-        {
           "$ref": "#/$defs/CommandResult"
         },
         {
@@ -298,113 +255,6 @@
         }
       }
     },
-    "ViewChange": {
-      "oneOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "change",
-            "node"
-          ],
-          "properties": {
-            "change": {
-              "const": "render_node.upsert"
-            },
-            "node": {
-              "$ref": "world-runtime.v1.schema.json#/$defs/RenderNode"
-            }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "change",
-            "node_id"
-          ],
-          "properties": {
-            "change": {
-              "const": "render_node.remove"
-            },
-            "node_id": {
-              "$ref": "common.v1.schema.json#/$defs/Identifier"
-            }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "change",
-            "goal_plans"
-          ],
-          "properties": {
-            "change": {
-              "const": "goal_plans.replace"
-            },
-            "goal_plans": {
-              "type": "array",
-              "items": {
-                "$ref": "world-runtime.v1.schema.json#/$defs/GoalPlanView"
-              }
-            }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "change",
-            "world_time"
-          ],
-          "properties": {
-            "change": {
-              "const": "world_time.set"
-            },
-            "world_time": {
-              "$ref": "common.v1.schema.json#/$defs/LogicalTime"
-            }
-          }
-        }
-      ]
-    },
-    "SessionDeltaMessage": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "base_view_revision",
-        "view_revision",
-        "basis_token",
-        "changes"
-      ],
-      "properties": {
-        "type": {
-          "const": "session.delta"
-        },
-        "base_view_revision": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "view_revision": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "basis_token": {
-          "type": "string",
-          "minLength": 32,
-          "maxLength": 512
-        },
-        "changes": {
-          "type": "array",
-          "minItems": 1,
-          "items": {
-            "$ref": "#/$defs/ViewChange"
-          }
-        }
-      }
-    },
     "CommandResult": {
       "type": "object",
       "additionalProperties": false,
@@ -424,8 +274,7 @@
         "status": {
           "enum": [
             "accepted",
-            "rejected",
-            "pending"
+            "rejected"
           ]
         },
         "view_revision": {
@@ -942,6 +791,7 @@
         "command_id",
         "basis_token",
         "recipient",
+        "interaction_kind",
         "locale",
         "text"
       ],
@@ -959,6 +809,9 @@
         },
         "recipient": {
           "$ref": "world-runtime.v1.schema.json#/$defs/DialogueParticipantRef"
+        },
+        "interaction_kind": {
+          "$ref": "#/$defs/DialogueInteractionKind"
         },
         "locale": {
           "type": "string",
@@ -979,6 +832,7 @@
         "command_id",
         "basis_token",
         "dialogue_id",
+        "interaction_kind",
         "locale",
         "text"
       ],
@@ -997,6 +851,9 @@
         "dialogue_id": {
           "$ref": "common.v1.schema.json#/$defs/Uuid"
         },
+        "interaction_kind": {
+          "$ref": "#/$defs/DialogueInteractionKind"
+        },
         "locale": {
           "type": "string",
           "pattern": "^[a-z]{2,3}(?:-[A-Z]{2})?$"
@@ -1007,6 +864,14 @@
           "maxLength": 20000
         }
       }
+    },
+    "DialogueInteractionKind": {
+      "type": "string",
+      "enum": [
+        "dialogue",
+        "goal_plan",
+        "definition_draft"
+      ]
     },
     "DialogueClose": {
       "type": "object",

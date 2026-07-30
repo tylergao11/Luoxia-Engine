@@ -2,7 +2,29 @@ import type { StoredReceivedCommand } from "./command-journal.js";
 
 export type DialogueDirectorRequestKind =
   | "director.dialogue_events"
-  | "director.system_dialogue";
+  | "director.system_dialogue"
+  | "director.goal_plan"
+  | "director.definition_draft";
+
+export type DialogueDirectorProposalKind =
+  | "definition"
+  | "goal_plan"
+  | "event_card";
+
+export function dialogueDirectorProposalKind(
+  requestKind: DialogueDirectorRequestKind,
+): DialogueDirectorProposalKind | undefined {
+  switch (requestKind) {
+    case "director.dialogue_events":
+      return "event_card";
+    case "director.goal_plan":
+      return "goal_plan";
+    case "director.definition_draft":
+      return "definition";
+    case "director.system_dialogue":
+      return undefined;
+  }
+}
 
 export interface DialogueDirectorRunRecord {
   readonly sessionId: string;
@@ -53,14 +75,11 @@ export interface DialogueDirectorRunJournal {
   }): Promise<DialogueDirectorRunRecord>;
 
   /**
-   * Atomically binds all three exact ordered proposal identity sets from one
-   * verified Director response. Definition/GoalPlan records also own the
-   * Server-generated WorldState identity. No workflow status is duplicated.
+   * Atomically binds the exact ordered proposal identity set owned by this
+   * operation-specific Director response. Definition/GoalPlan records also
+   * own the Server-generated WorldState identity.
    */
   prepareProposals(input: {
     readonly run: DialogueDirectorRunRecord;
-    readonly definitionProposalIds: readonly string[];
-    readonly goalPlanProposalIds: readonly string[];
-    readonly eventCardProposalIds: readonly string[];
   }): Promise<DialogueDirectorProposalRuns>;
 }

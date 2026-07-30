@@ -1280,14 +1280,6 @@ function assertFinalCommandResult(
       { command_id: commandId },
     );
   }
-  const status = expectString(result.value, "status", "CommandResult");
-  if (status === "pending") {
-    throw new EngineFault(
-      "command.journal.result_pending",
-      "A pending CommandResult cannot complete a Command Journal entry",
-      { command_id: commandId },
-    );
-  }
 }
 
 function assertSameResult(

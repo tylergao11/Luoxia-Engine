@@ -1,6 +1,8 @@
 import {
   CONTRACT_REF,
   EngineFault,
+  assertJsonValue,
+  deepFreezeJson,
   expectInteger,
   expectJsonObject,
   expectProperty,
@@ -19,6 +21,7 @@ import type {
   ModelRecoveryAuthorization,
   ModelRecoveryAuthorizationVerifier,
 } from "./model-dispatch-authorization.js";
+import { projectModelProviderInput } from "./model-provider-input-projection.js";
 
 export type ModelRequestDocument = ValidatedJsonObject<
   typeof CONTRACT_REF.modelRequest
@@ -37,23 +40,42 @@ export type WorldSnapshotDocument = ValidatedJsonObject<
 >;
 
 /**
- * Internal provider payload: validated request + ordered prompt texts matching resident refs.
- * Provider output remains untrusted JSON.
+ * Minimal internal inference boundary. ModelProvider cannot inspect the
+ * journal/proof request, resident/selection-space digests, or response
+ * correlations. Only the operation route, ordered prompt text, and operation
+ * input cross this boundary. Provider output remains untrusted JSON.
  */
 export interface ResolvedModelInvocation {
-  readonly request: ModelRequestDocument;
-  readonly prompt_blocks: readonly {
-    readonly block_id: string;
-    readonly content_digest: string;
-    readonly text: string;
-  }[];
-  readonly event_context?: {
-    readonly capability_catalog_digest: string;
-    readonly world_law_catalog_digest: string;
-    readonly content_bundle_digest: string;
-    readonly event_contract_digest: string;
-    readonly context_digest: string;
-  };
+  readonly modelProfileId: string;
+  readonly requestKind: string;
+  readonly promptTexts: readonly string[];
+  readonly modelInput: JsonObject;
+}
+
+interface ProviderUsageObservationBase {
+  readonly providerKind: string;
+  readonly providerModel: string;
+}
+
+export type ProviderUsageObservation =
+  | (ProviderUsageObservationBase & {
+      readonly status: "complete";
+      readonly inputTokens: number;
+      readonly cachedInputTokens: number;
+      readonly outputTokens: number;
+    })
+  | (ProviderUsageObservationBase & {
+      readonly status: "partial";
+      readonly inputTokens: number;
+      readonly outputTokens: number;
+    })
+  | (ProviderUsageObservationBase & {
+      readonly status: "absent" | "invalid";
+    });
+
+export interface ModelProviderInvocationResult {
+  readonly output: unknown;
+  readonly usage: ProviderUsageObservation;
 }
 
 export interface ModelProvider {
@@ -65,7 +87,9 @@ export interface ModelProvider {
     readonly modelProfileId: string;
     readonly requestKind: string;
   }): void;
-  invoke(resolved: ResolvedModelInvocation): Promise<unknown>;
+  invoke(
+    resolved: ResolvedModelInvocation,
+  ): Promise<ModelProviderInvocationResult>;
 }
 
 export interface ValidatedModelWorldScope {
@@ -78,7 +102,6 @@ export interface ModelPromptResolution {
     readonly content_digest: string;
     readonly text: string;
   }[];
-  readonly event_context?: ResolvedModelInvocation["event_context"];
 }
 
 declare const preparedModelInvocationSeal: unique symbol;
@@ -104,6 +127,11 @@ export interface VerifiedModelInvocationReceipt {
   readonly proof: VerifiedModelOutputDocument;
 }
 
+export interface CompletedModelInvocation {
+  readonly receipt: VerifiedModelInvocationReceipt;
+  readonly usage: ProviderUsageObservation;
+}
+
 export interface ModelInvocationProvenanceVerifier {
   isPrepared(value: unknown): value is PreparedModelInvocation;
   isVerified(value: unknown): value is VerifiedModelInvocationReceipt;
@@ -116,6 +144,7 @@ export class ModelGateway {
   readonly #dispatchVerifier: ModelDispatchAuthorizationVerifier;
   readonly #recoveryVerifier: ModelRecoveryAuthorizationVerifier;
   readonly #preparedInvocations = new WeakSet<object>();
+  readonly #providerInputs = new WeakMap<object, JsonObject>();
   readonly #verifiedReceipts = new WeakSet<object>();
   readonly #semanticGate = createModelOutputSemanticGate();
   public readonly provenance: ModelInvocationProvenanceVerifier;
@@ -187,19 +216,28 @@ export class ModelGateway {
     }
     assertRequestInputDigest(request, this.#digest);
     this.#semanticGate.assertRequest(request);
+    const requestKind = expectString(
+      request.value,
+      "request_kind",
+      "ModelRequest",
+    );
+    const providerInput = projectModelProviderInput(
+      this.#contracts,
+      requestKind,
+      expectJsonObject(
+        expectProperty(request.value, "input", "ModelRequest"),
+        "ModelRequest.input",
+      ),
+    );
     if (requirePromptTexts) {
       assertPromptResolutionMatchesResident(request, resolution, this.#digest);
     }
 
-    const frozenResolution: ModelPromptResolution =
-      resolution.event_context === undefined
-        ? Object.freeze({
-            prompt_blocks: Object.freeze([...resolution.prompt_blocks]),
-          })
-        : Object.freeze({
-            prompt_blocks: Object.freeze([...resolution.prompt_blocks]),
-            event_context: resolution.event_context,
-          });
+    const frozenResolution: ModelPromptResolution = Object.freeze({
+      prompt_blocks: Object.freeze([
+        ...resolution.prompt_blocks,
+      ]),
+    });
 
     const invocation = Object.freeze({
       worldId,
@@ -209,32 +247,83 @@ export class ModelGateway {
       resolution: frozenResolution,
     }) as PreparedModelInvocation;
     this.#preparedInvocations.add(invocation);
+    this.#providerInputs.set(invocation, providerInput);
     return invocation;
   }
 
   public async invokePrepared(
     authorization: ModelDispatchAuthorization,
-  ): Promise<VerifiedModelInvocationReceipt> {
+  ): Promise<CompletedModelInvocation> {
     const invocation = this.#dispatchVerifier.consume(authorization);
     this.#assertPreparedInvocation(invocation);
-    const resolved: ResolvedModelInvocation =
-      invocation.resolution.event_context === undefined
-        ? Object.freeze({
-            request: invocation.request,
-            prompt_blocks: invocation.resolution.prompt_blocks,
-          })
-        : Object.freeze({
-            request: invocation.request,
-            prompt_blocks: invocation.resolution.prompt_blocks,
-            event_context: invocation.resolution.event_context,
-          });
-    const rawResponse = await this.#provider.invoke(resolved);
+    const providerInput = this.#providerInputs.get(invocation);
+    if (providerInput === undefined) {
+      throw new EngineFault(
+        "model.provider_input.prepared_projection_missing",
+        "Prepared model invocation has no validated provider input projection",
+      );
+    }
+    this.#providerInputs.delete(invocation);
+    const request = invocation.request.value;
+    const resolved: ResolvedModelInvocation = Object.freeze({
+      modelProfileId: expectString(
+        request,
+        "model_profile_id",
+        "ModelRequest",
+      ),
+      requestKind: expectString(
+        request,
+        "request_kind",
+        "ModelRequest",
+      ),
+      promptTexts: Object.freeze(
+        invocation.resolution.prompt_blocks.map((block) => block.text),
+      ),
+      modelInput: providerInput,
+    });
+    const providerResult = await this.#provider.invoke(resolved);
+    const rawOutput = providerResult.output;
+    assertJsonValue(rawOutput, "ModelOutput");
+    const output = deepFreezeJson(
+      expectJsonObject(rawOutput, "ModelOutput"),
+    );
+    const residentContext = expectJsonObject(
+      expectProperty(request, "resident_context", "ModelRequest"),
+      "ModelRequest.resident_context",
+    );
+    const rawResponse = Object.freeze({
+      contract_version: "model-protocol.v1",
+      record_type: "model.response",
+      request_id: expectString(request, "request_id", "ModelRequest"),
+      request_kind: resolved.requestKind,
+      basis_revision: expectInteger(
+        request,
+        "basis_revision",
+        "ModelRequest",
+      ),
+      resident_context_digest: expectString(
+        residentContext,
+        "resident_digest",
+        "ResidentContextRef",
+      ),
+      dynamic_input_digest: expectString(
+        request,
+        "dynamic_input_digest",
+        "ModelRequest",
+      ),
+      output_digest: this.#digest.sha256(output),
+      output,
+    });
     const verified = this.#validateResponse(invocation, rawResponse);
-    return this.#createVerifiedReceipt(
+    const receipt = this.#createVerifiedReceipt(
       invocation,
       verified.response,
       verified.proof,
     );
+    return Object.freeze({
+      receipt,
+      usage: providerResult.usage,
+    });
   }
 
   public verifyRecorded(
@@ -499,17 +588,43 @@ function assertPromptResolutionMatchesResident(
     "ModelRequest.resident_context",
   );
   const refs: JsonObject[] = [];
-  const common = expectProperty(resident, "common_blocks", "ResidentContextRef");
-  if (!Array.isArray(common)) {
-    throw new EngineFault(
-      "model.prompt.common_blocks_shape",
-      "resident_context.common_blocks must be an array",
+  const contextKind = expectString(
+    resident,
+    "context_kind",
+    "ResidentContextRef",
+  );
+  if (contextKind === "director") {
+    const core = expectProperty(
+      resident,
+      "core_blocks",
+      "DirectorResidentContextRef",
     );
-  }
-  for (const entry of common) {
-    refs.push(expectJsonObject(entry as never, "CacheBlockRef"));
-  }
-  if (expectString(resident, "context_kind", "ResidentContextRef") === "character") {
+    if (!Array.isArray(core)) {
+      throw new EngineFault(
+        "model.prompt.core_blocks_shape",
+        "director resident_context.core_blocks must be an array",
+      );
+    }
+    for (const entry of core) {
+      refs.push(expectJsonObject(entry as never, "CacheBlockRef"));
+    }
+    if (resident.system_persona_block !== undefined) {
+      refs.push(
+        expectJsonObject(
+          resident.system_persona_block,
+          "DirectorResidentContextRef.system_persona_block",
+        ),
+      );
+    }
+    if (resident.selection_space_block !== undefined) {
+      refs.push(
+        expectJsonObject(
+          resident.selection_space_block,
+          "DirectorResidentContextRef.selection_space_block",
+        ),
+      );
+    }
+  } else if (contextKind === "character") {
     const persona = expectProperty(
       resident,
       "persona_blocks",
@@ -524,6 +639,12 @@ function assertPromptResolutionMatchesResident(
     for (const entry of persona) {
       refs.push(expectJsonObject(entry as never, "CacheBlockRef"));
     }
+  } else {
+    throw new EngineFault(
+      "model.prompt.context_kind_unknown",
+      "ResidentContextRef context_kind is not supported",
+      { context_kind: contextKind },
+    );
   }
   refs.push(
     expectJsonObject(
@@ -581,36 +702,4 @@ function assertPromptResolutionMatchesResident(
     }
   }
 
-  if (expectString(resident, "context_kind", "ResidentContextRef") === "director") {
-    const eventContext = expectJsonObject(
-      expectProperty(resident, "event_context", "DirectorResidentContextRef"),
-      "event_context",
-    );
-    const payload = resolution.event_context;
-    if (payload === undefined) {
-      throw new EngineFault(
-        "model.prompt.event_context_missing",
-        "Director resolution requires event_context payload",
-      );
-    }
-    const fields = [
-      "context_digest",
-      "event_contract_digest",
-      "content_bundle_digest",
-      "capability_catalog_digest",
-      "world_law_catalog_digest",
-    ] as const;
-    for (const field of fields) {
-      if (
-        expectString(eventContext, field, "EventInvocationContextRef") !==
-        payload[field]
-      ) {
-        throw new EngineFault(
-          "model.prompt.event_context_mismatch",
-          `event_context.${field} does not match resolved payload`,
-          { field },
-        );
-      }
-    }
-  }
 }

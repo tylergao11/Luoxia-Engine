@@ -13,6 +13,7 @@ import {
   materializeContentFieldValues,
   type ContentRuntimeCatalog,
   type ContentRuntimeIdentityMapper,
+  type StateMachineContractAuthority,
   type WorldContentBinding,
 } from "@luoxia/world-core";
 
@@ -47,6 +48,7 @@ export interface RuntimeWorldCreationServiceDependencies {
   readonly contracts: ContractValidator;
   readonly catalog: ContentRuntimeCatalog;
   readonly identityMapper: ContentRuntimeIdentityMapper;
+  readonly stateMachineContracts: StateMachineContractAuthority;
   readonly idFactory: RuntimeWorldCreationIdFactory;
   readonly clock: RuntimeWorldCreationClock;
   readonly saves: RuntimeSaveService;
@@ -69,6 +71,7 @@ interface InitialWorldContext {
   readonly identities: RuntimeIdentityMaps;
   readonly claims: RuntimeIdentityClaims;
   readonly idFactory: RuntimeWorldCreationIdFactory;
+  readonly stateMachineContracts: StateMachineContractAuthority;
 }
 
 /**
@@ -132,6 +135,7 @@ export function createRuntimeWorldCreationService(
         identities,
         claims,
         idFactory: dependencies.idFactory,
+        stateMachineContracts: dependencies.stateMachineContracts,
       });
       const snapshot = dependencies.contracts.assertObject(
         CONTRACT_REF.worldSnapshot,
@@ -441,6 +445,11 @@ function buildWorldSnapshotCandidate(context: InitialWorldContext): JsonObject {
     });
   }
 
+  const initialDayCycle: JsonObject = {
+    day: 1,
+    phase: "autonomous",
+    phase_revision: 0,
+  };
   return {
     world_id: context.worldId,
     world_revision: 0,
@@ -461,12 +470,11 @@ function buildWorldSnapshotCandidate(context: InitialWorldContext): JsonObject {
       stage_instances: [],
       visual_bindings: [],
       control_bindings: controlBindings,
-      day_cycle: {
-        day: 1,
-        phase: "autonomous",
-        phase_revision: 0,
-      },
-      state_machines: materializeInitialStateMachines(context),
+      day_cycle: initialDayCycle,
+      state_machines: materializeInitialStateMachines(
+        context,
+        expectInteger(initialDayCycle, "day", "DayCycleState"),
+      ),
       dialogues: [],
       event_budgets: [],
       event_cards: [],
@@ -591,47 +599,30 @@ function materializeInitialVisibility(
 
 function materializeInitialStateMachines(
   context: InitialWorldContext,
+  enteredDay: number,
 ): JsonObject[] {
-  const machines = new Map<string, JsonObject>();
-  for (const [
-    index,
-    machine,
-  ] of context.binding.initialization.stateMachines.entries()) {
-    const machineId = expectString(
-      machine,
-      "machine_id",
-      `WorldInitializationContent.stateMachines[${index}]`,
-    );
-    if (machines.has(machineId)) {
-      throw new EngineFault(
-        "runtime.world_creation.machine_duplicate",
-        "Initial state machine ID appears more than once",
-        { machine_id: machineId },
-      );
-    }
-    machines.set(machineId, machine);
-  }
-
   return context.binding.initialization.machineBindings.map(
     (machineBinding, index): JsonObject => {
       const path = `WorldInitializationContent.machineBindings[${index}]`;
       const bindingId = expectString(machineBinding, "binding_id", path);
       const machineId = expectString(machineBinding, "machine_id", path);
-      const machine = machines.get(machineId);
-      if (machine === undefined) {
-        throw new EngineFault(
-          "runtime.world_creation.machine_missing",
-          "InitialMachineBinding references a machine outside the selected world",
-          { binding_id: bindingId, machine_id: machineId },
-        );
-      }
       const bindingKind = expectString(
         machineBinding,
         "binding_kind",
         path,
       );
+      const machineRef = catalogRef(
+        context.binding,
+        "state_machine",
+        machineId,
+      );
+      const resolvedMachine =
+        context.stateMachineContracts.resolveBoundMachine({
+          contentBinding: context.binding,
+          machine: machineRef,
+        });
       const machineScope = expectString(
-        machine,
+        resolvedMachine.definition,
         "machine_scope",
         "StateMachineDefinition",
       );
@@ -647,51 +638,21 @@ function materializeInitialStateMachines(
           },
         );
       }
-      const base: Record<string, JsonValue> = {
-        instance_id: requireMappedIdentity(
-          context.identities.machineBindings,
-          bindingId,
-          `${path}.binding_id`,
-        ),
-        machine_scope: machineScope,
-        machine: catalogRef(
-          context.binding,
-          "state_machine",
-          machineId,
-        ),
-        frames: [
-          {
-            frame_id: context.claims.claim(
-              context.idFactory.createId(),
-              `StateMachine initial frame ${bindingId}`,
-            ),
-            state: {
-              state_kind: "defined",
-              state_id: expectString(
-                machine,
-                "initial_state_id",
-                "StateMachineDefinition",
-              ),
-            },
-            entered_day: 1,
-            tenure: {
-              tenure_kind: "indefinite",
-            },
-            continuation: {
-              continuation_kind: "remain",
-            },
-          },
-        ],
-        revision: 0,
-      };
+      let owner: JsonObject;
       if (machineScope === "character") {
-        base["owner_entity_id"] = requireMappedIdentity(
-          context.identities.entities,
-          expectString(machineBinding, "entity_id", path),
-          `${path}.entity_id`,
-        );
+        owner = {
+          owner_kind: "character",
+          entity_id: requireMappedIdentity(
+            context.identities.entities,
+            expectString(machineBinding, "entity_id", path),
+            `${path}.entity_id`,
+          ),
+        };
       } else if (machineScope === "world") {
-        base["world_id"] = context.worldId;
+        owner = {
+          owner_kind: "world",
+          world_id: context.worldId,
+        };
       } else {
         throw new EngineFault(
           "runtime.world_creation.machine_scope_unknown",
@@ -699,7 +660,21 @@ function materializeInitialStateMachines(
           { machine_id: machineId, machine_scope: machineScope },
         );
       }
-      return base;
+      return {
+        instance_id: requireMappedIdentity(
+          context.identities.machineBindings,
+          bindingId,
+          `${path}.binding_id`,
+        ),
+        machine: machineRef,
+        owner,
+        state_id: expectString(
+          resolvedMachine.initialState,
+          "state_id",
+          "MachineStateDefinition",
+        ),
+        entered_day: enteredDay,
+      };
     },
   );
 }

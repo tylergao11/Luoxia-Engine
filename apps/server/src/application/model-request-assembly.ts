@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   EngineFault,
+  expectInteger,
   expectJsonObject,
   expectProperty,
   expectString,
@@ -9,13 +10,16 @@ import {
   type JsonDigest,
   type JsonObject,
 } from "@luoxia/contracts-runtime";
+import type {
+  StateMachineContractAuthority,
+  WorldContentBinding,
+} from "@luoxia/world-core";
 
 import type {
   ModelGateway,
   VerifiedModelInvocationReceipt,
   WorldSnapshotDocument,
 } from "./model-gateway.js";
-import type { PostgresRuntimeInvocationJournal } from "../adapters/postgres/runtime-invocation-journal.js";
 import type {
   CharacterMode,
   DirectorMode,
@@ -32,6 +36,7 @@ import {
 import type {
   CommittedEventReader,
   DailySettlementRunRecord,
+  RuntimeModelInvocationJournal,
   StoredModelInvocation,
 } from "./runtime-persistence.js";
 import type { RuntimeWorldBindingResolver } from "./runtime-world-binding.js";
@@ -39,22 +44,38 @@ import type { RuntimeWorldBindingResolver } from "./runtime-world-binding.js";
 export interface RuntimeModelFacades {
   directorDailySettlement(input: {
     readonly worldId: string;
-    readonly model_profile_id: string;
   }): Promise<VerifiedModelInvocationReceipt>;
 
   directorDialogueEvents(input: {
     readonly worldId: string;
     readonly dialogueId: string;
+    readonly latestPlayerTurnId: string;
     readonly requestId: string;
-    readonly model_profile_id: string;
   }): Promise<VerifiedModelInvocationReceipt>;
 
   directorSystemDialogue(input: {
     readonly worldId: string;
     readonly dialogueId: string;
     readonly playerEntityId: string;
+    readonly latestPlayerTurnId: string;
     readonly requestId: string;
-    readonly model_profile_id: string;
+  }): Promise<VerifiedModelInvocationReceipt>;
+
+  directorGoalPlan(input: {
+    readonly worldId: string;
+    readonly dialogueId: string;
+    readonly playerEntityId: string;
+    readonly latestPlayerTurnId: string;
+    readonly requestId: string;
+  }): Promise<VerifiedModelInvocationReceipt>;
+
+  directorDefinitionDraft(input: {
+    readonly worldId: string;
+    readonly dialogueId: string;
+    readonly playerEntityId: string;
+    readonly latestPlayerTurnId: string;
+    readonly purpose: string;
+    readonly requestId: string;
   }): Promise<VerifiedModelInvocationReceipt>;
 
   characterDialogue(input: {
@@ -63,15 +84,14 @@ export interface RuntimeModelFacades {
     readonly dialogueId: string;
     readonly latestPlayerTurnId: string;
     readonly requestId: string;
-    readonly model_profile_id: string;
   }): Promise<VerifiedModelInvocationReceipt>;
 
   characterReact(input: {
     readonly worldId: string;
     readonly entityId: string;
+    readonly day: number;
     readonly events: readonly JsonObject[];
     readonly requestId: string;
-    readonly model_profile_id: string;
   }): Promise<VerifiedModelInvocationReceipt>;
 }
 
@@ -80,8 +100,16 @@ export function createRuntimeModelFacades(input: {
   readonly worldBindingResolver: RuntimeWorldBindingResolver;
   readonly materializer: PromptMaterializer;
   readonly modelGateway: ModelGateway;
-  readonly journal: PostgresRuntimeInvocationJournal;
+  readonly journal: RuntimeModelInvocationJournal;
   readonly events: CommittedEventReader;
+  readonly stateMachineContracts: StateMachineContractAuthority;
+  readonly directorDailySettlementModelProfileId: string;
+  readonly directorDialogueEventsModelProfileId: string;
+  readonly directorSystemDialogueModelProfileId: string;
+  readonly directorGoalPlanModelProfileId: string;
+  readonly directorDefinitionDraftModelProfileId: string;
+  readonly characterDialogueModelProfileId: string;
+  readonly characterReactModelProfileId: string;
 }): RuntimeModelFacades {
   const assembly = new ModelRequestAssembly({
     digest: input.digest,
@@ -90,6 +118,21 @@ export function createRuntimeModelFacades(input: {
     journal: input.journal,
     materializer: input.materializer,
     events: input.events,
+    stateMachineContracts: input.stateMachineContracts,
+    directorDailySettlementModelProfileId:
+      input.directorDailySettlementModelProfileId,
+    directorDialogueEventsModelProfileId:
+      input.directorDialogueEventsModelProfileId,
+    directorSystemDialogueModelProfileId:
+      input.directorSystemDialogueModelProfileId,
+    directorGoalPlanModelProfileId:
+      input.directorGoalPlanModelProfileId,
+    directorDefinitionDraftModelProfileId:
+      input.directorDefinitionDraftModelProfileId,
+    characterDialogueModelProfileId:
+      input.characterDialogueModelProfileId,
+    characterReactModelProfileId:
+      input.characterReactModelProfileId,
   });
   return Object.freeze({
     directorDailySettlement: (
@@ -101,6 +144,12 @@ export function createRuntimeModelFacades(input: {
     directorSystemDialogue: (
       args: Parameters<RuntimeModelFacades["directorSystemDialogue"]>[0],
     ) => assembly.directorSystemDialogue(args),
+    directorGoalPlan: (
+      args: Parameters<RuntimeModelFacades["directorGoalPlan"]>[0],
+    ) => assembly.directorGoalPlan(args),
+    directorDefinitionDraft: (
+      args: Parameters<RuntimeModelFacades["directorDefinitionDraft"]>[0],
+    ) => assembly.directorDefinitionDraft(args),
     characterDialogue: (
       args: Parameters<RuntimeModelFacades["characterDialogue"]>[0],
     ) => assembly.characterDialogue(args),
@@ -114,17 +163,33 @@ class ModelRequestAssembly {
   readonly #digest: JsonDigest;
   readonly #worldBindingResolver: RuntimeWorldBindingResolver;
   readonly #modelGateway: ModelGateway;
-  readonly #journal: PostgresRuntimeInvocationJournal;
+  readonly #journal: RuntimeModelInvocationJournal;
   readonly #materializer: PromptMaterializer;
   readonly #events: CommittedEventReader;
+  readonly #stateMachineContracts: StateMachineContractAuthority;
+  readonly #directorDailySettlementModelProfileId: string;
+  readonly #directorDialogueEventsModelProfileId: string;
+  readonly #directorSystemDialogueModelProfileId: string;
+  readonly #directorGoalPlanModelProfileId: string;
+  readonly #directorDefinitionDraftModelProfileId: string;
+  readonly #characterDialogueModelProfileId: string;
+  readonly #characterReactModelProfileId: string;
 
   public constructor(input: {
     readonly digest: JsonDigest;
     readonly worldBindingResolver: RuntimeWorldBindingResolver;
     readonly modelGateway: ModelGateway;
-    readonly journal: PostgresRuntimeInvocationJournal;
+    readonly journal: RuntimeModelInvocationJournal;
     readonly materializer: PromptMaterializer;
     readonly events: CommittedEventReader;
+    readonly stateMachineContracts: StateMachineContractAuthority;
+    readonly directorDailySettlementModelProfileId: string;
+    readonly directorDialogueEventsModelProfileId: string;
+    readonly directorSystemDialogueModelProfileId: string;
+    readonly directorGoalPlanModelProfileId: string;
+    readonly directorDefinitionDraftModelProfileId: string;
+    readonly characterDialogueModelProfileId: string;
+    readonly characterReactModelProfileId: string;
   }) {
     this.#digest = input.digest;
     this.#worldBindingResolver = input.worldBindingResolver;
@@ -132,11 +197,25 @@ class ModelRequestAssembly {
     this.#journal = input.journal;
     this.#materializer = input.materializer;
     this.#events = input.events;
+    this.#stateMachineContracts = input.stateMachineContracts;
+    this.#directorDailySettlementModelProfileId =
+      input.directorDailySettlementModelProfileId;
+    this.#directorDialogueEventsModelProfileId =
+      input.directorDialogueEventsModelProfileId;
+    this.#directorSystemDialogueModelProfileId =
+      input.directorSystemDialogueModelProfileId;
+    this.#directorGoalPlanModelProfileId =
+      input.directorGoalPlanModelProfileId;
+    this.#directorDefinitionDraftModelProfileId =
+      input.directorDefinitionDraftModelProfileId;
+    this.#characterDialogueModelProfileId =
+      input.characterDialogueModelProfileId;
+    this.#characterReactModelProfileId =
+      input.characterReactModelProfileId;
   }
 
   public async directorDailySettlement(input: {
     readonly worldId: string;
-    readonly model_profile_id: string;
   }): Promise<VerifiedModelInvocationReceipt> {
     const worldBinding = await this.#worldBindingResolver.resolveCurrent(
       input.worldId,
@@ -153,13 +232,16 @@ class ModelRequestAssembly {
     });
     const storedRun = await this.#journal.read(input.worldId, day);
     if (storedRun !== undefined) {
-      assertStoredDirectorDailyIdentity(storedRun, input);
+      assertStoredDirectorDailyIdentity(
+        storedRun,
+        input,
+        this.#directorDailySettlementModelProfileId,
+      );
       const prepared = this.#modelGateway.prepare(
         Object.freeze({ snapshot: storedRun.invocation.snapshot }),
         storedRun.invocation.request.value,
         Object.freeze({
           prompt_blocks: materialized.ordered_blocks,
-          event_context: materialized.event_context,
         }),
       );
       return continueModelFromStored({
@@ -168,7 +250,6 @@ class ModelRequestAssembly {
         prepared,
         stored: storedRun.invocation,
         requestId: storedRun.invocation.requestId,
-        dailyRunId: storedRun.runId,
       });
     }
 
@@ -184,20 +265,24 @@ class ModelRequestAssembly {
       throughRevisionInclusive: currentRevision,
     });
     const dynamicInput = Object.freeze({
-      world_view: projectDirectorWorldView(worldState, day),
+      world_view: projectDirectorWorldView(
+        input.worldId,
+        worldState,
+        day,
+        worldBinding.contentBinding,
+        this.#stateMachineContracts,
+      ),
       objective_traces: projectObjectiveTraces({
         events: committedEvents,
         currentDay: day,
-        createTraceId: randomUUID,
       }),
     });
     return this.#invoke({
       snapshot,
       requestKind: "director.daily_settlement",
-      modelProfileId: input.model_profile_id,
+      modelProfileId: this.#directorDailySettlementModelProfileId,
       residentContext: materialized.resident_context,
       promptBlocks: materialized.ordered_blocks,
-      eventContext: materialized.event_context,
       dynamicInput,
     });
   }
@@ -205,17 +290,34 @@ class ModelRequestAssembly {
   public async directorDialogueEvents(input: {
     readonly worldId: string;
     readonly dialogueId: string;
+    readonly latestPlayerTurnId: string;
     readonly requestId: string;
-    readonly model_profile_id: string;
   }): Promise<VerifiedModelInvocationReceipt> {
     return this.#directorDialogueInvocation(
       "dialogue_events",
-      input,
+      Object.freeze({
+        ...input,
+        model_profile_id: this.#directorDialogueEventsModelProfileId,
+      }),
       async (ctx) => {
         const day = readDayNumber(ctx.worldState);
+        const dialogue = projectDialogue(
+          ctx.worldState,
+          input.dialogueId,
+        );
         return Object.freeze({
-          world_view: projectDirectorWorldView(ctx.worldState, day),
-          dialogue: projectDialogue(ctx.worldState, input.dialogueId),
+          world_view: projectDirectorWorldView(
+            input.worldId,
+            ctx.worldState,
+            day,
+            ctx.contentBinding,
+            this.#stateMachineContracts,
+          ),
+          dialogue,
+          response_locale: readDialogueTurnLocale(
+            dialogue,
+            input.latestPlayerTurnId,
+          ),
         });
       },
     );
@@ -225,21 +327,96 @@ class ModelRequestAssembly {
     readonly worldId: string;
     readonly dialogueId: string;
     readonly playerEntityId: string;
+    readonly latestPlayerTurnId: string;
     readonly requestId: string;
-    readonly model_profile_id: string;
   }): Promise<VerifiedModelInvocationReceipt> {
     return this.#directorDialogueInvocation(
       "system_dialogue",
-      input,
+      Object.freeze({
+        ...input,
+        model_profile_id: this.#directorSystemDialogueModelProfileId,
+      }),
       async (ctx) => {
-        const day = readDayNumber(ctx.worldState);
+        const dialogue = projectDialogue(ctx.worldState, input.dialogueId);
         return Object.freeze({
-          world_view: projectDirectorWorldView(ctx.worldState, day),
           knowledge_view: projectKnowledgeView(
             ctx.worldState,
             input.playerEntityId,
           ),
-          dialogue: projectDialogue(ctx.worldState, input.dialogueId),
+          dialogue,
+          response_locale: readDialogueTurnLocale(
+            dialogue,
+            input.latestPlayerTurnId,
+          ),
+        });
+      },
+    );
+  }
+
+  public async directorGoalPlan(input: {
+    readonly worldId: string;
+    readonly dialogueId: string;
+    readonly playerEntityId: string;
+    readonly latestPlayerTurnId: string;
+    readonly requestId: string;
+  }): Promise<VerifiedModelInvocationReceipt> {
+    return this.#directorDialogueInvocation(
+      "goal_plan",
+      Object.freeze({
+        ...input,
+        model_profile_id: this.#directorGoalPlanModelProfileId,
+      }),
+      async (ctx) => {
+        const dialogue = projectDialogue(ctx.worldState, input.dialogueId);
+        return Object.freeze({
+          world_view: projectDirectorWorldView(
+            input.worldId,
+            ctx.worldState,
+            readDayNumber(ctx.worldState),
+            ctx.contentBinding,
+            this.#stateMachineContracts,
+          ),
+          knowledge_view: projectKnowledgeView(
+            ctx.worldState,
+            input.playerEntityId,
+          ),
+          dialogue,
+          response_locale: readDialogueTurnLocale(
+            dialogue,
+            input.latestPlayerTurnId,
+          ),
+        });
+      },
+    );
+  }
+
+  public async directorDefinitionDraft(input: {
+    readonly worldId: string;
+    readonly dialogueId: string;
+    readonly playerEntityId: string;
+    readonly latestPlayerTurnId: string;
+    readonly purpose: string;
+    readonly requestId: string;
+  }): Promise<VerifiedModelInvocationReceipt> {
+    return this.#directorDialogueInvocation(
+      "definition_draft",
+      Object.freeze({
+        ...input,
+        model_profile_id: this.#directorDefinitionDraftModelProfileId,
+      }),
+      async (ctx) => {
+        const dialogue = projectDialogue(ctx.worldState, input.dialogueId);
+        return Object.freeze({
+          knowledge_view: projectKnowledgeView(
+            ctx.worldState,
+            input.playerEntityId,
+          ),
+          dialogue,
+          response_locale: readDialogueTurnLocale(
+            dialogue,
+            input.latestPlayerTurnId,
+          ),
+          purpose: input.purpose,
         });
       },
     );
@@ -251,9 +428,13 @@ class ModelRequestAssembly {
     readonly dialogueId: string;
     readonly latestPlayerTurnId: string;
     readonly requestId: string;
-    readonly model_profile_id: string;
   }): Promise<VerifiedModelInvocationReceipt> {
-    return this.#characterDialogue(input);
+    return this.#characterDialogue(
+      Object.freeze({
+        ...input,
+        model_profile_id: this.#characterDialogueModelProfileId,
+      }),
+    );
   }
 
   async #characterDialogue(input: {
@@ -270,15 +451,23 @@ class ModelRequestAssembly {
     }
     try {
       return await this.#runCharacter("dialogue", input, async (ctx) =>
-        Object.freeze({
-          subjective_view: projectCharacterSubjectiveView(
-            input.worldId,
-            ctx.worldState,
-            input.entityId,
-          ),
-          dialogue: projectDialogue(ctx.worldState, input.dialogueId),
-          latest_player_turn_id: input.latestPlayerTurnId,
-        }),
+        {
+          const dialogue = projectDialogue(ctx.worldState, input.dialogueId);
+          return Object.freeze({
+            subjective_view: projectCharacterSubjectiveView(
+              input.worldId,
+              ctx.worldState,
+              input.entityId,
+              ctx.contentBinding,
+              this.#stateMachineContracts,
+            ),
+            dialogue,
+            response_locale: readDialogueTurnLocale(
+              dialogue,
+              input.latestPlayerTurnId,
+            ),
+          });
+        },
       );
     } catch (error: unknown) {
       if (
@@ -355,13 +544,28 @@ class ModelRequestAssembly {
       prepared,
       stored,
       requestId: input.requestId,
-      dailyRunId: undefined,
     });
   }
 
   public async characterReact(input: {
     readonly worldId: string;
     readonly entityId: string;
+    readonly day: number;
+    readonly events: readonly JsonObject[];
+    readonly requestId: string;
+  }): Promise<VerifiedModelInvocationReceipt> {
+    return this.#characterReact(
+      Object.freeze({
+        ...input,
+        model_profile_id: this.#characterReactModelProfileId,
+      }),
+    );
+  }
+
+  async #characterReact(input: {
+    readonly worldId: string;
+    readonly entityId: string;
+    readonly day: number;
     readonly events: readonly JsonObject[];
     readonly requestId: string;
     readonly model_profile_id: string;
@@ -369,7 +573,7 @@ class ModelRequestAssembly {
     if (input.events.length === 0) {
       throw new EngineFault(
         "model.assembly.react_events_empty",
-        "character.react requires at least one CharacterEventStimulus from committed authority",
+        "character.react requires at least one locally materialized CharacterReactEventInput",
         { entity_id: input.entityId },
       );
     }
@@ -378,16 +582,32 @@ class ModelRequestAssembly {
       return this.#recoverCharacterReact(input, stored);
     }
     try {
-      return await this.#runCharacter("react", input, async (ctx) =>
-        Object.freeze({
+      return await this.#runCharacter("react", input, async (ctx) => {
+        const authoritativeDay = readDayNumber(ctx.worldState);
+        if (authoritativeDay !== input.day) {
+          throw new EngineFault(
+            "model.assembly.character_react_day_mismatch",
+            "Character reaction request day differs from its locked WorldState",
+            {
+              requested_day: input.day,
+              authoritative_day: authoritativeDay,
+              world_id: input.worldId,
+              entity_id: input.entityId,
+            },
+          );
+        }
+        return Object.freeze({
           subjective_view: projectCharacterSubjectiveView(
             input.worldId,
             ctx.worldState,
             input.entityId,
+            ctx.contentBinding,
+            this.#stateMachineContracts,
           ),
+          day: authoritativeDay,
           events: Object.freeze([...input.events]),
-        }),
-      );
+        });
+      });
     } catch (error: unknown) {
       if (
         !(error instanceof EngineFault) ||
@@ -407,6 +627,7 @@ class ModelRequestAssembly {
     input: {
       readonly worldId: string;
       readonly entityId: string;
+      readonly day: number;
       readonly events: readonly JsonObject[];
       readonly requestId: string;
       readonly model_profile_id: string;
@@ -462,22 +683,28 @@ class ModelRequestAssembly {
       prepared,
       stored,
       requestId: input.requestId,
-      dailyRunId: undefined,
     });
   }
 
   async #directorDialogueInvocation(
-    mode: "dialogue_events" | "system_dialogue",
+    mode:
+      | "dialogue_events"
+      | "system_dialogue"
+      | "goal_plan"
+      | "definition_draft",
     input: {
       readonly worldId: string;
       readonly dialogueId: string;
       readonly playerEntityId?: string;
+      readonly latestPlayerTurnId?: string;
+      readonly purpose?: string;
       readonly requestId: string;
       readonly model_profile_id: string;
     },
     buildInput: (ctx: {
       readonly worldState: JsonObject;
       readonly snapshot: WorldSnapshotDocument;
+      readonly contentBinding: WorldContentBinding;
     }) => Promise<JsonObject>,
   ): Promise<VerifiedModelInvocationReceipt> {
     const stored = await this.#journal.readByRequestId(input.requestId);
@@ -502,11 +729,17 @@ class ModelRequestAssembly {
   }
 
   async #recoverDirectorDialogue(
-    mode: "dialogue_events" | "system_dialogue",
+    mode:
+      | "dialogue_events"
+      | "system_dialogue"
+      | "goal_plan"
+      | "definition_draft",
     input: {
       readonly worldId: string;
       readonly dialogueId: string;
       readonly playerEntityId?: string;
+      readonly latestPlayerTurnId?: string;
+      readonly purpose?: string;
       readonly requestId: string;
       readonly model_profile_id: string;
     },
@@ -551,7 +784,6 @@ class ModelRequestAssembly {
       stored.request.value,
       Object.freeze({
         prompt_blocks: materialized.ordered_blocks,
-        event_context: materialized.event_context,
       }),
     );
     return continueModelFromStored({
@@ -560,7 +792,6 @@ class ModelRequestAssembly {
       prepared,
       stored,
       requestId: input.requestId,
-      dailyRunId: undefined,
     });
   }
 
@@ -574,6 +805,7 @@ class ModelRequestAssembly {
     buildInput: (ctx: {
       readonly worldState: JsonObject;
       readonly snapshot: WorldSnapshotDocument;
+      readonly contentBinding: WorldContentBinding;
     }) => Promise<JsonObject>,
   ): Promise<VerifiedModelInvocationReceipt> {
     const worldBinding = await this.#worldBindingResolver.resolveCurrent(
@@ -584,24 +816,22 @@ class ModelRequestAssembly {
       expectProperty(snapshot.value, "world_state", "WorldSnapshot"),
       "WorldSnapshot.world_state",
     );
-    const dynamicInput = await buildInput({ worldState, snapshot });
+    const dynamicInput = await buildInput({
+      worldState,
+      snapshot,
+      contentBinding: worldBinding.contentBinding,
+    });
     const materialized = this.#materializer.materializeDirector({
       contentBinding: worldBinding.contentBinding,
       mode,
     });
-    const requestKind =
-      mode === "daily_settlement"
-        ? "director.daily_settlement"
-        : mode === "dialogue_events"
-          ? "director.dialogue_events"
-          : "director.system_dialogue";
+    const requestKind = directorRequestKind(mode);
     return this.#invoke({
       snapshot,
       requestKind,
       modelProfileId: input.model_profile_id,
       residentContext: materialized.resident_context,
       promptBlocks: materialized.ordered_blocks,
-      eventContext: materialized.event_context,
       dynamicInput,
       requestId: input.requestId,
     });
@@ -618,6 +848,7 @@ class ModelRequestAssembly {
     buildInput: (ctx: {
       readonly worldState: JsonObject;
       readonly snapshot: WorldSnapshotDocument;
+      readonly contentBinding: WorldContentBinding;
     }) => Promise<JsonObject>,
   ): Promise<VerifiedModelInvocationReceipt> {
     const worldBinding = await this.#worldBindingResolver.resolveCurrent(
@@ -628,7 +859,11 @@ class ModelRequestAssembly {
       expectProperty(snapshot.value, "world_state", "WorldSnapshot"),
       "WorldSnapshot.world_state",
     );
-    const dynamicInput = await buildInput({ worldState, snapshot });
+    const dynamicInput = await buildInput({
+      worldState,
+      snapshot,
+      contentBinding: worldBinding.contentBinding,
+    });
     const materialized = this.#materializer.materializeCharacter({
       contentBinding: worldBinding.contentBinding,
       runtimeWorldId: expectString(
@@ -647,7 +882,6 @@ class ModelRequestAssembly {
       modelProfileId: input.model_profile_id,
       residentContext: materialized.resident_context,
       promptBlocks: materialized.ordered_blocks,
-      eventContext: undefined,
       dynamicInput,
       ...(input.requestId === undefined
         ? {}
@@ -665,15 +899,6 @@ class ModelRequestAssembly {
       readonly content_digest: string;
       readonly text: string;
     }[];
-    readonly eventContext:
-      | {
-          readonly capability_catalog_digest: string;
-          readonly world_law_catalog_digest: string;
-          readonly content_bundle_digest: string;
-          readonly event_contract_digest: string;
-          readonly context_digest: string;
-        }
-      | undefined;
     readonly dynamicInput: JsonObject;
     readonly requestId?: string;
   }): Promise<VerifiedModelInvocationReceipt> {
@@ -694,17 +919,10 @@ class ModelRequestAssembly {
       input: input.dynamicInput,
     });
 
-    const resolution =
-      input.eventContext === undefined
-        ? Object.freeze({ prompt_blocks: input.promptBlocks })
-        : Object.freeze({
-            prompt_blocks: input.promptBlocks,
-            event_context: input.eventContext,
-          });
     const prepared = this.#modelGateway.prepare(
       Object.freeze({ snapshot: input.snapshot }),
       candidate,
-      resolution,
+      Object.freeze({ prompt_blocks: input.promptBlocks }),
     );
 
     const requestId = expectString(
@@ -727,7 +945,6 @@ class ModelRequestAssembly {
         prepared,
         stored: run.invocation,
         requestId,
-        dailyRunId: run.runId,
       });
     }
 
@@ -738,18 +955,16 @@ class ModelRequestAssembly {
       prepared,
       stored,
       requestId,
-      dailyRunId: undefined,
     });
   }
 }
 
 async function continueModelFromStored(input: {
   readonly modelGateway: ModelGateway;
-  readonly journal: PostgresRuntimeInvocationJournal;
+  readonly journal: RuntimeModelInvocationJournal;
   readonly prepared: ReturnType<ModelGateway["prepare"]>;
   readonly stored: StoredModelInvocation;
   readonly requestId: string;
-  readonly dailyRunId: string | undefined;
 }): Promise<VerifiedModelInvocationReceipt> {
   switch (input.stored.phase) {
     case "verified": {
@@ -777,27 +992,17 @@ async function continueModelFromStored(input: {
         },
       );
     case "prepared": {
-      const authorization =
-        input.dailyRunId === undefined
-          ? (await input.journal.markDispatched(input.prepared)).authorization
-          : (
-              await input.journal.markDirectorDispatched(
-                input.dailyRunId,
-                input.prepared,
-              )
-            ).authorization;
+      const authorization = (
+        await input.journal.markDispatched(input.prepared)
+      ).authorization;
       try {
-        const receipt =
+        const completion =
           await input.modelGateway.invokePrepared(authorization);
-        if (input.dailyRunId === undefined) {
-          await input.journal.recordVerified(receipt);
-        } else {
-          await input.journal.recordDirectorVerified(
-            input.dailyRunId,
-            receipt,
-          );
-        }
-        return receipt;
+        await input.journal.recordVerified(
+          completion.receipt,
+          completion.usage,
+        );
+        return completion.receipt;
       } catch (error: unknown) {
         if (
           error instanceof EngineFault &&
@@ -845,6 +1050,61 @@ function expectIntegerSafe(object: JsonObject, field: string): number {
     );
   }
   return value;
+}
+
+function readDialogueTurnLocale(
+  dialogue: JsonObject,
+  turnId: string,
+): string {
+  const turnsValue = expectProperty(dialogue, "turns", "DialogueRecord");
+  if (!Array.isArray(turnsValue)) {
+    throw new EngineFault(
+      "model.assembly.dialogue_turns_shape",
+      "DialogueRecord.turns must be an array",
+      { turn_id: turnId },
+    );
+  }
+  const matches = turnsValue
+    .map((entry, index) =>
+      expectJsonObject(entry as never, `DialogueRecord.turns[${index}]`),
+    )
+    .filter(
+      (turn) => expectString(turn, "turn_id", "DialogueTurn") === turnId,
+    );
+  if (matches.length !== 1) {
+    throw new EngineFault(
+      "model.assembly.player_turn_identity_invalid",
+      "The command-owned player turn must resolve exactly once in the locked dialogue",
+      { turn_id: turnId, matches: matches.length },
+    );
+  }
+  const turn = matches[0] as JsonObject;
+  const finalTurn = expectJsonObject(
+    turnsValue[turnsValue.length - 1] as never,
+    "DialogueRecord.turns[last]",
+  );
+  if (expectString(finalTurn, "turn_id", "DialogueTurn") !== turnId) {
+    throw new EngineFault(
+      "model.assembly.player_turn_not_final",
+      "The command-owned player turn must be the final turn in the locked dialogue",
+      {
+        turn_id: turnId,
+        final_turn_id: expectString(finalTurn, "turn_id", "DialogueTurn"),
+      },
+    );
+  }
+  const source = expectJsonObject(
+    expectProperty(turn, "source", "DialogueTurn"),
+    "DialogueTurn.source",
+  );
+  if (expectString(source, "source_kind", "DialogueTurnSource") !== "human") {
+    throw new EngineFault(
+      "model.assembly.player_turn_source_invalid",
+      "The response locale must come from the exact human turn",
+      { turn_id: turnId },
+    );
+  }
+  return expectString(turn, "locale", "DialogueTurn");
 }
 
 function assertStoredCharacterDialogueIdentity(
@@ -895,9 +1155,9 @@ function assertStoredCharacterDialogueIdentity(
       input.dialogueId ||
     expectString(
       dynamicInput,
-      "latest_player_turn_id",
+      "response_locale",
       "CharacterDialogueInput",
-    ) !== input.latestPlayerTurnId;
+    ) !== readDialogueTurnLocale(dialogue, input.latestPlayerTurnId);
   if (mismatched) {
     throw new EngineFault(
       "model.assembly.command_identity_conflict",
@@ -917,8 +1177,8 @@ function assertStoredDirectorDailyIdentity(
   stored: DailySettlementRunRecord,
   input: {
     readonly worldId: string;
-    readonly model_profile_id: string;
   },
+  expectedModelProfileId: string,
 ): void {
   const request = stored.invocation.request.value;
   if (
@@ -926,7 +1186,7 @@ function assertStoredDirectorDailyIdentity(
     stored.invocation.worldId !== input.worldId ||
     stored.invocation.requestKind !== "director.daily_settlement" ||
     expectString(request, "model_profile_id", "ModelRequest") !==
-      input.model_profile_id
+      expectedModelProfileId
   ) {
     throw new EngineFault(
       "model.assembly.daily_identity_conflict",
@@ -935,7 +1195,7 @@ function assertStoredDirectorDailyIdentity(
         world_id: input.worldId,
         day: stored.day,
         request_id: stored.invocation.requestId,
-        model_profile_id: input.model_profile_id,
+        model_profile_id: expectedModelProfileId,
       },
     );
   }
@@ -943,11 +1203,17 @@ function assertStoredDirectorDailyIdentity(
 
 function assertStoredDirectorDialogueIdentity(
   stored: StoredModelInvocation,
-  mode: "dialogue_events" | "system_dialogue",
+  mode:
+    | "dialogue_events"
+    | "system_dialogue"
+    | "goal_plan"
+    | "definition_draft",
   input: {
     readonly worldId: string;
     readonly dialogueId: string;
     readonly playerEntityId?: string;
+    readonly latestPlayerTurnId?: string;
+    readonly purpose?: string;
     readonly requestId: string;
     readonly model_profile_id: string;
   },
@@ -961,28 +1227,47 @@ function assertStoredDirectorDialogueIdentity(
     expectProperty(dynamicInput, "dialogue", "DirectorDialogueInput"),
     "DirectorDialogueInput.dialogue",
   );
-  const expectedKind =
-    mode === "dialogue_events"
-      ? "director.dialogue_events"
-      : "director.system_dialogue";
+  const expectedKind = directorRequestKind(mode);
   let playerIdentityMatches = true;
-  if (mode === "system_dialogue") {
+  if (mode === "dialogue_events") {
+    playerIdentityMatches =
+      input.latestPlayerTurnId !== undefined &&
+      expectString(
+        dynamicInput,
+        "response_locale",
+        "DirectorDialogueEventsInput",
+      ) === readDialogueTurnLocale(dialogue, input.latestPlayerTurnId);
+  } else {
     const knowledgeView = expectJsonObject(
       expectProperty(
         dynamicInput,
         "knowledge_view",
-        "DirectorSystemDialogueInput",
+        "Director dialogue interaction input",
       ),
-      "DirectorSystemDialogueInput.knowledge_view",
+      "Director dialogue interaction input.knowledge_view",
     );
     playerIdentityMatches =
       input.playerEntityId !== undefined &&
+      input.latestPlayerTurnId !== undefined &&
       expectString(
         knowledgeView,
         "viewer_entity_id",
         "KnowledgeView",
-      ) === input.playerEntityId;
+      ) === input.playerEntityId &&
+      expectString(
+        dynamicInput,
+        "response_locale",
+        "Director dialogue interaction input",
+      ) === readDialogueTurnLocale(dialogue, input.latestPlayerTurnId);
   }
+  const purposeMatches =
+    mode !== "definition_draft" ||
+    (input.purpose !== undefined &&
+      expectString(
+        dynamicInput,
+        "purpose",
+        "DirectorDefinitionDraftInput",
+      ) === input.purpose);
   if (
     stored.requestId !== input.requestId ||
     stored.worldId !== input.worldId ||
@@ -991,7 +1276,8 @@ function assertStoredDirectorDialogueIdentity(
       input.model_profile_id ||
     expectString(dialogue, "dialogue_id", "DialogueRecord") !==
       input.dialogueId ||
-    !playerIdentityMatches
+    !playerIdentityMatches ||
+    !purposeMatches
   ) {
     throw new EngineFault(
       "model.assembly.director_dialogue_identity_conflict",
@@ -1007,11 +1293,27 @@ function assertStoredDirectorDialogueIdentity(
   }
 }
 
+function directorRequestKind(mode: DirectorMode): string {
+  switch (mode) {
+    case "daily_settlement":
+      return "director.daily_settlement";
+    case "dialogue_events":
+      return "director.dialogue_events";
+    case "system_dialogue":
+      return "director.system_dialogue";
+    case "goal_plan":
+      return "director.goal_plan";
+    case "definition_draft":
+      return "director.definition_draft";
+  }
+}
+
 function assertStoredCharacterReactIdentity(
   stored: StoredModelInvocation,
   input: {
     readonly worldId: string;
     readonly entityId: string;
+    readonly day: number;
     readonly events: readonly JsonObject[];
     readonly requestId: string;
     readonly model_profile_id: string;
@@ -1042,6 +1344,7 @@ function assertStoredCharacterReactIdentity(
       input.model_profile_id ||
     expectString(character, "world_id", "EntityRef") !== input.worldId ||
     expectString(character, "entity_id", "EntityRef") !== input.entityId ||
+    expectInteger(dynamicInput, "day", "CharacterReactInput") !== input.day ||
     !jsonEquals(
       expectProperty(dynamicInput, "events", "CharacterReactInput"),
       input.events as unknown as import("@luoxia/contracts-runtime").JsonValue,

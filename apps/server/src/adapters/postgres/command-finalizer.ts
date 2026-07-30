@@ -18,6 +18,11 @@ import type {
   CommandFinalizer,
   EventCardCompletionBranch,
 } from "../../application/command-finalizer.js";
+import {
+  dialogueDirectorProposalKind,
+  type DialogueDirectorProposalKind,
+  type DialogueDirectorRequestKind,
+} from "../../application/dialogue-director-run.js";
 import { isStageOutcomePreInvocationRejectionCode } from "../../application/stage-outcome-pre-invocation-rejection.js";
 import type { EngineSessionRecord } from "../../application/engine-session.js";
 import type {
@@ -66,9 +71,11 @@ interface FinalizationCommandRow {
   readonly human_turn_id: string | null;
   readonly character_model_request_id: string | null;
   readonly character_turn_id: string | null;
-  readonly director_request_kind: string | null;
-  readonly director_model_request_id: string | null;
-  readonly director_response_turn_id: string | null;
+  readonly director_dialogue_events_model_request_id: string | null;
+  readonly director_system_model_request_id: string | null;
+  readonly director_system_response_turn_id: string | null;
+  readonly director_goal_plan_model_request_id: string | null;
+  readonly director_definition_draft_model_request_id: string | null;
   readonly player_day_from_day_text: string | null;
   readonly event_card_packet_id: string | null;
   readonly navigation_rule_request_id: string | null;
@@ -104,6 +111,7 @@ interface ValidatedFinalizationCommand {
     | undefined;
   readonly responseTurnId: string | undefined;
   readonly responseModelRequestId: string | undefined;
+  readonly dialogueEventsModelRequestId: string | undefined;
   readonly playerDayFromDay: number | undefined;
   readonly eventCardId: string | undefined;
   readonly eventCardPacketId: string | undefined;
@@ -187,7 +195,7 @@ interface ContentUpgradeCompletionRow {
 }
 
 interface DialogueProposalHistoryRow {
-  readonly proposal_kind: string;
+  readonly request_kind: string;
   readonly model_proposal_id: string;
   readonly proposal_ordinal: number;
   readonly world_record_id: string | null;
@@ -195,6 +203,17 @@ interface DialogueProposalHistoryRow {
   readonly operation_kind: string | null;
   readonly invocation_status: string | null;
   readonly packet_proposal_id: string | null;
+}
+
+interface DialogueProposalHistoryRecord
+  extends DialogueProposalHistoryRow {
+  readonly proposal_kind: DialogueDirectorProposalKind;
+}
+
+interface DialogueDirectorOutputRow {
+  readonly request_kind: string;
+  readonly invocation_status: string;
+  readonly response_document: unknown | null;
 }
 
 interface DayCycleExecutionIdentityRow {
@@ -1331,6 +1350,7 @@ function assertAcceptedCompletionIdentity(
     stageInstanceId !== undefined ||
     !Number.isSafeInteger(minimumFinalRevision) ||
     finalWorldRevision < minimumFinalRevision ||
+    command.dialogueEventsModelRequestId === undefined ||
     responseTurnId === undefined ||
     responseTurnId !== requireDialogueResponseTurnId(command)
   ) {
@@ -1346,6 +1366,8 @@ function assertAcceptedCompletionIdentity(
         actual_final_world_revision: finalWorldRevision,
         expected_response_turn_id: command.responseTurnId ?? null,
         actual_response_turn_id: responseTurnId ?? null,
+        dialogue_events_model_request_id:
+          command.dialogueEventsModelRequestId ?? null,
       },
     );
   }
@@ -1387,10 +1409,10 @@ async function readDialogueProposalHistoryRows(input: {
   readonly client: PoolClient;
   readonly contracts: ContractValidator;
   readonly command: ValidatedFinalizationCommand;
-}): Promise<readonly DialogueProposalHistoryRow[]> {
+}): Promise<readonly DialogueProposalHistoryRecord[]> {
   const proposalQuery =
     await input.client.query<DialogueProposalHistoryRow>(
-      `SELECT proposal.proposal_kind,
+      `SELECT proposal.request_kind,
               proposal.proposal_id::text AS model_proposal_id,
               proposal.proposal_ordinal,
               proposal.world_record_id::text AS world_record_id,
@@ -1403,20 +1425,147 @@ async function readDialogueProposalHistoryRows(input: {
            ON invocation.request_id = proposal.rule_request_id
         WHERE proposal.session_id = $1::uuid
           AND proposal.command_id = $2::uuid
-        ORDER BY CASE proposal.proposal_kind
-                   WHEN 'definition' THEN 0
-                   WHEN 'goal_plan' THEN 1
-                   WHEN 'event_card' THEN 2
+        ORDER BY CASE proposal.request_kind
+                   WHEN 'director.definition_draft' THEN 0
+                   WHEN 'director.goal_plan' THEN 1
+                   WHEN 'director.dialogue_events' THEN 2
                    ELSE 3
                  END,
                  proposal.proposal_ordinal`,
       [input.command.sessionId, input.command.commandId],
     );
-  return validateDialogueProposalHistoryRows(
+  const validatedRows = validateDialogueProposalHistoryRows(
     input.contracts,
     input.command,
     proposalQuery.rows,
   );
+  const directorQuery =
+    await input.client.query<DialogueDirectorOutputRow>(
+      `SELECT run.request_kind,
+              invocation.invocation_status,
+              invocation.response_document
+         FROM luoxia_engine.dialogue_director_runs AS run
+         JOIN luoxia_engine.model_invocations AS invocation
+           ON invocation.request_id = run.model_request_id
+        WHERE run.session_id = $1::uuid
+          AND run.command_id = $2::uuid
+        ORDER BY run.request_kind`,
+      [input.command.sessionId, input.command.commandId],
+    );
+  assertDialogueProposalCoverage(
+    input.contracts,
+    input.command,
+    validatedRows,
+    directorQuery.rows,
+  );
+  return validatedRows;
+}
+
+function assertDialogueProposalCoverage(
+  contracts: ContractValidator,
+  command: ValidatedFinalizationCommand,
+  proposals: readonly DialogueProposalHistoryRecord[],
+  directorRuns: readonly DialogueDirectorOutputRow[],
+): void {
+  const seen = new Set<string>();
+  for (const run of directorRuns) {
+    if (
+      seen.has(run.request_kind) ||
+      run.invocation_status !== "verified" ||
+      run.response_document === null
+    ) {
+      throw new EngineFault(
+        "command.finalizer.dialogue_director_history_corrupt",
+        "Dialogue Director run is duplicated or lacks a verified response",
+        {
+          session_id: command.sessionId,
+          command_id: command.commandId,
+          request_kind: run.request_kind,
+          invocation_status: run.invocation_status,
+        },
+      );
+    }
+    seen.add(run.request_kind);
+    const response = contracts.assertObject(
+      CONTRACT_REF.modelResponse,
+      run.response_document,
+    ).value;
+    const output = expectJsonObject(
+      expectProperty(response, "output", "ModelResponse"),
+      "ModelResponse.output",
+    );
+    if (
+      expectString(response, "request_kind", "ModelResponse") !==
+        run.request_kind ||
+      expectString(output, "output_kind", "ModelOutput") !==
+        run.request_kind
+    ) {
+      throw new EngineFault(
+        "command.finalizer.dialogue_director_history_corrupt",
+        "Dialogue Director response does not match its persisted request kind",
+        {
+          session_id: command.sessionId,
+          command_id: command.commandId,
+          request_kind: run.request_kind,
+        },
+      );
+    }
+    let expectedProposalCount: number;
+    switch (run.request_kind) {
+      case "director.dialogue_events": {
+        const eventCards = expectProperty(
+          output,
+          "event_cards",
+          "DirectorDialogueEventsOutput",
+        );
+        if (!Array.isArray(eventCards)) {
+          throw new EngineFault(
+            "command.finalizer.dialogue_director_history_corrupt",
+            "Verified dialogue-event output has no event_cards array",
+            {
+              session_id: command.sessionId,
+              command_id: command.commandId,
+            },
+          );
+        }
+        expectedProposalCount = eventCards.length;
+        break;
+      }
+      case "director.goal_plan":
+      case "director.definition_draft":
+        expectedProposalCount = 1;
+        break;
+      case "director.system_dialogue":
+        expectedProposalCount = 0;
+        break;
+      default:
+        throw new EngineFault(
+          "command.finalizer.dialogue_director_history_corrupt",
+          "Dialogue Director run has an unsupported request kind",
+          {
+            session_id: command.sessionId,
+            command_id: command.commandId,
+            request_kind: run.request_kind,
+          },
+        );
+    }
+    const actualProposalCount = proposals.filter(
+      (proposal) => proposal.request_kind === run.request_kind,
+    ).length;
+    if (actualProposalCount !== expectedProposalCount) {
+      throw new EngineFault(
+        "command.finalizer.dialogue_director_history_incomplete",
+        "Dialogue proposal identities do not exactly cover the verified Director output",
+        {
+          session_id: command.sessionId,
+          command_id: command.commandId,
+          request_kind: run.request_kind,
+          expected_proposal_count: expectedProposalCount,
+          actual_proposal_count: actualProposalCount,
+        },
+      );
+    }
+  }
 }
 
 async function assertDialogueCompletionHistory(input: {
@@ -3343,27 +3492,39 @@ function validateDialogueProposalHistoryRows(
   contracts: ContractValidator,
   command: ValidatedFinalizationCommand,
   rows: readonly DialogueProposalHistoryRow[],
-): readonly DialogueProposalHistoryRow[] {
-  const nextOrdinal: Record<string, number> = {
+): readonly DialogueProposalHistoryRecord[] {
+  const nextOrdinal: Record<DialogueDirectorProposalKind, number> = {
     definition: 0,
     goal_plan: 0,
     event_card: 0,
   };
-  const expectedOperation: Readonly<Record<string, string>> =
+  const expectedOperation: Readonly<
+    Record<DialogueDirectorProposalKind, string>
+  > =
     Object.freeze({
       definition: "definition.validate",
       goal_plan: "goal_plan.validate",
       event_card: "event_card.publish",
     });
+  const validated: DialogueProposalHistoryRecord[] = [];
   for (const row of rows) {
-    const operationKind = expectedOperation[row.proposal_kind];
-    const ordinal = nextOrdinal[row.proposal_kind];
+    const requestKind = readDialogueDirectorRequestKind(row.request_kind);
+    const proposalKind = dialogueDirectorProposalKind(requestKind);
+    const operationKind =
+      proposalKind === undefined
+        ? undefined
+        : expectedOperation[proposalKind];
+    const ordinal =
+      proposalKind === undefined
+        ? undefined
+        : nextOrdinal[proposalKind];
     const modelProposalId = assertUuid(
       contracts,
       row.model_proposal_id,
     );
     const ruleRequestId = assertUuid(contracts, row.rule_request_id);
     if (
+      proposalKind === undefined ||
       operationKind === undefined ||
       ordinal === undefined ||
       row.proposal_ordinal !== ordinal ||
@@ -3376,7 +3537,8 @@ function validateDialogueProposalHistoryRows(
         {
           session_id: command.sessionId,
           command_id: command.commandId,
-          proposal_kind: row.proposal_kind,
+          proposal_kind: proposalKind ?? "",
+          request_kind: row.request_kind,
           proposal_id: modelProposalId,
           proposal_ordinal: row.proposal_ordinal,
           rule_request_id: ruleRequestId,
@@ -3385,11 +3547,11 @@ function validateDialogueProposalHistoryRows(
         },
       );
     }
-    nextOrdinal[row.proposal_kind] = ordinal + 1;
+    nextOrdinal[proposalKind] = ordinal + 1;
     if (
-      (row.proposal_kind === "event_card" &&
+      (proposalKind === "event_card" &&
         row.world_record_id !== null) ||
-      (row.proposal_kind !== "event_card" &&
+      (proposalKind !== "event_card" &&
         row.world_record_id === null)
     ) {
       throw new EngineFault(
@@ -3398,7 +3560,7 @@ function validateDialogueProposalHistoryRows(
         {
           session_id: command.sessionId,
           command_id: command.commandId,
-          proposal_kind: row.proposal_kind,
+          proposal_kind: proposalKind,
           proposal_id: modelProposalId,
         },
       );
@@ -3409,13 +3571,37 @@ function validateDialogueProposalHistoryRows(
     if (row.packet_proposal_id !== null) {
       assertUuid(contracts, row.packet_proposal_id);
     }
+    validated.push(
+      Object.freeze({
+        ...row,
+        proposal_kind: proposalKind,
+      }),
+    );
   }
-  return rows;
+  return Object.freeze(validated);
+}
+
+function readDialogueDirectorRequestKind(
+  value: string,
+): DialogueDirectorRequestKind {
+  switch (value) {
+    case "director.dialogue_events":
+    case "director.system_dialogue":
+    case "director.goal_plan":
+    case "director.definition_draft":
+      return value;
+    default:
+      throw new EngineFault(
+        "command.finalizer.dialogue_proposal_history_corrupt",
+        "Dialogue proposal Journal has an unsupported Director request kind",
+        { request_kind: value },
+      );
+  }
 }
 
 function dialogueProposalHistoryFault(
   command: ValidatedFinalizationCommand,
-  proposal: DialogueProposalHistoryRow,
+  proposal: DialogueProposalHistoryRecord,
 ): EngineFault {
   return new EngineFault(
     "command.finalizer.dialogue_proposal_history_mismatch",
@@ -3423,6 +3609,7 @@ function dialogueProposalHistoryFault(
     {
       session_id: command.sessionId,
       command_id: command.commandId,
+      request_kind: proposal.request_kind,
       proposal_kind: proposal.proposal_kind,
       model_proposal_id: proposal.model_proposal_id,
       world_record_id: proposal.world_record_id ?? "",
@@ -3434,7 +3621,7 @@ function assertDialogueProposalHistoryOp(
   command: ValidatedFinalizationCommand,
   packet: JsonObject,
   op: JsonObject,
-  proposal: DialogueProposalHistoryRow,
+  proposal: DialogueProposalHistoryRecord,
 ): void {
   const source = expectJsonObject(
     expectProperty(packet, "source", "ContentPacket"),
@@ -3871,11 +4058,16 @@ async function readFinalizationCommandRow(
             command.character_model_request_id::text
               AS character_model_request_id,
             command.character_turn_id::text AS character_turn_id,
-            director.request_kind AS director_request_kind,
-            director.model_request_id::text
-              AS director_model_request_id,
-            director.response_turn_id::text
-              AS director_response_turn_id,
+            director_events.model_request_id::text
+              AS director_dialogue_events_model_request_id,
+            director_system.model_request_id::text
+              AS director_system_model_request_id,
+            director_system.response_turn_id::text
+              AS director_system_response_turn_id,
+            director_goal_plan.model_request_id::text
+              AS director_goal_plan_model_request_id,
+            director_definition_draft.model_request_id::text
+              AS director_definition_draft_model_request_id,
             player_day.from_day::text AS player_day_from_day_text,
             command.event_card_packet_id::text
               AS event_card_packet_id,
@@ -3897,9 +4089,32 @@ async function readFinalizationCommandRow(
        LEFT JOIN luoxia_engine.player_day_end_runs AS player_day
          ON player_day.session_id = command.session_id
         AND player_day.command_id = command.command_id
-       LEFT JOIN luoxia_engine.dialogue_director_runs AS director
-         ON director.session_id = command.session_id
-        AND director.command_id = command.command_id
+       LEFT JOIN luoxia_engine.dialogue_director_runs
+         AS director_events
+         ON director_events.session_id = command.session_id
+        AND director_events.command_id = command.command_id
+        AND director_events.request_kind =
+              'director.dialogue_events'
+       LEFT JOIN luoxia_engine.dialogue_director_runs
+         AS director_system
+         ON director_system.session_id = command.session_id
+        AND director_system.command_id = command.command_id
+        AND director_system.request_kind =
+              'director.system_dialogue'
+       LEFT JOIN luoxia_engine.dialogue_director_runs
+         AS director_goal_plan
+         ON director_goal_plan.session_id = command.session_id
+        AND director_goal_plan.command_id = command.command_id
+        AND director_goal_plan.request_kind =
+              'director.goal_plan'
+       LEFT JOIN luoxia_engine.dialogue_director_runs
+         AS director_definition_draft
+         ON director_definition_draft.session_id =
+              command.session_id
+        AND director_definition_draft.command_id =
+              command.command_id
+        AND director_definition_draft.request_kind =
+              'director.definition_draft'
        LEFT JOIN luoxia_engine.committed_events AS event_card_commit
          ON event_card_commit.packet_id = command.event_card_packet_id
         AND command.command_kind = 'event_card.trigger'
@@ -4076,6 +4291,7 @@ function validateFinalizationCommandRow(
   const dialogueResponse = readDialogueResponseIdentity(
     contracts,
     row,
+    message,
     isDialogue,
     sessionId,
     commandId,
@@ -4173,6 +4389,8 @@ function validateFinalizationCommandRow(
     dialogueResponseKind: dialogueResponse.kind,
     responseTurnId: dialogueResponse.turnId,
     responseModelRequestId: dialogueResponse.modelRequestId,
+    dialogueEventsModelRequestId:
+      dialogueResponse.dialogueEventsModelRequestId,
     playerDayFromDay:
       row.player_day_from_day_text === null
         ? undefined
@@ -4302,6 +4520,7 @@ function validateFinalizationCommandRow(
 function readDialogueResponseIdentity(
   contracts: ContractValidator,
   row: FinalizationCommandRow,
+  message: JsonObject,
   isDialogue: boolean,
   sessionId: string,
   commandId: string,
@@ -4309,11 +4528,14 @@ function readDialogueResponseIdentity(
   readonly kind: "character_mind" | "director_system" | undefined;
   readonly turnId: string | undefined;
   readonly modelRequestId: string | undefined;
+  readonly dialogueEventsModelRequestId: string | undefined;
 } {
   const directorFields = [
-    row.director_request_kind,
-    row.director_model_request_id,
-    row.director_response_turn_id,
+    row.director_dialogue_events_model_request_id,
+    row.director_system_model_request_id,
+    row.director_system_response_turn_id,
+    row.director_goal_plan_model_request_id,
+    row.director_definition_draft_model_request_id,
   ];
   const hasDirectorRun = directorFields.some((value) => value !== null);
   if (!isDialogue) {
@@ -4328,19 +4550,112 @@ function readDialogueResponseIdentity(
       kind: undefined,
       turnId: undefined,
       modelRequestId: undefined,
+      dialogueEventsModelRequestId: undefined,
     });
   }
+  const dialogueEventsModelRequestId =
+    row.director_dialogue_events_model_request_id === null
+      ? undefined
+      : assertUuid(
+          contracts,
+          row.director_dialogue_events_model_request_id,
+        );
+  const systemModelRequestId =
+    row.director_system_model_request_id === null
+      ? undefined
+      : assertUuid(
+          contracts,
+          row.director_system_model_request_id,
+        );
+  const systemResponseTurnId =
+    row.director_system_response_turn_id === null
+      ? undefined
+      : assertUuid(
+          contracts,
+          row.director_system_response_turn_id,
+        );
+  const goalPlanModelRequestId =
+    row.director_goal_plan_model_request_id === null
+      ? undefined
+      : assertUuid(
+          contracts,
+          row.director_goal_plan_model_request_id,
+        );
+  const definitionDraftModelRequestId =
+    row.director_definition_draft_model_request_id === null
+      ? undefined
+      : assertUuid(
+          contracts,
+          row.director_definition_draft_model_request_id,
+        );
+  const interactionKind = expectString(
+    message,
+    "interaction_kind",
+    "Dialogue command",
+  );
   if (!hasDirectorRun) {
     return Object.freeze({
       kind: undefined,
       turnId: undefined,
       modelRequestId: undefined,
+      dialogueEventsModelRequestId: undefined,
     });
   }
   if (
-    row.director_request_kind === "director.dialogue_events" &&
-    row.director_model_request_id !== null &&
-    row.director_response_turn_id === null &&
+    (systemModelRequestId === undefined) !==
+      (systemResponseTurnId === undefined) ||
+    (goalPlanModelRequestId !== undefined &&
+      definitionDraftModelRequestId !== undefined) ||
+    ((goalPlanModelRequestId !== undefined ||
+      definitionDraftModelRequestId !== undefined) &&
+      systemModelRequestId === undefined)
+  ) {
+    throw new EngineFault(
+      "command.finalizer.database_corrupt",
+      "Dialogue Director runs do not define one closed response identity",
+      {
+        session_id: sessionId,
+        command_id: commandId,
+      },
+    );
+  }
+  if (
+    systemModelRequestId !== undefined &&
+    systemResponseTurnId !== undefined
+  ) {
+    const planningIdentityMatches =
+      (interactionKind === "dialogue" &&
+        goalPlanModelRequestId === undefined &&
+        definitionDraftModelRequestId === undefined) ||
+      (interactionKind === "goal_plan" &&
+        goalPlanModelRequestId !== undefined &&
+        definitionDraftModelRequestId === undefined) ||
+      (interactionKind === "definition_draft" &&
+        goalPlanModelRequestId === undefined &&
+        definitionDraftModelRequestId !== undefined);
+    if (!planningIdentityMatches) {
+      throw new EngineFault(
+        "command.finalizer.database_corrupt",
+        "System Director runs do not match the GUI-selected interaction kind",
+        {
+          session_id: sessionId,
+          command_id: commandId,
+          interaction_kind: interactionKind,
+        },
+      );
+    }
+    return Object.freeze({
+      kind: "director_system",
+      turnId: systemResponseTurnId,
+      modelRequestId: systemModelRequestId,
+      dialogueEventsModelRequestId,
+    });
+  }
+  if (
+    interactionKind === "dialogue" &&
+    goalPlanModelRequestId === undefined &&
+    definitionDraftModelRequestId === undefined &&
+    dialogueEventsModelRequestId !== undefined &&
     row.character_model_request_id !== null &&
     row.character_turn_id !== null
   ) {
@@ -4351,29 +4666,15 @@ function readDialogueResponseIdentity(
         contracts,
         row.character_model_request_id,
       ),
-    });
-  }
-  if (
-    row.director_request_kind === "director.system_dialogue" &&
-    row.director_model_request_id !== null &&
-    row.director_response_turn_id !== null
-  ) {
-    return Object.freeze({
-      kind: "director_system",
-      turnId: assertUuid(contracts, row.director_response_turn_id),
-      modelRequestId: assertUuid(
-        contracts,
-        row.director_model_request_id,
-      ),
+      dialogueEventsModelRequestId,
     });
   }
   throw new EngineFault(
     "command.finalizer.database_corrupt",
-    "Dialogue Director run does not define one closed response identity",
+    "Dialogue Director runs do not define one closed response identity",
     {
       session_id: sessionId,
       command_id: commandId,
-      director_request_kind: row.director_request_kind ?? "",
     },
   );
 }
@@ -5213,7 +5514,7 @@ async function readCompletedEnvelopes(
   ) {
     throw new EngineFault(
       "dialogue.finalizer.database_corrupt",
-      "Completed dialogue command cannot have pending status",
+      "Completed dialogue command has an unsupported result status",
       {
         session_id: command.sessionId,
         command_id: command.commandId,

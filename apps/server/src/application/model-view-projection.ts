@@ -7,15 +7,22 @@ import {
   type JsonObject,
   type JsonValue,
 } from "@luoxia/contracts-runtime";
-import type { CommittedEventDocument } from "@luoxia/world-core";
+import type {
+  CommittedEventDocument,
+  StateMachineContractAuthority,
+  WorldContentBinding,
+} from "@luoxia/world-core";
 
 /**
  * Project ModelRequest dynamic views from a locked WorldSnapshot only.
  * Callers never supply arbitrary View JSON.
  */
 export function projectDirectorWorldView(
+  worldId: string,
   worldState: JsonObject,
   day: number,
+  contentBinding: WorldContentBinding,
+  stateMachineContracts: StateMachineContractAuthority,
 ): JsonObject {
   const entities = asObjectArray(
     expectProperty(worldState, "entities", "WorldState"),
@@ -40,44 +47,64 @@ export function projectDirectorWorldView(
       expectProperty(entity, "components", "EntityState"),
       "EntityState.components",
     );
-    const entityRelations = relations.filter((relation) =>
-      relationMentionsEntity(relation, entityId),
-    );
-    const actionMachine = machines.find((machine) => {
-      const scope = expectString(
-        machine,
-        "machine_scope",
-        "StateMachineInstanceState",
+    const actionMachines = machines.filter((machine) => {
+      const owner = expectJsonObject(
+        expectProperty(machine, "owner", "StateMachineInstanceState"),
+        "StateMachineInstanceState.owner",
       );
       return (
-        scope === "character" &&
-        expectString(
-          machine,
-          "owner_entity_id",
-          "StateMachineInstanceState",
-        ) === entityId
+        expectString(owner, "owner_kind", "StateMachineOwner") ===
+          "character" &&
+        expectString(owner, "entity_id", "StateMachineOwner") === entityId
       );
     });
+    if (actionMachines.length > 1) {
+      throw new EngineFault(
+        "model.view.action_machine_ambiguous",
+        "Entity resolves to more than one character state machine",
+        { entity_id: entityId, matches: actionMachines.length },
+      );
+    }
+    const actionMachine = actionMachines[0];
     const actor: Record<string, JsonValue> = {
       entity_id: entityId,
+      status: expectString(entity, "status", "EntityState"),
       objective_components: components,
-      relations: entityRelations,
     };
     if (actionMachine !== undefined) {
-      actor.action_machine = actionMachine;
+      actor.action_machine = projectStateMachineModelView(
+        worldId,
+        actionMachine,
+        contentBinding,
+        stateMachineContracts,
+      );
     }
     return Object.freeze(actor);
   });
 
-  const worldMachines = machines.filter(
-    (machine) =>
-      expectString(machine, "machine_scope", "StateMachineInstanceState") ===
-      "world",
-  );
+  const worldMachines = machines
+    .filter((machine) => {
+      const owner = expectJsonObject(
+        expectProperty(machine, "owner", "StateMachineInstanceState"),
+        "StateMachineInstanceState.owner",
+      );
+      return (
+        expectString(owner, "owner_kind", "StateMachineOwner") === "world"
+      );
+    })
+    .map((machine) =>
+      projectStateMachineModelView(
+        worldId,
+        machine,
+        contentBinding,
+        stateMachineContracts,
+      ),
+    );
 
   return Object.freeze({
     day,
     actors: Object.freeze(actors),
+    relations: Object.freeze(relations),
     world_machines: Object.freeze(worldMachines),
     facts: Object.freeze(facts),
   });
@@ -86,7 +113,6 @@ export function projectDirectorWorldView(
 export function projectObjectiveTraces(input: {
   readonly events: readonly CommittedEventDocument[];
   readonly currentDay: number;
-  readonly createTraceId: () => string;
 }): readonly JsonObject[] {
   const eventDays = reconstructEventDays(input.events, input.currentDay);
   const settlementIndexes: number[] = [];
@@ -112,7 +138,6 @@ export function projectObjectiveTraces(input: {
     currentSettlementIndex === undefined
       ? input.events.length - 1
       : currentSettlementIndex;
-  const traceIds = new Set<string>();
   const traces: JsonObject[] = [];
   for (
     let eventIndex = previousSettlementIndex + 1;
@@ -128,18 +153,8 @@ export function projectObjectiveTraces(input: {
       "CommittedEvent.domain_events",
     );
     for (const domainEvent of domainEvents) {
-      const traceId = input.createTraceId();
-      if (traceIds.has(traceId)) {
-        throw new EngineFault(
-          "model.view.objective_trace_id_collision",
-          "Server-generated ObjectiveTraceEntry identities must be unique",
-          { trace_id: traceId },
-        );
-      }
-      traceIds.add(traceId);
       traces.push(
         Object.freeze({
-          trace_id: traceId,
           day: eventDays[eventIndex] as number,
           event_type: expectProperty(
             domainEvent,
@@ -237,6 +252,8 @@ export function projectCharacterSubjectiveView(
   worldId: string,
   worldState: JsonObject,
   entityId: string,
+  contentBinding: WorldContentBinding,
+  stateMachineContracts: StateMachineContractAuthority,
 ): JsonObject {
   const entities = asObjectArray(
     expectProperty(worldState, "entities", "WorldState"),
@@ -256,30 +273,36 @@ export function projectCharacterSubjectiveView(
     expectProperty(worldState, "state_machines", "WorldState"),
     "WorldState.state_machines",
   );
-  const actionMachine = machines.find(
-    (machine) =>
-      expectString(machine, "machine_scope", "StateMachineInstanceState") ===
-        "character" &&
-      expectString(
-        machine,
-        "owner_entity_id",
-        "StateMachineInstanceState",
-      ) === entityId,
-  );
-  if (actionMachine === undefined) {
+  const actionMachines = machines.filter((machine) => {
+    const owner = expectJsonObject(
+      expectProperty(machine, "owner", "StateMachineInstanceState"),
+      "StateMachineInstanceState.owner",
+    );
+    return (
+      expectString(owner, "owner_kind", "StateMachineOwner") === "character" &&
+      expectString(owner, "entity_id", "StateMachineOwner") === entityId
+    );
+  });
+  if (actionMachines.length !== 1) {
     throw new EngineFault(
-      "model.view.action_machine_missing",
-      `Entity ${entityId} has no character state machine in locked WorldState`,
-      { entity_id: entityId },
+      "model.view.action_machine_invalid",
+      `Entity ${entityId} must resolve to exactly one character state machine`,
+      { entity_id: entityId, matches: actionMachines.length },
     );
   }
+  const actionMachine = actionMachines[0] as JsonObject;
   return Object.freeze({
     character: Object.freeze({
       world_id: worldId,
       entity_id: entityId,
     }),
     knowledge_view: projectKnowledgeView(worldState, entityId),
-    action_machine: actionMachine,
+    action_machine: projectStateMachineModelView(
+      worldId,
+      actionMachine,
+      contentBinding,
+      stateMachineContracts,
+    ),
   });
 }
 
@@ -291,26 +314,45 @@ export function readDayNumber(worldState: JsonObject): number {
   return expectInteger(dayCycle, "day", "DayCycleState");
 }
 
-function relationMentionsEntity(
-  relation: JsonObject,
-  entityId: string,
-): boolean {
-  return (
-    subjectIsEntity(
-      expectJsonObject(
-        expectProperty(relation, "from", "RelationState"),
-        "RelationState.from",
-      ),
-      entityId,
-    ) ||
-    subjectIsEntity(
-      expectJsonObject(
-        expectProperty(relation, "to", "RelationState"),
-        "RelationState.to",
-      ),
-      entityId,
-    )
+function projectStateMachineModelView(
+  worldId: string,
+  instance: JsonObject,
+  contentBinding: WorldContentBinding,
+  stateMachineContracts: StateMachineContractAuthority,
+): JsonObject {
+  const machine = stateMachineContracts.assertBoundInstance({
+    contentBinding,
+    worldId,
+    instance,
+  });
+  const stateId = expectString(
+    instance,
+    "state_id",
+    "StateMachineInstanceState",
   );
+  const outgoingTransitions = machine
+    .listOutgoingTransitions(stateId)
+    .map((transition) =>
+      Object.freeze({
+        transition,
+        target_state: machine.requireState(
+          expectString(
+            transition,
+            "to_state_id",
+            "MachineTransitionDefinition",
+          ),
+        ),
+      }),
+    );
+  return Object.freeze({
+    entered_day: expectInteger(
+      instance,
+      "entered_day",
+      "StateMachineInstanceState",
+    ),
+    current_state: machine.requireState(stateId),
+    outgoing_transitions: Object.freeze(outgoingTransitions),
+  });
 }
 
 function reconstructEventDays(
@@ -378,17 +420,6 @@ function findDayCycleTransition(
     );
   }
   return transitions[0];
-}
-
-function subjectIsEntity(subject: JsonObject, entityId: string): boolean {
-  if (expectString(subject, "kind", "SubjectRef") !== "entity") {
-    return false;
-  }
-  const entity = expectJsonObject(
-    expectProperty(subject, "entity", "SubjectRef"),
-    "SubjectRef.entity",
-  );
-  return expectString(entity, "entity_id", "EntityRef") === entityId;
 }
 
 function asObjectArray(value: JsonValue, path: string): readonly JsonObject[] {

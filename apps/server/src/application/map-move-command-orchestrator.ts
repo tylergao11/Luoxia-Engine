@@ -9,7 +9,7 @@ import {
   type ContractValidator,
   type JsonObject,
 } from "@luoxia/contracts-runtime";
-import type { DeterministicContextAuthority } from "@luoxia/world-core/composition";
+import type { DeterministicContextAuthority } from "@luoxia/world-core";
 
 import type {
   CommandJournal,

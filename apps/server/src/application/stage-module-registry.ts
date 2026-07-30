@@ -51,9 +51,6 @@ export interface StageModuleRegistry {
   planRequiredModules(
     roots: readonly RegisteredStageModule[],
   ): readonly RegisteredStageModule[];
-
-  /** Same registered objects; frozen list, not a second mutable copy. */
-  readonly registeredModules: readonly RegisteredStageModule[];
 }
 
 export interface StageModuleRegistryDependencies {
@@ -87,10 +84,6 @@ class DefaultStageModuleRegistry implements StageModuleRegistry {
     }
     this.#assertDependencyGraph();
     this.#registeredModules = Object.freeze([...this.#byModuleId.values()]);
-  }
-
-  public get registeredModules(): readonly RegisteredStageModule[] {
-    return this.#registeredModules;
   }
 
   public requireModuleForDependency(

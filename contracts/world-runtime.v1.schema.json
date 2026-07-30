@@ -403,7 +403,7 @@
           "$ref": "#/$defs/StateMachineCreateOp"
         },
         {
-          "$ref": "#/$defs/StateMachineSetStateOp"
+          "$ref": "#/$defs/StateMachineTransitionOp"
         },
         {
           "$ref": "#/$defs/DialogueOpenOp"
@@ -2506,7 +2506,6 @@
         "stage_module_locks",
         "world_state",
         "event_cursor",
-        "asset_hashes",
         "migration_history"
       ],
       "properties": {
@@ -2557,13 +2556,6 @@
           "type": "integer",
           "minimum": 0
         },
-        "asset_hashes": {
-          "type": "array",
-          "uniqueItems": true,
-          "items": {
-            "$ref": "common.v1.schema.json#/$defs/Sha256"
-          }
-        },
         "migration_history": {
           "type": "array",
           "items": {
@@ -2585,41 +2577,6 @@
         },
         "candidate_save": {
           "$ref": "#/$defs/SaveEnvelope"
-        }
-      }
-    },
-    "SemanticOutcomeProposal": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "outcome_id",
-        "outcome_type",
-        "subjects",
-        "parameters",
-        "visibility"
-      ],
-      "properties": {
-        "outcome_id": {
-          "$ref": "common.v1.schema.json#/$defs/Identifier"
-        },
-        "outcome_type": {
-          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
-        },
-        "subjects": {
-          "type": "array",
-          "items": {
-            "$ref": "common.v1.schema.json#/$defs/SubjectRef"
-          },
-          "minItems": 1
-        },
-        "parameters": {
-          "$ref": "common.v1.schema.json#/$defs/JsonObject"
-        },
-        "visibility": {
-          "$ref": "common.v1.schema.json#/$defs/Visibility"
-        },
-        "requires_agency_gate_id": {
-          "$ref": "common.v1.schema.json#/$defs/Identifier"
         }
       }
     },
@@ -2668,52 +2625,6 @@
         }
       ]
     },
-    "AgencyGate": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "gate_id",
-        "protected_outcome_ids",
-        "participants",
-        "requirement",
-        "policy",
-        "commitment_evidence"
-      ],
-      "properties": {
-        "gate_id": {
-          "$ref": "common.v1.schema.json#/$defs/Identifier"
-        },
-        "protected_outcome_ids": {
-          "type": "array",
-          "minItems": 1,
-          "uniqueItems": true,
-          "items": {
-            "$ref": "common.v1.schema.json#/$defs/Identifier"
-          }
-        },
-        "participants": {
-          "type": "array",
-          "minItems": 1,
-          "uniqueItems": true,
-          "items": {
-            "$ref": "common.v1.schema.json#/$defs/EntityRef"
-          }
-        },
-        "requirement": {
-          "$ref": "#/$defs/AgencyRequirement"
-        },
-        "policy": {
-          "$ref": "#/$defs/AgencyPolicy"
-        },
-        "commitment_evidence": {
-          "type": "array",
-          "uniqueItems": true,
-          "items": {
-            "$ref": "#/$defs/AgencyCommitmentRef"
-          }
-        }
-      }
-    },
     "AgencyDecision": {
       "type": "object",
       "additionalProperties": false,
@@ -2739,286 +2650,6 @@
         }
       }
     },
-    "EventSituation": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "event_type",
-        "summary",
-        "subjects",
-        "context",
-        "visibility"
-      ],
-      "properties": {
-        "event_type": {
-          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
-        },
-        "summary": {
-          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
-        },
-        "subjects": {
-          "type": "array",
-          "items": {
-            "$ref": "common.v1.schema.json#/$defs/SubjectRef"
-          },
-          "minItems": 1
-        },
-        "context": {
-          "$ref": "common.v1.schema.json#/$defs/JsonObject"
-        },
-        "visibility": {
-          "$ref": "common.v1.schema.json#/$defs/Visibility"
-        }
-      }
-    },
-    "WorldAutomaticEventProposal": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "proposal_kind",
-        "proposal_id",
-        "day",
-        "situation",
-        "candidate_outcomes",
-        "cost"
-      ],
-      "properties": {
-        "proposal_kind": {
-          "const": "automatic.world"
-        },
-        "proposal_id": {
-          "$ref": "common.v1.schema.json#/$defs/Uuid"
-        },
-        "day": {
-          "$ref": "common.v1.schema.json#/$defs/DayNumber"
-        },
-        "situation": {
-          "$ref": "#/$defs/EventSituation"
-        },
-        "candidate_outcomes": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/SemanticOutcomeProposal"
-          },
-          "minItems": 1
-        },
-        "cost": {
-          "$ref": "#/$defs/ZeroEventCost"
-        }
-      }
-    },
-    "CharacterAutomaticEventProposal": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "proposal_kind",
-        "proposal_id",
-        "day",
-        "situation",
-        "target_entity_ids",
-        "candidate_outcomes",
-        "agency_gates",
-        "cost"
-      ],
-      "properties": {
-        "proposal_kind": {
-          "const": "automatic.character"
-        },
-        "proposal_id": {
-          "$ref": "common.v1.schema.json#/$defs/Uuid"
-        },
-        "day": {
-          "$ref": "common.v1.schema.json#/$defs/DayNumber"
-        },
-        "situation": {
-          "$ref": "#/$defs/EventSituation"
-        },
-        "target_entity_ids": {
-          "type": "array",
-          "items": {
-            "$ref": "common.v1.schema.json#/$defs/Uuid"
-          },
-          "minItems": 1,
-          "uniqueItems": true
-        },
-        "candidate_outcomes": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/SemanticOutcomeProposal"
-          }
-        },
-        "agency_gates": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/AutomaticAgencyGate"
-          }
-        },
-        "cost": {
-          "$ref": "#/$defs/ZeroEventCost"
-        }
-      }
-    },
-    "AutomaticEventProposal": {
-      "oneOf": [
-        {
-          "$ref": "#/$defs/WorldAutomaticEventProposal"
-        },
-        {
-          "$ref": "#/$defs/CharacterAutomaticEventProposal"
-        }
-      ]
-    },
-    "EventCardProposal": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "proposal_id",
-        "source_dialogue_id",
-        "day",
-        "situation",
-        "title",
-        "summary",
-        "result_options",
-        "agency_gates"
-      ],
-      "properties": {
-        "proposal_id": {
-          "$ref": "common.v1.schema.json#/$defs/Uuid"
-        },
-        "source_dialogue_id": {
-          "$ref": "common.v1.schema.json#/$defs/Uuid"
-        },
-        "day": {
-          "$ref": "common.v1.schema.json#/$defs/DayNumber"
-        },
-        "situation": {
-          "$ref": "#/$defs/EventSituation"
-        },
-        "title": {
-          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
-        },
-        "summary": {
-          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
-        },
-        "result_options": {
-          "type": "array",
-          "minItems": 1,
-          "items": {
-            "$ref": "#/$defs/EventCardOutcomeDraft"
-          }
-        },
-        "agency_gates": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/EventCardAgencyGate"
-          }
-        }
-      }
-    },
-    "StateTenure": {
-      "oneOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "tenure_kind"
-          ],
-          "properties": {
-            "tenure_kind": {
-              "const": "indefinite"
-            }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "tenure_kind",
-            "duration_days"
-          ],
-          "properties": {
-            "tenure_kind": {
-              "const": "days"
-            },
-            "duration_days": {
-              "$ref": "common.v1.schema.json#/$defs/DayDuration"
-            }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "tenure_kind",
-            "until_rule"
-          ],
-          "properties": {
-            "tenure_kind": {
-              "const": "until_rule"
-            },
-            "until_rule": {
-              "$ref": "common.v1.schema.json#/$defs/RuleRef"
-            }
-          }
-        }
-      ]
-    },
-    "StateContinuation": {
-      "oneOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "continuation_kind"
-          ],
-          "properties": {
-            "continuation_kind": {
-              "const": "remain"
-            }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "continuation_kind"
-          ],
-          "properties": {
-            "continuation_kind": {
-              "const": "resume_previous"
-            }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "continuation_kind"
-          ],
-          "properties": {
-            "continuation_kind": {
-              "const": "machine_initial"
-            }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "continuation_kind",
-            "state"
-          ],
-          "properties": {
-            "continuation_kind": {
-              "const": "state"
-            },
-            "state": {
-              "$ref": "#/$defs/RuntimeMachineState"
-            }
-          }
-        }
-      ]
-    },
     "MachineDecision": {
       "oneOf": [
         {
@@ -3038,67 +2669,18 @@
           "additionalProperties": false,
           "required": [
             "decision_kind",
-            "state",
-            "tenure",
-            "continuation"
+            "transition_id"
           ],
           "properties": {
             "decision_kind": {
-              "const": "set_state"
+              "const": "transition"
             },
-            "tenure": {
-              "$ref": "#/$defs/StateTenure"
-            },
-            "continuation": {
-              "$ref": "#/$defs/StateContinuation"
-            },
-            "state": {
-              "$ref": "#/$defs/RuntimeMachineState"
+            "transition_id": {
+              "$ref": "common.v1.schema.json#/$defs/Identifier"
             }
           }
         }
       ]
-    },
-    "CharacterReactionProposal": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "reaction_id",
-        "impact",
-        "agency_decisions",
-        "self_outcomes",
-        "machine_decision",
-        "source_event"
-      ],
-      "properties": {
-        "reaction_id": {
-          "$ref": "common.v1.schema.json#/$defs/Uuid"
-        },
-        "impact": {
-          "enum": [
-            "none",
-            "changed"
-          ]
-        },
-        "agency_decisions": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/AgencyDecision"
-          }
-        },
-        "self_outcomes": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/SelfSubjectiveOutcomeProposal"
-          }
-        },
-        "machine_decision": {
-          "$ref": "#/$defs/MachineDecision"
-        },
-        "source_event": {
-          "$ref": "#/$defs/CharacterEventRef"
-        }
-      }
     },
     "ControlBinding": {
       "oneOf": [
@@ -3187,70 +2769,21 @@
         }
       }
     },
-    "StateMachineFrame": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "frame_id",
-        "state",
-        "entered_day",
-        "tenure",
-        "continuation"
-      ],
-      "properties": {
-        "frame_id": {
-          "$ref": "common.v1.schema.json#/$defs/Uuid"
-        },
-        "entered_day": {
-          "$ref": "common.v1.schema.json#/$defs/DayNumber"
-        },
-        "tenure": {
-          "$ref": "#/$defs/StateTenure"
-        },
-        "continuation": {
-          "$ref": "#/$defs/StateContinuation"
-        },
-        "state": {
-          "$ref": "#/$defs/RuntimeMachineState"
-        }
-      }
-    },
-    "StateMachineInstanceState": {
+    "StateMachineOwner": {
       "oneOf": [
         {
           "type": "object",
           "additionalProperties": false,
           "required": [
-            "instance_id",
-            "machine_scope",
-            "owner_entity_id",
-            "machine",
-            "frames",
-            "revision"
+            "owner_kind",
+            "entity_id"
           ],
           "properties": {
-            "instance_id": {
-              "$ref": "common.v1.schema.json#/$defs/Uuid"
-            },
-            "machine_scope": {
+            "owner_kind": {
               "const": "character"
             },
-            "owner_entity_id": {
+            "entity_id": {
               "$ref": "common.v1.schema.json#/$defs/Uuid"
-            },
-            "machine": {
-              "$ref": "#/$defs/StateMachineCatalogRef"
-            },
-            "frames": {
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/StateMachineFrame"
-              },
-              "minItems": 1
-            },
-            "revision": {
-              "type": "integer",
-              "minimum": 0
             }
           }
         },
@@ -3258,40 +2791,47 @@
           "type": "object",
           "additionalProperties": false,
           "required": [
-            "instance_id",
-            "machine_scope",
-            "world_id",
-            "machine",
-            "frames",
-            "revision"
+            "owner_kind",
+            "world_id"
           ],
           "properties": {
-            "instance_id": {
-              "$ref": "common.v1.schema.json#/$defs/Uuid"
-            },
-            "machine_scope": {
+            "owner_kind": {
               "const": "world"
             },
             "world_id": {
               "$ref": "common.v1.schema.json#/$defs/Uuid"
-            },
-            "machine": {
-              "$ref": "#/$defs/StateMachineCatalogRef"
-            },
-            "frames": {
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/StateMachineFrame"
-              },
-              "minItems": 1
-            },
-            "revision": {
-              "type": "integer",
-              "minimum": 0
             }
           }
         }
       ]
+    },
+    "StateMachineInstanceState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "instance_id",
+        "machine",
+        "owner",
+        "state_id",
+        "entered_day"
+      ],
+      "properties": {
+        "instance_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "machine": {
+          "$ref": "#/$defs/StateMachineCatalogRef"
+        },
+        "owner": {
+          "$ref": "#/$defs/StateMachineOwner"
+        },
+        "state_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "entered_day": {
+          "$ref": "common.v1.schema.json#/$defs/DayNumber"
+        }
+      }
     },
     "DialogueParticipantRef": {
       "oneOf": [
@@ -3661,31 +3201,23 @@
         }
       }
     },
-    "StateMachineSetStateOp": {
+    "StateMachineTransitionOp": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "op",
         "machine_instance_id",
-        "state",
-        "tenure",
-        "continuation"
+        "transition_id"
       ],
       "properties": {
         "op": {
-          "const": "state_machine.set_state"
+          "const": "state_machine.transition"
         },
         "machine_instance_id": {
           "$ref": "common.v1.schema.json#/$defs/Uuid"
         },
-        "tenure": {
-          "$ref": "#/$defs/StateTenure"
-        },
-        "continuation": {
-          "$ref": "#/$defs/StateContinuation"
-        },
-        "state": {
-          "$ref": "#/$defs/RuntimeMachineState"
+        "transition_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
         }
       }
     },
@@ -3809,44 +3341,6 @@
         }
       }
     },
-    "CharacterEventStimulus": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "stimulus_kind",
-        "proposal_id",
-        "day",
-        "situation",
-        "candidate_outcomes",
-        "agency_gates"
-      ],
-      "properties": {
-        "stimulus_kind": {
-          "const": "automatic"
-        },
-        "proposal_id": {
-          "$ref": "common.v1.schema.json#/$defs/Uuid"
-        },
-        "day": {
-          "$ref": "common.v1.schema.json#/$defs/DayNumber"
-        },
-        "situation": {
-          "$ref": "#/$defs/EventSituation"
-        },
-        "candidate_outcomes": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/SemanticOutcomeProposal"
-          }
-        },
-        "agency_gates": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/AutomaticAgencyGate"
-          }
-        }
-      }
-    },
     "ControlBindingRef": {
       "type": "object",
       "additionalProperties": false,
@@ -3869,18 +3363,6 @@
         "amount": {
           "type": "integer",
           "minimum": 1
-        }
-      }
-    },
-    "ZeroEventCost": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "amount"
-      ],
-      "properties": {
-        "amount": {
-          "const": 0
         }
       }
     },
@@ -3991,46 +3473,6 @@
           "$ref": "#/$defs/ControlBindingRef"
         }
       }
-    },
-    "RuntimeMachineState": {
-      "oneOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "state_kind",
-            "state_id"
-          ],
-          "properties": {
-            "state_kind": {
-              "const": "defined"
-            },
-            "state_id": {
-              "$ref": "common.v1.schema.json#/$defs/Identifier"
-            }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "state_kind",
-            "semantic_intent",
-            "parameters"
-          ],
-          "properties": {
-            "state_kind": {
-              "const": "semantic"
-            },
-            "semantic_intent": {
-              "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
-            },
-            "parameters": {
-              "$ref": "common.v1.schema.json#/$defs/JsonObject"
-            }
-          }
-        }
-      ]
     },
     "PacketSource": {
       "oneOf": [
@@ -4187,7 +3629,7 @@
           "$ref": "#/$defs/DomainEventEmitOp"
         },
         {
-          "$ref": "#/$defs/StateMachineSetStateOp"
+          "$ref": "#/$defs/StateMachineTransitionOp"
         }
       ]
     },
@@ -4218,30 +3660,6 @@
           "items": {
             "$ref": "#/$defs/NarrativeSegment"
           }
-        }
-      }
-    },
-    "EventCardOutcomeDraft": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "option_id",
-        "outcomes",
-        "presentation"
-      ],
-      "properties": {
-        "option_id": {
-          "$ref": "common.v1.schema.json#/$defs/Identifier"
-        },
-        "outcomes": {
-          "type": "array",
-          "minItems": 1,
-          "items": {
-            "$ref": "#/$defs/SemanticOutcomeProposal"
-          }
-        },
-        "presentation": {
-          "$ref": "#/$defs/EventResultPresentation"
         }
       }
     },
@@ -4557,42 +3975,6 @@
         },
         "draft": {
           "$ref": "#/$defs/DynamicDefinitionDraft"
-        }
-      }
-    },
-    "AgencyCommitmentDraft": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "semantic_intent",
-        "subjects",
-        "stance",
-        "terms",
-        "valid_through_day"
-      ],
-      "properties": {
-        "semantic_intent": {
-          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
-        },
-        "subjects": {
-          "type": "array",
-          "minItems": 1,
-          "uniqueItems": true,
-          "items": {
-            "$ref": "common.v1.schema.json#/$defs/SubjectRef"
-          }
-        },
-        "stance": {
-          "enum": [
-            "accept",
-            "counter"
-          ]
-        },
-        "terms": {
-          "$ref": "common.v1.schema.json#/$defs/JsonObject"
-        },
-        "valid_through_day": {
-          "$ref": "common.v1.schema.json#/$defs/DayNumber"
         }
       }
     },
@@ -5024,62 +4406,6 @@
         }
       }
     },
-    "AutomaticAgencyGate": {
-      "allOf": [
-        {
-          "$ref": "#/$defs/AgencyGate"
-        },
-        {
-          "type": "object",
-          "properties": {
-            "commitment_evidence": {
-              "type": "array",
-              "maxItems": 0
-            }
-          }
-        }
-      ]
-    },
-    "EventCardAgencyGate": {
-      "allOf": [
-        {
-          "$ref": "#/$defs/AgencyGate"
-        },
-        {
-          "type": "object",
-          "properties": {
-            "commitment_evidence": {
-              "type": "array",
-              "minItems": 1
-            }
-          }
-        }
-      ]
-    },
-    "SelfSubjectiveOutcomeProposal": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "outcome_id",
-        "outcome_type",
-        "parameters",
-        "visibility"
-      ],
-      "properties": {
-        "outcome_id": {
-          "$ref": "common.v1.schema.json#/$defs/Identifier"
-        },
-        "outcome_type": {
-          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
-        },
-        "parameters": {
-          "$ref": "common.v1.schema.json#/$defs/JsonObject"
-        },
-        "visibility": {
-          "$ref": "common.v1.schema.json#/$defs/Visibility"
-        }
-      }
-    },
     "HumanDialogueTurn": {
       "allOf": [
         {
@@ -5123,54 +4449,6 @@
             "agency_commitments": {
               "type": "array",
               "maxItems": 0
-            }
-          }
-        }
-      ]
-    },
-    "CharacterMindDialogueTurn": {
-      "allOf": [
-        {
-          "$ref": "#/$defs/DialogueTurn"
-        },
-        {
-          "type": "object",
-          "required": [
-            "speaker",
-            "source",
-            "agency_commitments"
-          ],
-          "properties": {
-            "speaker": {
-              "type": "object",
-              "required": [
-                "participant_kind"
-              ],
-              "properties": {
-                "participant_kind": {
-                  "const": "entity"
-                }
-              }
-            },
-            "source": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "source_kind",
-                "model_request_id",
-                "model_output_digest"
-              ],
-              "properties": {
-                "source_kind": {
-                  "const": "character_mind"
-                },
-                "model_request_id": {
-                  "$ref": "common.v1.schema.json#/$defs/Uuid"
-                },
-                "model_output_digest": {
-                  "$ref": "common.v1.schema.json#/$defs/Sha256"
-                }
-              }
             }
           }
         }
@@ -5341,29 +4619,22 @@
       "additionalProperties": false,
       "required": [
         "op",
-        "instance"
+        "instance_id",
+        "machine",
+        "owner"
       ],
       "properties": {
         "op": {
           "const": "state_machine.create"
         },
-        "instance": {
-          "allOf": [
-            {
-              "$ref": "#/$defs/StateMachineInstanceState"
-            },
-            {
-              "type": "object",
-              "required": [
-                "revision"
-              ],
-              "properties": {
-                "revision": {
-                  "const": 0
-                }
-              }
-            }
-          ]
+        "instance_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "machine": {
+          "$ref": "#/$defs/StateMachineCatalogRef"
+        },
+        "owner": {
+          "$ref": "#/$defs/StateMachineOwner"
         }
       }
     }

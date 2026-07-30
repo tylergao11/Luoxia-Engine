@@ -396,8 +396,7 @@
         "type_kind",
         "name",
         "description",
-        "runtime_creatable",
-        "runtime_mutable"
+        "runtime_creatable"
       ],
       "properties": {
         "type_id": {
@@ -422,31 +421,11 @@
         "runtime_creatable": {
           "type": "boolean"
         },
-        "runtime_mutable": {
-          "type": "boolean"
-        },
         "component_cardinality": {
           "enum": [
             "one",
             "many"
           ]
-        },
-        "relation_direction": {
-          "enum": [
-            "directed",
-            "undirected"
-          ]
-        },
-        "relation_multiplicity": {
-          "enum": [
-            "one_to_one",
-            "one_to_many",
-            "many_to_one",
-            "many_to_many"
-          ]
-        },
-        "inverse_type_id": {
-          "$ref": "common.v1.schema.json#/$defs/Identifier"
         },
         "validator": {
           "$ref": "#/$defs/PluginOperationRef"
@@ -466,21 +445,6 @@
               "component_cardinality"
             ]
           }
-        },
-        {
-          "if": {
-            "properties": {
-              "type_kind": {
-                "const": "relation"
-              }
-            }
-          },
-          "then": {
-            "required": [
-              "relation_direction",
-              "relation_multiplicity"
-            ]
-          }
         }
       ]
     },
@@ -496,9 +460,7 @@
         "cardinality",
         "required",
         "visibility",
-        "translatable",
-        "runtime_mutable",
-        "sort_order"
+        "translatable"
       ],
       "properties": {
         "field_id": {
@@ -586,9 +548,6 @@
             }
           }
         },
-        "default_value": {
-          "$ref": "common.v1.schema.json#/$defs/JsonValue"
-        },
         "minimum": {},
         "maximum": {},
         "pattern": {
@@ -605,13 +564,6 @@
         },
         "translatable": {
           "type": "boolean"
-        },
-        "runtime_mutable": {
-          "type": "boolean"
-        },
-        "sort_order": {
-          "type": "integer",
-          "minimum": 0
         }
       },
       "allOf": [
@@ -668,8 +620,7 @@
             "additionalProperties": false,
             "required": [
               "item_id",
-              "label",
-              "sort_order"
+              "label"
             ],
             "properties": {
               "item_id": {
@@ -680,10 +631,6 @@
               },
               "description": {
                 "$ref": "common.v1.schema.json#/$defs/LocalizedText"
-              },
-              "sort_order": {
-                "type": "integer",
-                "minimum": 0
               }
             }
           }
@@ -1173,6 +1120,8 @@
             "director_daily_settlement",
             "director_dialogue_events",
             "director_system_dialogue",
+            "director_goal_plan",
+            "director_definition_draft",
             "system_persona",
             "asset_subject",
             "asset_style",
@@ -1542,8 +1491,7 @@
         "to_pack_version",
         "transformer",
         "declared_mapping",
-        "description",
-        "requires_player_consent"
+        "description"
       ],
       "properties": {
         "migration_id": {
@@ -1570,9 +1518,6 @@
         },
         "description": {
           "$ref": "common.v1.schema.json#/$defs/LocalizedText"
-        },
-        "requires_player_consent": {
-          "type": "boolean"
         }
       }
     },
@@ -1583,7 +1528,6 @@
         "state_id",
         "name",
         "semantic_intent",
-        "parameters",
         "fields"
       ],
       "properties": {
@@ -1595,9 +1539,6 @@
         },
         "semantic_intent": {
           "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
-        },
-        "parameters": {
-          "$ref": "common.v1.schema.json#/$defs/JsonObject"
         },
         "fields": {
           "$ref": "#/$defs/FieldValues"
@@ -1611,7 +1552,6 @@
         "transition_id",
         "from_state_id",
         "to_state_id",
-        "trigger_type",
         "fields"
       ],
       "properties": {
@@ -1623,9 +1563,6 @@
         },
         "to_state_id": {
           "$ref": "common.v1.schema.json#/$defs/Identifier"
-        },
-        "trigger_type": {
-          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
         },
         "guard": {
           "$ref": "common.v1.schema.json#/$defs/RuleRef"
@@ -1788,6 +1725,8 @@
         "daily_settlement_prompt_id",
         "dialogue_events_prompt_id",
         "system_dialogue_prompt_id",
+        "goal_plan_prompt_id",
+        "definition_draft_prompt_id",
         "fields"
       ],
       "properties": {
@@ -1812,6 +1751,12 @@
           "$ref": "common.v1.schema.json#/$defs/Identifier"
         },
         "system_dialogue_prompt_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "goal_plan_prompt_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "definition_draft_prompt_id": {
           "$ref": "common.v1.schema.json#/$defs/Identifier"
         },
         "fields": {

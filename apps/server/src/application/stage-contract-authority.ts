@@ -16,7 +16,7 @@ import type {
   ContentRuntimeCatalog,
   WorldContentBinding,
   WorldContentLockDocument,
-} from "@luoxia/world-core/composition";
+} from "@luoxia/world-core";
 
 import type {
   RegisteredStageModule,

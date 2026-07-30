@@ -1,5 +1,9 @@
 import {
+  CONTRACT_REF,
   EngineFault,
+  expectJsonObject,
+  expectProperty,
+  expectString,
   type ContractValidator,
 } from "@luoxia/contracts-runtime";
 import type { Pool, PoolClient } from "pg";
@@ -8,14 +12,16 @@ import type {
   CommandExecutionIdFactory,
   StoredReceivedCommand,
 } from "../../application/command-journal.js";
-import type {
-  DialogueDefinitionRunRecord,
-  DialogueDirectorRequestKind,
-  DialogueDirectorProposalRuns,
-  DialogueDirectorRunJournal,
-  DialogueDirectorRunRecord,
-  DialogueEventCardRunRecord,
-  DialogueGoalPlanRunRecord,
+import {
+  dialogueDirectorProposalKind,
+  type DialogueDefinitionRunRecord,
+  type DialogueDirectorRequestKind,
+  type DialogueDirectorProposalRuns,
+  type DialogueDirectorRunJournal,
+  type DialogueDirectorRunRecord,
+  type DialogueEventCardRunRecord,
+  type DialogueGoalPlanRunRecord,
+  type DialogueDirectorProposalKind,
 } from "../../application/dialogue-director-run.js";
 import {
   assertUuid,
@@ -47,10 +53,12 @@ interface CommandBoundaryRow {
   readonly dialogue_id: string | null;
 }
 
-type ProposalKind = "definition" | "goal_plan" | "event_card";
+interface ModelInvocationProposalSourceRow {
+  readonly invocation_status: string;
+  readonly response_document: unknown | null;
+}
 
 interface ProposalRunRow {
-  readonly proposal_kind: string;
   readonly proposal_id: string;
   readonly proposal_ordinal: number;
   readonly world_record_id: string | null;
@@ -111,6 +119,7 @@ class PostgresDialogueDirectorRunJournal
             client,
             sessionId,
             commandId,
+            input.requestKind,
             "",
           );
           if (first !== undefined) {
@@ -142,6 +151,7 @@ class PostgresDialogueDirectorRunJournal
             client,
             sessionId,
             commandId,
+            input.requestKind,
             "FOR UPDATE",
           );
           if (raced !== undefined) {
@@ -256,46 +266,10 @@ class PostgresDialogueDirectorRunJournal
 
   public async prepareProposals(input: {
     readonly run: DialogueDirectorRunRecord;
-    readonly definitionProposalIds: readonly string[];
-    readonly goalPlanProposalIds: readonly string[];
-    readonly eventCardProposalIds: readonly string[];
   }): Promise<DialogueDirectorProposalRuns> {
     const sessionId = assertUuid(this.#contracts, input.run.sessionId);
     const commandId = assertUuid(this.#contracts, input.run.commandId);
-    const expected = Object.freeze({
-      definitions: input.definitionProposalIds.map((proposalId) =>
-        assertUuid(this.#contracts, proposalId),
-      ),
-      goalPlans: input.goalPlanProposalIds.map((proposalId) =>
-        assertUuid(this.#contracts, proposalId),
-      ),
-      eventCards: input.eventCardProposalIds.map((proposalId) =>
-        assertUuid(this.#contracts, proposalId),
-      ),
-    });
-    const allProposalIds = [
-      ...expected.definitions,
-      ...expected.goalPlans,
-      ...expected.eventCards,
-    ];
-    if (new Set(allProposalIds).size !== allProposalIds.length) {
-      throw new EngineFault(
-        "dialogue.director_run.proposal_id_duplicate",
-        "Director proposal IDs must be unique across one complete response",
-        { session_id: sessionId, command_id: commandId },
-      );
-    }
-    if (
-      input.run.requestKind === "director.dialogue_events" &&
-      (expected.definitions.length !== 0 ||
-        expected.goalPlans.length !== 0)
-    ) {
-      throw new EngineFault(
-        "dialogue.director_run.proposal_kind_invalid",
-        "Director dialogue-events runs can own only EventCard proposals",
-        { session_id: sessionId, command_id: commandId },
-      );
-    }
+    const proposalKind = dialogueDirectorProposalKind(input.run.requestKind);
 
     try {
       return await withPostgresTransaction(
@@ -306,6 +280,7 @@ class PostgresDialogueDirectorRunJournal
             client,
             sessionId,
             commandId,
+            input.run.requestKind,
             "FOR UPDATE",
           );
           if (runRow === undefined) {
@@ -316,21 +291,37 @@ class PostgresDialogueDirectorRunJournal
             );
           }
           validateRunRow(this.#contracts, runRow, input.run);
+          const verifiedProposalCount =
+            await readVerifiedProposalCount(
+              client,
+              this.#contracts,
+              input.run,
+            );
           const existing = await readProposalRuns(
             client,
             sessionId,
             commandId,
+            input.run.requestKind,
           );
-          if (
-            existing.length > 0 ||
-            allProposalIds.length === 0
-          ) {
+          if (existing.length > 0 || verifiedProposalCount === 0) {
             return validateProposalRows(
               this.#contracts,
               existing,
-              expected,
+              proposalKind,
+              verifiedProposalCount,
               sessionId,
               commandId,
+            );
+          }
+          if (proposalKind === undefined) {
+            throw new EngineFault(
+              "dialogue.director_run.proposal_kind_invalid",
+              "Proposal-producing Director run kind is missing",
+              {
+                session_id: sessionId,
+                command_id: commandId,
+                request_kind: input.run.requestKind,
+              },
             );
           }
 
@@ -346,112 +337,110 @@ class PostgresDialogueDirectorRunJournal
             ...(input.run.responseRuleRequestId === undefined
               ? []
               : [input.run.responseRuleRequestId]),
-            ...allProposalIds,
           ]);
-          const insertSet = async (
-            proposalKind: ProposalKind,
-            proposalIds: readonly string[],
-          ): Promise<void> => {
-            for (const [ordinal, proposalId] of proposalIds.entries()) {
-              const worldRecordId =
-                proposalKind === "event_card"
-                  ? undefined
-                  : createGeneratedId(
-                      this.#contracts,
-                      this.#idFactory,
-                      commandId,
-                      `${proposalKind}_world_record_id[${ordinal}]`,
-                    );
-              if (
-                worldRecordId !== undefined &&
-                reserved.has(worldRecordId)
-              ) {
-                throw new EngineFault(
-                  "dialogue.director_run.identity_collision",
-                  "Director proposal WorldState identity collides with its run",
-                  {
-                    session_id: sessionId,
-                    command_id: commandId,
-                    proposal_kind: proposalKind,
-                    proposal_id: proposalId,
-                    world_record_id: worldRecordId,
-                  },
-                );
-              }
-              if (worldRecordId !== undefined) {
-                reserved.add(worldRecordId);
-              }
+          for (
+            let ordinal = 0;
+            ordinal < verifiedProposalCount;
+            ordinal += 1
+          ) {
+            const proposalId = createGeneratedId(
+              this.#contracts,
+              this.#idFactory,
+              commandId,
+              `${input.run.requestKind}.proposal_id[${ordinal}]`,
+            );
+            const worldRecordId =
+              proposalKind === "event_card"
+                ? undefined
+                : createGeneratedId(
+                    this.#contracts,
+                    this.#idFactory,
+                    commandId,
+                    `${input.run.requestKind}.world_record_id[${ordinal}]`,
+                  );
             const ruleRequestId = createGeneratedId(
               this.#contracts,
               this.#idFactory,
               commandId,
-                `${proposalKind}_rule_request_id[${ordinal}]`,
+              `${input.run.requestKind}.rule_request_id[${ordinal}]`,
             );
-            if (reserved.has(ruleRequestId)) {
-              throw new EngineFault(
-                "dialogue.director_run.identity_collision",
-                  "Director proposal RulePlugin identity collides with its run",
-                {
-                  session_id: sessionId,
-                  command_id: commandId,
+            for (const [identity, value] of [
+              ["proposal_id", proposalId],
+              ...(worldRecordId === undefined
+                ? []
+                : [["world_record_id", worldRecordId] as const]),
+              ["rule_request_id", ruleRequestId],
+            ] as const) {
+              if (reserved.has(value)) {
+                throw new EngineFault(
+                  "dialogue.director_run.identity_collision",
+                  "Director proposal identity collides with its run",
+                  {
+                    session_id: sessionId,
+                    command_id: commandId,
+                    request_kind: input.run.requestKind,
                     proposal_kind: proposalKind,
-                  proposal_id: proposalId,
-                  rule_request_id: ruleRequestId,
-                },
-              );
+                    identity,
+                    uuid: value,
+                  },
+                );
+              }
+              reserved.add(value);
             }
-            reserved.add(ruleRequestId);
             const insert = await client.query(
-                `INSERT INTO luoxia_engine.dialogue_director_proposal_runs (
+              `INSERT INTO luoxia_engine.dialogue_director_proposal_runs (
                  session_id,
                  command_id,
-                   proposal_kind,
+                 request_kind,
                  proposal_id,
                  proposal_ordinal,
-                   world_record_id,
+                 world_record_id,
                  rule_request_id,
                  prepared_at
                ) VALUES (
                  $1::uuid,
                  $2::uuid,
-                   $3,
-                   $4::uuid,
-                   $5::integer,
-                   $6::uuid,
-                   $7::uuid,
+                 $3,
+                 $4::uuid,
+                 $5::integer,
+                 $6::uuid,
+                 $7::uuid,
                  clock_timestamp()
                )`,
               [
                 sessionId,
                 commandId,
-                  proposalKind,
+                input.run.requestKind,
                 proposalId,
                 ordinal,
-                  worldRecordId ?? null,
+                worldRecordId ?? null,
                 ruleRequestId,
               ],
             );
             if (insert.rowCount !== 1) {
               throw new EngineFault(
                 "dialogue.director_run.database_corrupt",
-                  "Director proposal run INSERT did not affect exactly one row",
+                "Director proposal run INSERT did not affect exactly one row",
                 {
                   session_id: sessionId,
                   command_id: commandId,
-                    proposal_kind: proposalKind,
+                  request_kind: input.run.requestKind,
+                  proposal_kind: proposalKind,
                   proposal_id: proposalId,
                 },
               );
             }
           }
-          };
-          await insertSet("definition", expected.definitions);
-          await insertSet("goal_plan", expected.goalPlans);
-          await insertSet("event_card", expected.eventCards);
           return validateProposalRows(
             this.#contracts,
-            await readProposalRuns(client, sessionId, commandId),
-            expected,
+            await readProposalRuns(
+              client,
+              sessionId,
+              commandId,
+              input.run.requestKind,
+            ),
+            proposalKind,
+            verifiedProposalCount,
             sessionId,
             commandId,
           );
@@ -467,6 +456,7 @@ async function readRun(
   client: PoolClient,
   sessionId: string,
   commandId: string,
+  requestKind: DialogueDirectorRequestKind,
   lockClause: "" | "FOR UPDATE",
 ): Promise<DialogueDirectorRunRow | undefined> {
   const query = await client.query<DialogueDirectorRunRow>(
@@ -481,14 +471,19 @@ async function readRun(
        FROM luoxia_engine.dialogue_director_runs
       WHERE session_id = $1::uuid
         AND command_id = $2::uuid
+        AND request_kind = $3
       ${lockClause}`,
-    [sessionId, commandId],
+    [sessionId, commandId, requestKind],
   );
   return requireAtMostOne(
     query.rows,
     "dialogue.director_run.database_corrupt",
     "Dialogue Director run lookup returned more than one row",
-    { session_id: sessionId, command_id: commandId },
+    {
+      session_id: sessionId,
+      command_id: commandId,
+      request_kind: requestKind,
+    },
   );
 }
 
@@ -585,7 +580,7 @@ function validateRunRow(
     assertUuid(contracts, row.world_id) !== expected.worldId ||
     assertUuid(contracts, row.dialogue_id) !== expected.dialogueId ||
     requestKind !== expected.requestKind ||
-    (requestKind === "director.dialogue_events" &&
+    (requestKind !== "director.system_dialogue" &&
       (responseTurnId !== undefined ||
         responseRuleRequestId !== undefined)) ||
     (requestKind === "director.system_dialogue" &&
@@ -620,14 +615,122 @@ function validateRunRow(
   });
 }
 
+async function readVerifiedProposalCount(
+  client: PoolClient,
+  contracts: ContractValidator,
+  run: DialogueDirectorRunRecord,
+): Promise<number> {
+  const query =
+    await client.query<ModelInvocationProposalSourceRow>(
+      `SELECT invocation_status,
+              response_document
+         FROM luoxia_engine.model_invocations
+        WHERE request_id = $1::uuid
+          AND world_id = $2::uuid
+          AND request_kind = $3
+        FOR SHARE`,
+      [run.modelRequestId, run.worldId, run.requestKind],
+    );
+  const row = requireAtMostOne(
+    query.rows,
+    "dialogue.director_run.database_corrupt",
+    "Director model request lookup returned more than one invocation",
+    {
+      session_id: run.sessionId,
+      command_id: run.commandId,
+      request_kind: run.requestKind,
+      model_request_id: run.modelRequestId,
+    },
+  );
+  if (
+    row === undefined ||
+    row.invocation_status !== "verified" ||
+    row.response_document === null
+  ) {
+    throw new EngineFault(
+      "dialogue.director_run.response_not_verified",
+      "Director proposal identities require a verified model response",
+      {
+        session_id: run.sessionId,
+        command_id: run.commandId,
+        request_kind: run.requestKind,
+        model_request_id: run.modelRequestId,
+        invocation_status: row?.invocation_status ?? null,
+      },
+    );
+  }
+
+  const response = contracts.assertObject(
+    CONTRACT_REF.modelResponse,
+    row.response_document,
+  ).value;
+  const responseKind = expectString(
+    response,
+    "request_kind",
+    "ModelResponse",
+  );
+  const output = expectJsonObject(
+    expectProperty(response, "output", "ModelResponse"),
+    "ModelResponse.output",
+  );
+  const outputKind = expectString(
+    output,
+    "output_kind",
+    "ModelOutput",
+  );
+  if (
+    responseKind !== run.requestKind ||
+    outputKind !== run.requestKind
+  ) {
+    throw new EngineFault(
+      "dialogue.director_run.response_kind_mismatch",
+      "Verified Director response does not match its persisted run kind",
+      {
+        session_id: run.sessionId,
+        command_id: run.commandId,
+        request_kind: run.requestKind,
+        response_kind: responseKind,
+        output_kind: outputKind,
+      },
+    );
+  }
+
+  switch (run.requestKind) {
+    case "director.dialogue_events": {
+      const eventCards = expectProperty(
+        output,
+        "event_cards",
+        "DirectorDialogueEventsOutput",
+      );
+      if (!Array.isArray(eventCards)) {
+        throw new EngineFault(
+          "dialogue.director_run.response_corrupt",
+          "Verified Dialogue Events output must contain an event_cards array",
+          {
+            session_id: run.sessionId,
+            command_id: run.commandId,
+            model_request_id: run.modelRequestId,
+          },
+        );
+      }
+      return eventCards.length;
+    }
+    case "director.goal_plan":
+    case "director.definition_draft":
+      return 1;
+    case "director.system_dialogue":
+      return 0;
+  }
+}
+
 async function readProposalRuns(
   client: PoolClient,
   sessionId: string,
   commandId: string,
+  requestKind: DialogueDirectorRequestKind,
 ): Promise<readonly ProposalRunRow[]> {
   const query = await client.query<ProposalRunRow>(
-    `SELECT proposal_kind,
-            proposal_id::text AS proposal_id,
+    `SELECT proposal_id::text AS proposal_id,
             proposal_ordinal,
             world_record_id::text AS world_record_id,
             rule_request_id::text AS rule_request_id,
@@ -638,14 +741,9 @@ async function readProposalRuns(
        FROM luoxia_engine.dialogue_director_proposal_runs
       WHERE session_id = $1::uuid
         AND command_id = $2::uuid
-      ORDER BY CASE proposal_kind
-                 WHEN 'definition' THEN 0
-                 WHEN 'goal_plan' THEN 1
-                 WHEN 'event_card' THEN 2
-                 ELSE 3
-               END,
-               proposal_ordinal`,
-    [sessionId, commandId],
+        AND request_kind = $3
+      ORDER BY proposal_ordinal`,
+    [sessionId, commandId, requestKind],
   );
   return query.rows;
 }
@@ -653,18 +751,11 @@ async function readProposalRuns(
 function validateProposalRows(
   contracts: ContractValidator,
   rows: readonly ProposalRunRow[],
-  expected: {
-    readonly definitions: readonly string[];
-    readonly goalPlans: readonly string[];
-    readonly eventCards: readonly string[];
-  },
+  expectedKind: DialogueDirectorProposalKind | undefined,
+  expectedCount: number,
   sessionId: string,
   commandId: string,
 ): DialogueDirectorProposalRuns {
-  const expectedCount =
-    expected.definitions.length +
-    expected.goalPlans.length +
-    expected.eventCards.length;
   if (rows.length !== expectedCount) {
     throw new EngineFault(
       "dialogue.director_run.proposal_set_conflict",
@@ -680,39 +771,24 @@ function validateProposalRows(
   const definitions: DialogueDefinitionRunRecord[] = [];
   const goalPlans: DialogueGoalPlanRunRecord[] = [];
   const eventCards: DialogueEventCardRunRecord[] = [];
-  const expectedByKind: Readonly<
-    Record<ProposalKind, readonly string[]>
-  > = Object.freeze({
-    definition: expected.definitions,
-    goal_plan: expected.goalPlans,
-    event_card: expected.eventCards,
-  });
-  const nextOrdinal: Record<ProposalKind, number> = {
-    definition: 0,
-    goal_plan: 0,
-    event_card: 0,
-  };
-  for (const row of rows) {
-    const proposalKind = readProposalKind(row.proposal_kind);
-    const ordinal = nextOrdinal[proposalKind];
-    nextOrdinal[proposalKind] = ordinal + 1;
-    const expectedIds = expectedByKind[proposalKind];
-      const proposalId = assertUuid(contracts, row.proposal_id);
-      if (
-        row.proposal_ordinal !== ordinal ||
-      proposalId !== expectedIds[ordinal]
-      ) {
-        throw new EngineFault(
-          "dialogue.director_run.proposal_set_conflict",
-          "Persisted proposal identity order differs from the verified Director response",
-          {
-            session_id: sessionId,
-            command_id: commandId,
-            proposal_kind: proposalKind,
-            proposal_ordinal: ordinal,
-          },
-        );
-      }
+  for (const [ordinal, row] of rows.entries()) {
+    const proposalId = assertUuid(contracts, row.proposal_id);
+    if (
+      expectedKind === undefined ||
+      row.proposal_ordinal !== ordinal
+    ) {
+      throw new EngineFault(
+        "dialogue.director_run.proposal_set_conflict",
+        "Persisted proposal identity order differs from the operation-specific Director response",
+        {
+          session_id: sessionId,
+          command_id: commandId,
+          expected_proposal_kind: expectedKind ?? null,
+          proposal_ordinal: ordinal,
+        },
+      );
+    }
+    const proposalKind = expectedKind;
     const ruleRequestId = assertUuid(
       contracts,
       row.rule_request_id,
@@ -788,21 +864,6 @@ function validateProposalRows(
   });
 }
 
-function readProposalKind(value: string): ProposalKind {
-  if (
-    value !== "definition" &&
-    value !== "goal_plan" &&
-    value !== "event_card"
-  ) {
-    throw new EngineFault(
-      "dialogue.director_run.database_corrupt",
-      "Dialogue Director proposal run has an unsupported proposal kind",
-      { proposal_kind: value },
-    );
-  }
-  return value;
-}
-
 function readPreparedAt(
   value: string,
   details: Readonly<Record<string, string>>,
@@ -824,7 +885,7 @@ function proposalRowCorrupt(
   message: string,
   sessionId: string,
   commandId: string,
-  proposalKind: ProposalKind,
+  proposalKind: DialogueDirectorProposalKind,
   proposalId: string,
 ): EngineFault {
   return new EngineFault(
@@ -882,7 +943,9 @@ function createGeneratedId(
 function readRequestKind(value: string): DialogueDirectorRequestKind {
   if (
     value !== "director.dialogue_events" &&
-    value !== "director.system_dialogue"
+    value !== "director.system_dialogue" &&
+    value !== "director.goal_plan" &&
+    value !== "director.definition_draft"
   ) {
     throw new EngineFault(
       "dialogue.director_run.database_corrupt",

@@ -18,7 +18,7 @@ export const CONTRACT_ID = Object.freeze({
     "https://schemas.luoxia.engine/contracts/world-runtime.v1.schema.json",
 } as const);
 
-export type ContractId = (typeof CONTRACT_ID)[keyof typeof CONTRACT_ID];
+type ContractId = (typeof CONTRACT_ID)[keyof typeof CONTRACT_ID];
 
 export function definitionRef<
   const TContractId extends ContractId,
@@ -80,6 +80,10 @@ export const CONTRACT_REF = Object.freeze({
   committedEvent: definitionRef(CONTRACT_ID.worldRuntime, "CommittedEvent"),
   sessionView: definitionRef(CONTRACT_ID.worldRuntime, "SessionView"),
   modelRequest: definitionRef(CONTRACT_ID.modelProtocol, "ModelRequest"),
+  modelProviderInputEnvelope: definitionRef(
+    CONTRACT_ID.modelProtocol,
+    "ModelProviderInputEnvelope",
+  ),
   modelResponse: definitionRef(CONTRACT_ID.modelProtocol, "ModelResponse"),
   modelOutput: definitionRef(CONTRACT_ID.modelProtocol, "ModelOutput"),
   verifiedModelOutput: definitionRef(
@@ -159,6 +163,37 @@ export const CONTRACT_REF = Object.freeze({
   visualBinding: definitionRef(CONTRACT_ID.materialization, "VisualBinding"),
 } as const);
 
+export const MODEL_OUTPUT_SCHEMA_REF_BY_REQUEST_KIND = Object.freeze({
+  "director.daily_settlement": definitionRef(
+    CONTRACT_ID.modelProtocol,
+    "DirectorDailySettlementOutput",
+  ),
+  "director.dialogue_events": definitionRef(
+    CONTRACT_ID.modelProtocol,
+    "DirectorDialogueEventsOutput",
+  ),
+  "director.system_dialogue": definitionRef(
+    CONTRACT_ID.modelProtocol,
+    "DirectorSystemDialogueOutput",
+  ),
+  "director.goal_plan": definitionRef(
+    CONTRACT_ID.modelProtocol,
+    "DirectorGoalPlanOutput",
+  ),
+  "director.definition_draft": definitionRef(
+    CONTRACT_ID.modelProtocol,
+    "DirectorDefinitionDraftOutput",
+  ),
+  "character.dialogue": definitionRef(
+    CONTRACT_ID.modelProtocol,
+    "CharacterDialogueOutput",
+  ),
+  "character.react": definitionRef(
+    CONTRACT_ID.modelProtocol,
+    "CharacterReactOutput",
+  ),
+} as const);
+
 export type WorldContentLockDocument = ValidatedJsonObject<
   typeof CONTRACT_REF.worldContentLock
 >;
@@ -173,16 +208,8 @@ export type SaveEnvelopeDocument = ValidatedJsonObject<
   typeof CONTRACT_REF.saveEnvelope
 >;
 
-export type ContentUpgradeDocument = ValidatedJsonObject<
-  typeof CONTRACT_REF.contentUpgrade
->;
-
 export type UpgradeAuthorizationDocument = ValidatedJsonObject<
   typeof CONTRACT_REF.upgradeAuthorization
->;
-
-export type ContentUpgradeOutputDocument = ValidatedJsonObject<
-  typeof CONTRACT_REF.contentUpgradeOutput
 >;
 
 export type ChoiceSpecDocument = ValidatedJsonObject<
@@ -193,20 +220,12 @@ export type RulePluginChoiceResolutionDocument = ValidatedJsonObject<
   typeof CONTRACT_REF.rulePluginChoiceResolution
 >;
 
-export type ContentUpgradeApplyOpDocument = ValidatedJsonObject<
-  typeof CONTRACT_REF.contentUpgradeApplyOp
->;
-
 export type SaveSchemaMigrationModuleManifestDocument = ValidatedJsonObject<
   typeof CONTRACT_REF.saveSchemaMigrationModuleManifest
 >;
 
 export type SaveSchemaMigrationPlanDocument = ValidatedJsonObject<
   typeof CONTRACT_REF.saveSchemaMigrationPlan
->;
-
-export type SaveSchemaImportRequestDocument = ValidatedJsonObject<
-  typeof CONTRACT_REF.saveSchemaImportRequest
 >;
 
 export type StoredSaveSchemaMigrationRequestDocument = ValidatedJsonObject<

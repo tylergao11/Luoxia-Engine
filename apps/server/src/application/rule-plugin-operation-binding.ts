@@ -7,7 +7,7 @@ import type {
   ContentRulePluginOperationBinding,
   ContentRulePluginOperationKind,
   WorldContentBinding,
-} from "@luoxia/world-core/composition";
+} from "@luoxia/world-core";
 
 import type {
   RulePluginAbiRegistry,

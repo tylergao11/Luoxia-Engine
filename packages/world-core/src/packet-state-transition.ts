@@ -8,6 +8,7 @@ import {
   visualBindingRuntimeIdentityKey,
   type JsonObject,
   type JsonValue,
+  type WorldContentLockDocument,
 } from "@luoxia/contracts-runtime/portable";
 
 import type {
@@ -15,6 +16,7 @@ import type {
   PacketCommitIdentityDocument,
   PacketStateTransition,
   PacketTransitionCandidates,
+  StateMachineContractAuthority,
   WorldSnapshotDocument,
 } from "./composition.js";
 
@@ -33,6 +35,7 @@ export interface LedgerPostArithmetic {
 
 export interface PacketStateTransitionDependencies {
   readonly ledgerArithmetic: LedgerPostArithmetic;
+  readonly stateMachineContracts: StateMachineContractAuthority;
 }
 
 const EFFECT_OPS = [
@@ -62,7 +65,7 @@ const EFFECT_OPS = [
   "control_binding.upsert",
   "day_cycle.transition",
   "state_machine.create",
-  "state_machine.set_state",
+  "state_machine.transition",
   "dialogue.open",
   "dialogue.turn.append",
   "dialogue.close",
@@ -80,6 +83,7 @@ interface TransitionContext {
   readonly worldId: string;
   readonly worldRevision: number;
   readonly committedEventId: string;
+  readonly worldContentLock: WorldContentLockDocument;
   readonly dependencies: PacketStateTransitionDependencies;
   readonly domainEventCandidates: JsonObject[];
   readonly materializationRequestCandidates: JsonObject[];
@@ -127,6 +131,7 @@ class DefaultPacketStateTransition implements PacketStateTransition {
     packet: ContentPacketDocument,
     snapshot: WorldSnapshotDocument,
     commitIdentity: PacketCommitIdentityDocument,
+    worldContentLock: WorldContentLockDocument,
   ): PacketTransitionCandidates {
     const packetValue = packet.value;
     const snapshotValue = snapshot.value;
@@ -169,6 +174,7 @@ class DefaultPacketStateTransition implements PacketStateTransition {
       worldId,
       worldRevision,
       committedEventId,
+      worldContentLock,
       dependencies: this.#dependencies,
       domainEventCandidates: [],
       materializationRequestCandidates: [],
@@ -308,6 +314,7 @@ const EFFECT_HANDLERS: { readonly [K in EffectOpName]: EffectHandler } = {
       "active",
       expectString(current, "state", "DynamicDefinitionState"),
     );
+    removeVisualBindingsForDynamicDefinition(context.world, definitionId);
     context.world.dynamic_definitions[index] = {
       ...cloneJsonObject(current),
       state: "retired",
@@ -362,6 +369,7 @@ const EFFECT_HANDLERS: { readonly [K in EffectOpName]: EffectHandler } = {
       "active",
       expectString(current, "state", "EntityState"),
     );
+    removeVisualBindingsForEntity(context.world, entityId);
     context.world.entities[index] = {
       ...cloneJsonObject(current),
       state: "retired",
@@ -670,6 +678,7 @@ const EFFECT_HANDLERS: { readonly [K in EffectOpName]: EffectHandler } = {
       revision: expectInteger(current, "revision", "RelationState") + 1,
     };
     const entityIndex = findEntityIndex(context.world, entityId);
+    removeVisualBindingsForEntity(context.world, entityId);
     context.world.entities[entityIndex] = {
       ...cloneJsonObject(entity),
       revision: expectInteger(entity, "revision", "EntityState") + 1,
@@ -1126,25 +1135,31 @@ const EFFECT_HANDLERS: { readonly [K in EffectOpName]: EffectHandler } = {
         "acceptance_id",
         "VisualBindingDraft",
       ),
-      scope: "session",
       created_by_event_id: context.committedEventId,
-      state: "active",
     };
-    for (const [existingIndex, existing] of context.world.visual_bindings.entries()) {
-      if (
-        expectString(existing, "binding_id", "VisualBinding") !== bindingId &&
-        expectString(existing, "state", "VisualBinding") === "active" &&
-        visualBindingRuntimeIdentityKey(
-          existing,
-          "VisualBinding",
-        ) === runtimeIdentityKey
-      ) {
-        context.world.visual_bindings[existingIndex] = {
-          ...cloneJsonObject(existing),
-          state: "retired",
-        };
-      }
+    const existingBindingIndex = context.world.visual_bindings.findIndex(
+      (entry) =>
+        expectString(entry, "binding_id", "VisualBinding") === bindingId,
+    );
+    if (
+      existingBindingIndex >= 0 &&
+      visualBindingRuntimeIdentityKey(
+        context.world.visual_bindings[existingBindingIndex] as JsonObject,
+        "VisualBinding",
+      ) !== runtimeIdentityKey
+    ) {
+      throw fault(
+        "world.transition.visual_binding_id_conflict",
+        "VisualBinding binding_id cannot be reused for a different runtime subject revision or slot",
+        { binding_id: bindingId },
+      );
     }
+    context.world.visual_bindings = context.world.visual_bindings.filter(
+      (entry) =>
+        expectString(entry, "binding_id", "VisualBinding") === bindingId ||
+        visualBindingRuntimeIdentityKey(entry, "VisualBinding") !==
+          runtimeIdentityKey,
+    );
     const index = context.world.visual_bindings.findIndex(
       (entry) =>
         expectString(entry, "binding_id", "VisualBinding") === bindingId,
@@ -1212,14 +1227,10 @@ const EFFECT_HANDLERS: { readonly [K in EffectOpName]: EffectHandler } = {
   },
 
   "state_machine.create": (op, context) => {
-    const instance = expectJsonObject(
-      expectProperty(op, "instance", "StateMachineCreateOp"),
-      "StateMachineCreateOp.instance",
-    );
     const instanceId = expectString(
-      instance,
+      op,
       "instance_id",
-      "StateMachineInstanceState",
+      "StateMachineCreateOp",
     );
     if (findStateMachine(context.world, instanceId) !== undefined) {
       throw fault(
@@ -1228,74 +1239,28 @@ const EFFECT_HANDLERS: { readonly [K in EffectOpName]: EffectHandler } = {
         { instance_id: instanceId },
       );
     }
-    assertEqual(
-      "state_machine.revision",
-      0,
-      expectInteger(instance, "revision", "StateMachineInstanceState"),
+    const machineRef = expectJsonObject(
+      expectProperty(op, "machine", "StateMachineCreateOp"),
+      "StateMachineCreateOp.machine",
     );
-    assertUniqueFrameIds(
-      asObjectArray(
-        expectProperty(instance, "frames", "StateMachineInstanceState"),
-        "StateMachineInstanceState.frames",
-      ),
+    const owner = expectJsonObject(
+      expectProperty(op, "owner", "StateMachineCreateOp"),
+      "StateMachineCreateOp.owner",
     );
-    const machineScope = expectString(
-      instance,
-      "machine_scope",
-      "StateMachineInstanceState",
+    const machine = context.dependencies.stateMachineContracts.resolveLockedMachine(
+      {
+        worldContentLock: context.worldContentLock,
+        machine: machineRef,
+      },
     );
-    if (machineScope === "character") {
-      assertActiveEntityId(
-        context.world,
-        expectString(instance, "owner_entity_id", "StateMachineInstanceState"),
-        "state_machine.owner",
-      );
-    } else if (machineScope === "world") {
-      assertEqual(
-        "state_machine.world_id",
-        context.worldId,
-        expectString(instance, "world_id", "StateMachineInstanceState"),
-      );
-    } else {
-      throw fault(
-        "world.transition.state_machine_scope",
-        `Unsupported state machine scope ${machineScope}`,
-        { machine_scope: machineScope },
-      );
-    }
-    context.world.state_machines.push(cloneJsonObject(instance));
-  },
-
-  "state_machine.set_state": (op, context) => {
-    const instanceId = expectString(
-      op,
-      "machine_instance_id",
-      "StateMachineSetStateOp",
-    );
-    const index = findStateMachineIndex(context.world, instanceId);
-    if (index < 0) {
-      throw missing("state_machine", instanceId);
-    }
-    const current = context.world.state_machines[index] as JsonObject;
-    const frames = asObjectArray(
-      expectProperty(current, "frames", "StateMachineInstanceState"),
-      "StateMachineInstanceState.frames",
-    );
-    if (frames.length === 0) {
-      throw fault(
-        "world.transition.state_machine_frames_empty",
-        `State machine ${instanceId} has no frames`,
-        { instance_id: instanceId },
-      );
-    }
-    // Op has no frame_id; update the top frame in place (no ID minting).
-    const top = frames[frames.length - 1] as JsonObject;
-    const nextTop: Record<string, JsonValue> = {
-      ...cloneJsonObject(top),
-      state: cloneJson(expectProperty(op, "state", "StateMachineSetStateOp")),
-      tenure: cloneJson(expectProperty(op, "tenure", "StateMachineSetStateOp")),
-      continuation: cloneJson(
-        expectProperty(op, "continuation", "StateMachineSetStateOp"),
+    const instance: JsonObject = {
+      instance_id: instanceId,
+      machine: cloneJsonObject(machineRef),
+      owner: cloneJsonObject(owner),
+      state_id: expectString(
+        machine.initialState,
+        "state_id",
+        "MachineStateDefinition",
       ),
       entered_day: expectInteger(
         context.world.day_cycle,
@@ -1303,14 +1268,105 @@ const EFFECT_HANDLERS: { readonly [K in EffectOpName]: EffectHandler } = {
         "DayCycleState",
       ),
     };
-    const nextFrames = [
-      ...frames.slice(0, -1).map((frame) => cloneJsonObject(frame)),
-      nextTop,
-    ];
+    context.dependencies.stateMachineContracts.assertLockedInstance({
+      worldContentLock: context.worldContentLock,
+      worldId: context.worldId,
+      instance,
+    });
+
+    const ownerKind = expectString(owner, "owner_kind", "StateMachineOwner");
+    if (ownerKind === "character") {
+      const entityId = expectString(owner, "entity_id", "StateMachineOwner");
+      assertActiveEntityId(context.world, entityId, "state_machine.owner");
+      if (
+        context.world.state_machines.some((entry) =>
+          stateMachineHasCharacterOwner(entry, entityId),
+        )
+      ) {
+        throw fault(
+          "world.transition.state_machine_character_owner_conflict",
+          "A character entity may own only one state machine instance",
+          { entity_id: entityId, instance_id: instanceId },
+        );
+      }
+    } else if (ownerKind === "world") {
+      const machineLocalId = expectString(
+        machineRef,
+        "local_id",
+        "CatalogRef",
+      );
+      if (
+        context.world.state_machines.some(
+          (entry) =>
+            stateMachineHasWorldOwner(entry, context.worldId) &&
+            jsonEquals(
+              expectProperty(entry, "machine", "StateMachineInstanceState"),
+              machineRef,
+            ),
+        )
+      ) {
+        throw fault(
+          "world.transition.state_machine_world_owner_conflict",
+          "A world may own only one instance of an exact state machine definition",
+          { machine_id: machineLocalId, instance_id: instanceId },
+        );
+      }
+    } else {
+      throw fault(
+        "world.transition.state_machine_owner_kind",
+        "State machine owner kind is unsupported",
+        { owner_kind: ownerKind },
+      );
+    }
+    context.world.state_machines.push(instance);
+  },
+
+  "state_machine.transition": (op, context) => {
+    const instanceId = expectString(
+      op,
+      "machine_instance_id",
+      "StateMachineTransitionOp",
+    );
+    const transitionId = expectString(
+      op,
+      "transition_id",
+      "StateMachineTransitionOp",
+    );
+    const index = findStateMachineIndex(context.world, instanceId);
+    if (index < 0) {
+      throw missing("state_machine", instanceId);
+    }
+    const current = context.world.state_machines[index] as JsonObject;
+    const owner = expectJsonObject(
+      expectProperty(current, "owner", "StateMachineInstanceState"),
+      "StateMachineInstanceState.owner",
+    );
+    if (expectString(owner, "owner_kind", "StateMachineOwner") === "character") {
+      assertActiveEntityId(
+        context.world,
+        expectString(owner, "entity_id", "StateMachineOwner"),
+        "state_machine.owner",
+      );
+    }
+    const resolved =
+      context.dependencies.stateMachineContracts.resolveLockedTransition({
+        worldContentLock: context.worldContentLock,
+        worldId: context.worldId,
+        instance: current,
+        transitionId,
+      });
     context.world.state_machines[index] = {
       ...cloneJsonObject(current),
-      frames: nextFrames,
-      revision: expectInteger(current, "revision", "StateMachineInstanceState") + 1,
+      state_id: expectString(
+        resolved.toState,
+        "state_id",
+        "MachineStateDefinition",
+      ),
+      entered_day: expectInteger(
+        context.world.day_cycle,
+        "day",
+        "DayCycleState",
+      ),
     };
   },
 
@@ -1735,6 +1791,7 @@ function mutateSubjectComponents(
         {},
       );
     }
+    removeVisualBindingsForEntity(context.world, entityId);
     context.world.entities[index] = {
       ...cloneJsonObject(current),
       components,
@@ -1792,6 +1849,7 @@ function mutateSubjectComponents(
         {},
       );
     }
+    removeVisualBindingsForDynamicDefinition(context.world, definitionId);
     context.world.dynamic_definitions[index] = {
       ...cloneJsonObject(current),
       components,
@@ -1815,6 +1873,46 @@ function subjectIsEntity(subject: JsonObject, entityId: string): boolean {
     "SubjectRef.entity",
   );
   return expectString(entity, "entity_id", "EntityRef") === entityId;
+}
+
+function removeVisualBindingsForEntity(
+  world: MutableWorld,
+  entityId: string,
+): void {
+  world.visual_bindings = world.visual_bindings.filter((binding) => {
+    const subject = expectJsonObject(
+      expectProperty(binding, "subject", "VisualBinding"),
+      "VisualBinding.subject",
+    );
+    return !subjectIsEntity(subject, entityId);
+  });
+}
+
+function removeVisualBindingsForDynamicDefinition(
+  world: MutableWorld,
+  definitionId: string,
+): void {
+  world.visual_bindings = world.visual_bindings.filter((binding) => {
+    const subject = expectJsonObject(
+      expectProperty(binding, "subject", "VisualBinding"),
+      "VisualBinding.subject",
+    );
+    if (expectString(subject, "kind", "SubjectRef") !== "definition") {
+      return true;
+    }
+    const definition = expectJsonObject(
+      expectProperty(subject, "definition", "SubjectRef"),
+      "SubjectRef.definition",
+    );
+    return (
+      expectString(definition, "kind", "DefinitionRef") !== "dynamic" ||
+      expectString(
+        definition,
+        "definition_id",
+        "DynamicDefinitionRef",
+      ) !== definitionId
+    );
+  });
 }
 
 function assertEntityExpectedRevision(
@@ -1991,21 +2089,6 @@ function assertUniqueEntityReferences(
       );
     }
     entityIds.add(entityId);
-  }
-}
-
-function assertUniqueFrameIds(frames: readonly JsonObject[]): void {
-  const frameIds = new Set<string>();
-  for (const frame of frames) {
-    const frameId = expectString(frame, "frame_id", "StateMachineFrame");
-    if (frameIds.has(frameId)) {
-      throw fault(
-        "world.transition.duplicate_id",
-        `State machine contains duplicate frame ${frameId}`,
-        { frame_id: frameId },
-      );
-    }
-    frameIds.add(frameId);
   }
 }
 
@@ -2333,6 +2416,34 @@ function findStateMachineIndex(world: MutableWorld, instanceId: string): number 
   );
 }
 
+function stateMachineHasCharacterOwner(
+  instance: JsonObject,
+  entityId: string,
+): boolean {
+  const owner = expectJsonObject(
+    expectProperty(instance, "owner", "StateMachineInstanceState"),
+    "StateMachineInstanceState.owner",
+  );
+  return (
+    expectString(owner, "owner_kind", "StateMachineOwner") === "character" &&
+    expectString(owner, "entity_id", "StateMachineOwner") === entityId
+  );
+}
+
+function stateMachineHasWorldOwner(
+  instance: JsonObject,
+  worldId: string,
+): boolean {
+  const owner = expectJsonObject(
+    expectProperty(instance, "owner", "StateMachineInstanceState"),
+    "StateMachineInstanceState.owner",
+  );
+  return (
+    expectString(owner, "owner_kind", "StateMachineOwner") === "world" &&
+    expectString(owner, "world_id", "StateMachineOwner") === worldId
+  );
+}
+
 function findDialogue(
   world: MutableWorld,
   dialogueId: string,
@@ -2504,7 +2615,7 @@ const _exhaustive: { readonly [K in EffectOpName]: true } = {
   "control_binding.upsert": true,
   "day_cycle.transition": true,
   "state_machine.create": true,
-  "state_machine.set_state": true,
+  "state_machine.transition": true,
   "dialogue.open": true,
   "dialogue.turn.append": true,
   "dialogue.close": true,

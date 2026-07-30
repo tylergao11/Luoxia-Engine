@@ -10,7 +10,7 @@ import {
   type JsonObject,
   type JsonValue,
 } from "@luoxia/contracts-runtime";
-import type { DeterministicContextAuthority } from "@luoxia/world-core/composition";
+import type { DeterministicContextAuthority } from "@luoxia/world-core";
 
 import type {
   CommandJournal,

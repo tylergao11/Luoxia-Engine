@@ -116,6 +116,10 @@ export interface RuntimeContentActivationInput {
   readonly directorDialogueEventsModelProfileId: string;
   /** Explicit deployment-owned ModelProfile selection for Director System dialogue. */
   readonly directorSystemDialogueModelProfileId: string;
+  /** Explicit deployment-owned ModelProfile selection for goal-plan drafting. */
+  readonly directorGoalPlanModelProfileId: string;
+  /** Explicit deployment-owned ModelProfile selection for definition drafting. */
+  readonly directorDefinitionDraftModelProfileId: string;
   /** Explicit deployment-owned ModelProfile selection for Character reactions. */
   readonly characterReactModelProfileId: string;
 }
@@ -205,6 +209,22 @@ export async function createRuntimeContentActivation(
   input.modelProvider.assertCanInvoke({
     modelProfileId: input.directorSystemDialogueModelProfileId,
     requestKind: "director.system_dialogue",
+  });
+  input.contracts.assert(
+    CONTRACT_REF.identifier,
+    input.directorGoalPlanModelProfileId,
+  );
+  input.modelProvider.assertCanInvoke({
+    modelProfileId: input.directorGoalPlanModelProfileId,
+    requestKind: "director.goal_plan",
+  });
+  input.contracts.assert(
+    CONTRACT_REF.identifier,
+    input.directorDefinitionDraftModelProfileId,
+  );
+  input.modelProvider.assertCanInvoke({
+    modelProfileId: input.directorDefinitionDraftModelProfileId,
+    requestKind: "director.definition_draft",
   });
   input.contracts.assert(
     CONTRACT_REF.identifier,
@@ -356,6 +376,10 @@ export async function createRuntimeContentActivation(
       input.directorDialogueEventsModelProfileId,
     directorSystemDialogueModelProfileId:
       input.directorSystemDialogueModelProfileId,
+    directorGoalPlanModelProfileId:
+      input.directorGoalPlanModelProfileId,
+    directorDefinitionDraftModelProfileId:
+      input.directorDefinitionDraftModelProfileId,
     characterReactModelProfileId: input.characterReactModelProfileId,
   });
 
