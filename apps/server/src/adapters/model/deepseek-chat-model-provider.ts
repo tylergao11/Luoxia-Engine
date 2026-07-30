@@ -22,6 +22,13 @@ import {
   readProviderTokenCount,
   readBoundedProviderResponseText,
 } from "./model-provider-http-support.js";
+import {
+  logModelProviderFailure,
+  logModelProviderRequest,
+  logModelProviderResponse,
+  observeModelProviderOutput,
+  observeResolvedModelRequest,
+} from "./model-provider-invocation-log.js";
 
 const MAX_PROVIDER_RESPONSE_BYTES = 4 * 1024 * 1024;
 
@@ -118,7 +125,15 @@ class DeepSeekChatModelProvider implements ModelProvider {
     const outputSchema = this.#requireOutputSchema(
       resolved.requestKind,
     );
+    const requestObservation = observeResolvedModelRequest({
+      provider: "deepseek_chat",
+      model: this.#model,
+      resolved,
+      outputSchema,
+    });
+    logModelProviderRequest(requestObservation);
 
+    const startedAt = Date.now();
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), this.#timeoutMs);
     let response: Response;
@@ -154,7 +169,17 @@ class DeepSeekChatModelProvider implements ModelProvider {
         providerLabel: "DeepSeek chat",
       });
     } catch (error: unknown) {
+      const durationMs = Date.now() - startedAt;
       if (abort.signal.aborted) {
+        logModelProviderFailure({
+          provider: "deepseek_chat",
+          model: this.#model,
+          modelProfileId: resolved.modelProfileId,
+          requestKind: resolved.requestKind,
+          durationMs,
+          code: "model.provider.timeout",
+          message: "DeepSeek chat request exceeded its explicit timeout",
+        });
         throw new EngineFault(
           "model.provider.timeout",
           "DeepSeek chat request exceeded its explicit timeout",
@@ -165,8 +190,27 @@ class DeepSeekChatModelProvider implements ModelProvider {
         );
       }
       if (error instanceof EngineFault) {
+        logModelProviderFailure({
+          provider: "deepseek_chat",
+          model: this.#model,
+          modelProfileId: resolved.modelProfileId,
+          requestKind: resolved.requestKind,
+          durationMs,
+          code: error.code,
+          message: error.message,
+        });
         throw error;
       }
+      logModelProviderFailure({
+        provider: "deepseek_chat",
+        model: this.#model,
+        modelProfileId: resolved.modelProfileId,
+        requestKind: resolved.requestKind,
+        durationMs,
+        code: "model.provider.transport_failed",
+        message:
+          "DeepSeek chat request failed before a verifiable response was received",
+      });
       throw new EngineFault(
         "model.provider.transport_failed",
         "DeepSeek chat request failed before a verifiable response was received",
@@ -180,6 +224,15 @@ class DeepSeekChatModelProvider implements ModelProvider {
     }
 
     if (!response.ok) {
+      logModelProviderFailure({
+        provider: "deepseek_chat",
+        model: this.#model,
+        modelProfileId: resolved.modelProfileId,
+        requestKind: resolved.requestKind,
+        durationMs: Date.now() - startedAt,
+        code: "model.provider.http_error",
+        message: "DeepSeek chat endpoint returned a non-success status",
+      });
       throw new EngineFault(
         "model.provider.http_error",
         "DeepSeek chat endpoint returned a non-success status",
@@ -195,13 +248,46 @@ class DeepSeekChatModelProvider implements ModelProvider {
       code: "model.provider.response_not_json",
       message: "DeepSeek chat endpoint did not return a JSON object",
     });
-    const output = extractDeepSeekOutput(
-      providerResponse,
-      this.#model,
+    let output: JsonObject;
+    try {
+      output = extractDeepSeekOutput(
+        providerResponse,
+        this.#model,
+      );
+    } catch (error: unknown) {
+      const fault =
+        error instanceof EngineFault
+          ? error
+          : new EngineFault(
+              "model.provider.response_shape",
+              "DeepSeek chat response could not be extracted",
+            );
+      logModelProviderFailure({
+        provider: "deepseek_chat",
+        model: this.#model,
+        modelProfileId: resolved.modelProfileId,
+        requestKind: resolved.requestKind,
+        durationMs: Date.now() - startedAt,
+        code: fault.code,
+        message: fault.message,
+      });
+      throw fault;
+    }
+    const usage = readDeepSeekUsage(providerResponse, this.#model);
+    logModelProviderResponse(
+      observeModelProviderOutput({
+        provider: "deepseek_chat",
+        model: this.#model,
+        modelProfileId: resolved.modelProfileId,
+        requestKind: resolved.requestKind,
+        durationMs: Date.now() - startedAt,
+        output,
+        usage,
+      }),
     );
     return Object.freeze({
       output,
-      usage: readDeepSeekUsage(providerResponse, this.#model),
+      usage,
     });
   }
 

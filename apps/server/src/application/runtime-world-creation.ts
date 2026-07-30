@@ -139,7 +139,7 @@ export function createRuntimeWorldCreationService(
       });
       const snapshot = dependencies.contracts.assertObject(
         CONTRACT_REF.worldSnapshot,
-        buildWorldSnapshotCandidate(context),
+        buildWorldSnapshotCandidate(context, worldContentLock.value),
       );
       const world = await dependencies.saves.createInitial({
         snapshot,
@@ -259,7 +259,10 @@ function buildContentIdentityMaps(input: {
   });
 }
 
-function buildWorldSnapshotCandidate(context: InitialWorldContext): JsonObject {
+function buildWorldSnapshotCandidate(
+  context: InitialWorldContext,
+  worldContentLock: JsonObject,
+): JsonObject {
   const worldDefinition = context.binding.worldDefinition;
   const contentProvenance = (): JsonObject => ({
     origin_kind: "content_bundle",
@@ -479,6 +482,7 @@ function buildWorldSnapshotCandidate(context: InitialWorldContext): JsonObject {
       event_budgets: [],
       event_cards: [],
     },
+    world_content_lock: worldContentLock,
   };
 }
 

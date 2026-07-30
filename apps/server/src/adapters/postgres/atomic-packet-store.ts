@@ -248,6 +248,11 @@ class PostgresLockedWorldTransaction implements LockedWorldTransaction {
       world_id: this.#lockedWorld.worldId,
       world_revision: this.#lockedWorld.revision,
       world_state: this.#lockedWorld.state.value,
+      world_content_lock: expectProperty(
+        this.#lockedWorld.saveEnvelope.value,
+        "world_content_lock",
+        "SaveEnvelope",
+      ),
     });
     this.#stage = "snapshot_read";
     return snapshot.value;

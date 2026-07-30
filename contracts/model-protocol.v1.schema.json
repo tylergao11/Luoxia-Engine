@@ -789,82 +789,96 @@
         }
       }
     },
-    "AutomaticAgencyGateSemanticDraft": {
+    "DailySettlementAgencyIntent": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "protected_outcome_indices",
-        "participant_subject_indices",
-        "requirement",
-        "policy"
+        "semantic_intent",
+        "policy",
+        "terms"
       ],
       "properties": {
-        "protected_outcome_indices": {
-          "type": "array",
-          "minItems": 1,
-          "uniqueItems": true,
-          "items": {
-            "$ref": "#/$defs/ModelIndex"
-          }
-        },
-        "participant_subject_indices": {
-          "type": "array",
-          "minItems": 1,
-          "uniqueItems": true,
-          "items": {
-            "$ref": "#/$defs/ModelIndex"
-          }
-        },
-        "requirement": {
-          "$ref": "#/$defs/AgencyRequirementSemanticDraft"
+        "semantic_intent": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
         },
         "policy": {
           "$ref": "world-runtime.v1.schema.json#/$defs/AgencyPolicy"
+        },
+        "terms": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
         }
       }
     },
-    "WorldAutomaticEventSemanticDraft": {
+    "DailySettlementWorldEventIntent": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "event_scope",
-        "situation",
-        "candidate_outcomes"
+        "scope",
+        "event_type",
+        "summary",
+        "outcome_type",
+        "parameters",
+        "subject_actor_indices"
       ],
       "properties": {
-        "event_scope": {
+        "scope": {
           "const": "world"
         },
-        "situation": {
-          "$ref": "#/$defs/EventSituationSemanticDraft"
+        "event_type": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
         },
-        "candidate_outcomes": {
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000
+        },
+        "outcome_type": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "parameters": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        },
+        "subject_actor_indices": {
           "type": "array",
           "minItems": 1,
+          "uniqueItems": true,
           "items": {
-            "$ref": "#/$defs/SemanticOutcomeDraft"
+            "$ref": "#/$defs/ModelIndex"
           }
         }
       }
     },
-    "CharacterAutomaticEventSemanticDraft": {
+    "DailySettlementCharacterEventIntent": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "event_scope",
-        "situation",
-        "target_subject_indices",
-        "candidate_outcomes",
-        "agency_gates"
+        "scope",
+        "event_type",
+        "summary",
+        "outcome_type",
+        "parameters",
+        "target_actor_indices",
+        "agency"
       ],
       "properties": {
-        "event_scope": {
+        "scope": {
           "const": "character"
         },
-        "situation": {
-          "$ref": "#/$defs/EventSituationSemanticDraft"
+        "event_type": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
         },
-        "target_subject_indices": {
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000
+        },
+        "outcome_type": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "parameters": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        },
+        "target_actor_indices": {
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
@@ -872,27 +886,25 @@
             "$ref": "#/$defs/ModelIndex"
           }
         },
-        "candidate_outcomes": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/SemanticOutcomeDraft"
-          }
-        },
-        "agency_gates": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/AutomaticAgencyGateSemanticDraft"
-          }
+        "agency": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/DailySettlementAgencyIntent"
+            }
+          ]
         }
       }
     },
-    "AutomaticEventSemanticDraft": {
+    "DailySettlementEventIntent": {
       "oneOf": [
         {
-          "$ref": "#/$defs/WorldAutomaticEventSemanticDraft"
+          "$ref": "#/$defs/DailySettlementWorldEventIntent"
         },
         {
-          "$ref": "#/$defs/CharacterAutomaticEventSemanticDraft"
+          "$ref": "#/$defs/DailySettlementCharacterEventIntent"
         }
       ]
     },
@@ -1255,7 +1267,7 @@
         "automatic_events": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/AutomaticEventSemanticDraft"
+            "$ref": "#/$defs/DailySettlementEventIntent"
           }
         }
       }
@@ -1426,6 +1438,38 @@
           "additionalProperties": false,
           "required": [
             "kind",
+            "actor_index"
+          ],
+          "properties": {
+            "kind": {
+              "const": "entity"
+            },
+            "actor_index": {
+              "$ref": "#/$defs/ModelIndex"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "is_character_subject"
+          ],
+          "properties": {
+            "kind": {
+              "const": "entity"
+            },
+            "is_character_subject": {
+              "const": true
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
             "entity_id"
           ],
           "properties": {
@@ -1523,30 +1567,82 @@
       }
     },
     "ProviderKnowledgeView": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "viewer_entity_id",
-        "facts",
-        "memories"
-      ],
-      "properties": {
-        "viewer_entity_id": {
-          "$ref": "common.v1.schema.json#/$defs/Uuid"
-        },
-        "facts": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/ProviderFactView"
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "facts",
+            "memories"
+          ],
+          "properties": {
+            "facts": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ProviderFactView"
+              }
+            },
+            "memories": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ProviderMemoryView"
+              }
+            }
           }
         },
-        "memories": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/ProviderMemoryView"
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "viewer_actor_index",
+            "facts",
+            "memories"
+          ],
+          "properties": {
+            "viewer_actor_index": {
+              "$ref": "#/$defs/ModelIndex"
+            },
+            "facts": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ProviderFactView"
+              }
+            },
+            "memories": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ProviderMemoryView"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "viewer_entity_id",
+            "facts",
+            "memories"
+          ],
+          "properties": {
+            "viewer_entity_id": {
+              "$ref": "common.v1.schema.json#/$defs/Uuid"
+            },
+            "facts": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ProviderFactView"
+              }
+            },
+            "memories": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ProviderMemoryView"
+              }
+            }
           }
         }
-      }
+      ]
     },
     "ProviderMachineStateView": {
       "type": "object",
@@ -1756,6 +1852,38 @@
     },
     "ProviderDialogueParticipantView": {
       "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "participant_kind",
+            "actor_index"
+          ],
+          "properties": {
+            "participant_kind": {
+              "const": "entity"
+            },
+            "actor_index": {
+              "$ref": "#/$defs/ModelIndex"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "participant_kind",
+            "is_character_subject"
+          ],
+          "properties": {
+            "participant_kind": {
+              "const": "entity"
+            },
+            "is_character_subject": {
+              "const": true
+            }
+          }
+        },
         {
           "type": "object",
           "additionalProperties": false,

@@ -342,10 +342,15 @@ async function readWorldRecord(
     CONTRACT_REF.worldState,
     row.state_document,
   );
+  const worldContentLock: WorldContentLockDocument = contracts.assertObject(
+    CONTRACT_REF.worldContentLock,
+    row.world_content_lock_document,
+  );
   const snapshot = contracts.assertObject(CONTRACT_REF.worldSnapshot, {
     world_id: row.world_id,
     world_revision: revision,
     world_state: worldState.value,
+    world_content_lock: worldContentLock.value,
   });
   if (
     expectString(snapshot.value, "world_id", "WorldSnapshot") !== worldId ||
@@ -358,11 +363,6 @@ async function readWorldRecord(
       { world_id: worldId, revision },
     );
   }
-
-  const worldContentLock: WorldContentLockDocument = contracts.assertObject(
-    CONTRACT_REF.worldContentLock,
-    row.world_content_lock_document,
-  );
   const dependencyBundleLocks = validatePackLocks(
     contracts,
     row.dependency_bundle_locks_document,

@@ -129,9 +129,9 @@ ContentBundle 直接初始化角色行动状态机、世界状态机、角色私
 ```text
 角色行动状态机与世界状态机推进当日意图，形成客观轨迹
   → Runtime 以最新已提交 world revision 投影 Director 动态上下文
-  → director.daily_settlement 返回 AutomaticEventSemanticDraft[]
+  → director.daily_settlement 返回 DailySettlementEventIntent[]（`automatic_events`，允许空）
   → daily proposal journal 按 model request + draft ordinal 分配稳定根 ID
-  → Server 从 verified request / snapshot / Content lock 本地物化候选
+  → Server 从 verified 意图 / request / snapshot / Content lock 本地装配 Materialized 候选
       ├─ WorldEvent candidate → RulePlugin 裁决并落地
       └─ CharacterEvent candidate 按目标 Entity 聚合
            → 同一角色的多件事合并为一次 character.react
@@ -167,7 +167,7 @@ ContentBundle 直接初始化角色行动状态机、世界状态机、角色私
 
 玩家地图移动是独立的导航命令：点击目标地点后，Runtime 通过内容包绑定的 `navigation_resolver` 校验并提交 `EntityRelocateOp`。它不调用模型、不生成 EventCard、不扣 AP，但提交后的位移与客观轨迹会被后续 Director 看见。砍人、做饭等结果性事件没有结构化按钮，也不存在全局动作文本或自然语言命令行。玩家只能在有接收者的 NPC/System 对话中表达；Director 根据接收者、位置、关系、世界状态与完整 transcript 判断是否提出 EventCard。对 System 表达遥远的物理行动目标只会得到指引，不会被视为行动已经发生。
 
-事件表达一次结果性因果，不是任务、日程或“去找某人说话”的待办。EventCard 也绝不调用 Character Mind。NPC 对话回复可以附带 `AgencyCommitmentSemanticDraft`；Runtime 只能把经过验证的 Character Mind 输出封装成 AgencyCommitment 并追加到该 NPC 的 DialogueTurn。模型只提出 `EventCardAgencyGateSemanticDraft` / `AutomaticAgencyGateSemanticDraft`，Server 只能从已验证请求与锁定事实将其物化为 `MaterializedAgencyGateCandidate`；每个候选必须声明受保护的 outcome ID、精确 semantic_intent、subjects 与 terms。Director 只能引用这份证据，不能替 NPC 编造或挪用同意。受保护的 EventCard 缺少逐字段匹配且仍有效的承诺时必须拒绝发布；Automatic CharacterEvent 的 gate 不接受既有承诺，只使用目标 Character Mind 针对同一 requirement 返回的 AgencyDecision。
+事件表达一次结果性因果，不是任务、日程或“去找某人说话”的待办。EventCard 也绝不调用 Character Mind。NPC 对话回复可以附带 `AgencyCommitmentSemanticDraft`；Runtime 只能把经过验证的 Character Mind 输出封装成 AgencyCommitment 并追加到该 NPC 的 DialogueTurn。EventCard 模型只提出 `EventCardAgencyGateSemanticDraft`；日结算角色 agency 只提出可选 `DailySettlementAgencyIntent`，Server 从 verified 意图本地装配恰好一个 `MaterializedAgencyGateCandidate`（outcome/gate 本地 ID、subjects 与 `commitment_evidence=[]` 不由模型发明）。每个候选必须声明受保护的 outcome ID、精确 semantic_intent、subjects 与 terms。Director 只能引用这份证据，不能替 NPC 编造或挪用同意。受保护的 EventCard 缺少逐字段匹配且仍有效的承诺时必须拒绝发布；Automatic CharacterEvent 的 gate 不接受既有承诺，只使用目标 Character Mind 针对同一 requirement 返回的 AgencyDecision。
 
 ### 5.2.4 EventCard 的裁决、封存与点击
 
@@ -479,7 +479,7 @@ Runtime Kernel 只接受组合根显式注入的一个 ModelProvider adapter。�
 
 Server 提供三个真实、单次调用的 adapter：OpenAI Responses 只配置 endpoint、API key、model、timeout 与 max output tokens；官方 DeepSeek Chat Completions 还配置 thinking mode 与 temperature；本地 Ollama 只接受 loopback `/api/chat` endpoint，并配置已安装 model、timeout、max output tokens 与 temperature。ModelProfile 与 request kind 不在具体 adapter 配置中重复声明，只由组合根的 `createRoutedModelProvider` 绑定 `(model_profile_id, request_kind) → provider`；adapter 从已经路由的 invocation 读取二者，并按 request kind 从正式 SchemaRegistry 导出 success-only generation Schema，部署方不能传入第二套输出字段模型。OpenAI 与 DeepSeek 都把 generation Schema 放在动态输入之前的稳定静态指令中；DeepSeek 同时请求 `json_object`，Ollama 使用 native chat 的 `stream:false`、`think:false` 与结构化 `format`。generation Schema 只缩小 Provider 的生成空间，不能取代、复制或放宽正式 ModelOutput 合同。三个 adapter 共用响应字节上限与严格 UTF-8 门禁，覆盖完整响应体读取超时且从不重试。
 
-ModelGateway 是模型可见字段的唯一投影所有者：它从已经验证的 ModelRequest 只向 Provider 交付本地路由所需的 `modelProfileId` / `requestKind`、与 CacheBlockRef 顺序一致的 Prompt 纯文本，以及经同一 Model Protocol Schema 的 `ModelProviderInputEnvelope` 校验的最小动态语义投影。投影保持原数组顺序、文本与语义值，删除 revision、provenance、bundle digest、请求/响应 ID、Dialogue/Turn ID、时间戳、visibility 元数据、组件 ordinal 等只供本地证明或规则裁决的字段；世界关系只保留根级单份，对话 speaker、CharacterEvent 的 outcome/gate/subject 重复引用都改用请求内局部 index。它可从完整 request 重建，不能反向成为事实源。完整 ModelRequest、WorldSnapshot、resident digest、request correlation、正式 response/proof 组装全部留在 Gateway 与 Journal；Provider 从类型边界上无法取得这些字段，也不负责生成正式 ModelResponse 或摘要。Provider 只返回不可信 ModelOutput 与不参与裁决的 usage 观测，只有 ModelGateway 完成完整 Schema、JCS digest、correlation 与语义校验后才可形成 receipt。v1 不做 Engine 级模型响应缓存；Prompt block digest 只验证本地内容身份，真实缓存命中必须以供应商 usage 为准。Provider 调用在 Journal 标记 dispatched 后只执行一次；从取得 dispatch authorization 到 verified receipt 持久化之间的任何失败都报告同一 ambiguous/blocked 边界，不自动重调。
+ModelGateway 是模型可见字段的唯一投影所有者：它从已经验证的 ModelRequest 只向 Provider 交付本地路由所需的 `modelProfileId` / `requestKind`、与 CacheBlockRef 顺序一致的 Prompt 纯文本，以及经同一 Model Protocol Schema 的 `ModelProviderInputEnvelope` 校验的最小动态语义投影。投影保持原数组顺序、文本与语义值，删除 revision、provenance、bundle digest、请求/响应 ID、Dialogue/Turn ID、时间戳、visibility 元数据、组件 ordinal 等只供本地证明或规则裁决的字段；`world_view.actors` 是运行时 Entity 身份的根级单份表，关系端点、objective_traces 主体、与 world_view 同请求的 dialogue participant / knowledge viewer / agency commitment 主体一律投影为 `actor_index`，禁止再拷贝同一 UUID；Character 请求中 `character_entity_id` 是主体身份单份，knowledge viewer 与同 ID 的 dialogue participant 不得再写 UUID（participant 使用 `is_character_subject`）。对话 speaker、CharacterEvent 的 outcome/gate/subject 重复引用同样只用请求内局部 index。它可从完整 request 重建，不能反向成为事实源。完整 ModelRequest、WorldSnapshot、resident digest、request correlation、正式 response/proof 组装全部留在 Gateway 与 Journal；Provider 从类型边界上无法取得这些字段，也不负责生成正式 ModelResponse 或摘要。Provider 只返回不可信 ModelOutput 与不参与裁决的 usage 观测，只有 ModelGateway 完成完整 Schema、JCS digest、correlation 与语义校验后才可形成 receipt。v1 不做 Engine 级模型响应缓存；Prompt block digest 只验证本地内容身份，真实缓存命中必须以供应商 usage 为准。Provider 调用在 Journal 标记 dispatched 后只执行一次；从取得 dispatch authorization 到 verified receipt 持久化之间的任何失败都报告同一 ambiguous/blocked 边界，不自动重调。
 
 运行时只有两个模型层级：
 
@@ -489,7 +489,7 @@ ModelGateway 是模型可见字段的唯一投影所有者：它从已经验证�
 固定入口与 ModelProfile 只有以下七个，彼此独立：
 
 ```text
-director.daily_settlement  → AutomaticEventSemanticDraft[]
+director.daily_settlement  → DailySettlementEventIntent[]（意图层；空数组=模型判定无自动事件）
 director.dialogue_events   → EventCardSemanticDraft[]
 director.system_dialogue   → DialogueReplyDraft
 director.goal_plan         → GoalPlanSemanticDraft
@@ -498,9 +498,11 @@ character.dialogue         → DialogueReplyDraft + AgencyCommitmentSemanticDraf
 character.react            → CharacterReactionSemanticDraft[]（与 input.events 按 ordinal 对应）
 ```
 
+`director.daily_settlement` 的模型输出是 **意图层**：有无事件、scope、event_type、summary、outcome_type、parameters、显式 actor 索引，以及 character 可选 agency 意图。主体选择必须由模型在 verified `world_view.actors` 上显式给出，本地不得全员默认。每条意图装配为恰好一个 outcome 的 Materialized 候选（RulePlugin 只 Accept/Reject，不再多选结果）。结构装配（EntityRef、proposal_id、day、locale、gate/outcome 本地 ID、`context={}`）只由 Server 从 verified 意图与锁定快照确定性完成；禁止猜语义字段或补洞。Provider 只负责把已路由的 invocation 发给部署显式绑定的模型实现；形状约束以该 adapter 的能力为准，**不得**为日结算再挂第二家供应商默认/可选回退。正式 Schema 与语义门禁仍是唯一验收真相。
+
 不存在独立 `System.*`、`Narrator.render` 或 `materialization.spec` 文本模型入口。`request_kind` 是 ModelRequest 的唯一入口 discriminator；ModelResponse 必须回显 request_kind、resident_context_digest、dynamic_input_digest 与 output_digest。ModelGateway 先把已经 Schema 验证的 WorldSnapshot 与 ModelRequest 封成 prepared invocation；Provider 调用只接受持久化 Journal 在数据库确认 dispatched 后签发的一次性 opaque authorization。响应必须再经过 Schema、digest、correlation 与入口语义门禁，之后才能把 snapshot、request、response、VerifiedModelOutputRef、world ID 与观察 revision 封成同一份 verified receipt；从数据库恢复时也只能通过同一 Gateway 重新验证全部四份合同，禁止公开 seal 工厂。prepared invocation 与 verified receipt 的来源集合属于具体 Gateway 实例；Journal、RulePluginGateway 与 proposal journal 只能持有配对生产实例的只读 verifier，不接受另一实例生成的对象。`failed` 输出直接成为 EngineFault，绝不签发 proof。
 
-ModelOutput 只表达模型真正拥有的语义选择：文本、语义 Draft，以及 verified request 数组中的局部 index。它不得生成 UUID、day、source、locale、visibility、cost、WorldState 写路径或 EffectOp。Server 以 verified request、锁定 snapshot 与 Content lock 为唯一输入，在本地补齐根身份、逻辑时间、LocalizedText、精确 Entity / DialogueTurn / Fact / Catalog / StateMachine 引用和来源证明；这些物化结果仍只是候选。RulePlugin 独占合法性、visibility、cost、WorldLaw 与允许的 EffectOp，World Core 独占最终状态变换。七种入口分别校验自己的最小关联：Character resident、主观角色与知识 viewer 必须一致，角色状态机实例/owner 只在本地投影前核验而不进入模型上下文；对话必须 active 且回复当前最后 human turn；所有 ModelIndex 必须在对应 request 集合内，图引用必须闭合；`character.react` 必须按 ordinal 对每个输入 event 返回一个 reaction，并精确覆盖该角色参与的 gate。Character Mind 的 commitment 只是未落地语义 Draft：Server 仅可新增 commitment ID、时间与精确主体引用，其余字段必须逐项保持 verified Draft，再经 append-only 对话 Packet 写入。Director、System、客户端和内容包均无 commitment 写入口。EventCard 结果叙事与语义结果一同提出并在发卡时封存，但 NPC 原话只能用 turn index 引用既有 DialogueTurn；资产引擎直接根据 Definition、ArtProfile、MaterializationProfile 与视觉槽生成规格。
+ModelOutput 只表达模型真正拥有的语义选择：文本、语义 Draft，以及 verified request 数组中的局部 index。EventCard 的 situation / outcome / agency 主体 index 一律指向同一 `world_view.actors` 表；outcome 与 gate 主体必须是 situation 已选 actor 的子集，禁止再引入第二套 situation-local 编号。它不得生成 UUID、day、source、locale、visibility、cost、WorldState 写路径或 EffectOp。Server 以 verified request、锁定 snapshot 与 Content lock 为唯一输入，在本地补齐根身份、逻辑时间、LocalizedText、精确 Entity / DialogueTurn / Fact / Catalog / StateMachine 引用和来源证明；这些物化结果仍只是候选。RulePlugin 独占合法性、visibility、cost、WorldLaw 与允许的 EffectOp，World Core 独占最终状态变换。七种入口分别校验自己的最小关联：Character resident、主观角色与知识 viewer 必须一致，角色状态机实例/owner 只在本地投影前核验而不进入模型上下文；对话必须 active 且回复当前最后 human turn；所有 ModelIndex 必须在对应 request 集合内，图引用必须闭合；`character.react` 必须按 ordinal 对每个输入 event 返回一个 reaction，并精确覆盖该角色参与的 gate。Character Mind 的 commitment 只是未落地语义 Draft：Server 仅可新增 commitment ID、时间与精确主体引用，其余字段必须逐项保持 verified Draft，再经 append-only 对话 Packet 写入。Director、System、客户端和内容包均无 commitment 写入口。EventCard 结果叙事与语义结果一同提出并在发卡时封存，但 NPC 原话只能用 turn index 引用既有 DialogueTurn；资产引擎直接根据 Definition、ArtProfile、MaterializationProfile 与视觉槽生成规格。
 
 RulePluginGateway 不保存全局模型证明，也不按 request ID 猜测证明。每次 `resolve` 必须显式传入本次作用域的 verified model receipts（没有模型输入时也传空数组），并在调用 RulePlugin adapter 前确认请求内每个 proof 与某一 receipt 完全一致、receipt 属于同一 world，且 candidate 的 `draft_ordinal` 与内容逐值对应原 ModelOutput 的精确 Draft 成员；reply 与 commitment append 同样必须绑定原 verified 输出。模型 proof 的 `basis_revision` 表示模型观察世界的 revision；连续裁决同一次模型输出时它可以小于当前 RulePluginRequest revision，但不得大于当前 revision。PacketProposal 仍必须使用本次 RulePluginRequest 的当前 basis revision。
 

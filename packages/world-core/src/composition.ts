@@ -586,6 +586,10 @@ function assertSnapshotMatchesAuthorityEnvelope(
     !jsonEquals(
       expectProperty(envelope, "world_state", "SaveEnvelope"),
       expectProperty(snapshot, "world_state", "WorldSnapshot"),
+    ) ||
+    !jsonEquals(
+      expectProperty(envelope, "world_content_lock", "SaveEnvelope"),
+      expectProperty(snapshot, "world_content_lock", "WorldSnapshot"),
     )
   ) {
     throw new EngineFault(

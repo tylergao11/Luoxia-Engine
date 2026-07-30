@@ -3371,9 +3371,7 @@ function materializeEventCardCandidate(input: {
     "EventSituationSemanticDraft",
     actors.length,
   );
-  const situationActors = situationActorIndices.map(
-    (actorIndex) => actors[actorIndex] as JsonObject,
-  );
+  const situationActorSet = new Set(situationActorIndices);
   const optionDrafts = asObjectArray(
     expectProperty(
       input.draft,
@@ -3426,7 +3424,8 @@ function materializeEventCardCandidate(input: {
         command: input.command,
         worldId: input.command.session.worldId,
         worldState: input.worldState,
-        actors: situationActors,
+        actors,
+        allowedActorIndices: situationActorSet,
         draft: outcome,
         outcomeId,
         gateIds,
@@ -3483,19 +3482,21 @@ function materializeEventCardCandidate(input: {
         command: input.command,
         worldId: input.command.session.worldId,
         worldState: input.worldState,
-        actors: situationActors,
+        actors,
         indices: readModelIndices(
           gate,
           "participant_subject_indices",
           "EventCardAgencyGateSemanticDraft",
-          situationActors.length,
+          actors.length,
         ),
+        allowedActorIndices: situationActorSet,
       }).map(subjectEntityRef),
       requirement: materializeAgencyRequirementCandidate({
         command: input.command,
         worldId: input.command.session.worldId,
         worldState: input.worldState,
-        actors: situationActors,
+        actors,
+        allowedActorIndices: situationActorSet,
         draft: expectJsonObject(
           expectProperty(
             gate,
@@ -3580,6 +3581,7 @@ function materializeSemanticOutcomeCandidate(input: {
   readonly worldId: string;
   readonly worldState: JsonObject;
   readonly actors: readonly JsonObject[];
+  readonly allowedActorIndices: ReadonlySet<number>;
   readonly draft: JsonObject;
   readonly outcomeId: string;
   readonly gateIds: readonly string[];
@@ -3619,6 +3621,7 @@ function materializeSemanticOutcomeCandidate(input: {
         "SemanticOutcomeDraft",
         input.actors.length,
       ),
+      allowedActorIndices: input.allowedActorIndices,
     }),
     parameters: expectJsonObject(
       expectProperty(
@@ -3639,6 +3642,7 @@ function materializeAgencyRequirementCandidate(input: {
   readonly worldId: string;
   readonly worldState: JsonObject;
   readonly actors: readonly JsonObject[];
+  readonly allowedActorIndices: ReadonlySet<number>;
   readonly draft: JsonObject;
 }): JsonObject {
   return Object.freeze({
@@ -3658,6 +3662,7 @@ function materializeAgencyRequirementCandidate(input: {
         "AgencyRequirementSemanticDraft",
         input.actors.length,
       ),
+      allowedActorIndices: input.allowedActorIndices,
     }),
     terms: expectJsonObject(
       expectProperty(
@@ -3676,6 +3681,7 @@ function materializeActorSubjects(input: {
   readonly worldState: JsonObject;
   readonly actors: readonly JsonObject[];
   readonly indices: readonly number[];
+  readonly allowedActorIndices?: ReadonlySet<number>;
 }): readonly JsonObject[] {
   const entities = asObjectArray(
     expectProperty(input.worldState, "entities", "WorldState"),
@@ -3683,6 +3689,16 @@ function materializeActorSubjects(input: {
   );
   return Object.freeze(
     input.indices.map((actorIndex) => {
+      if (
+        input.allowedActorIndices !== undefined &&
+        !input.allowedActorIndices.has(actorIndex)
+      ) {
+        throw commandIdentityFault(
+          input.command,
+          "Actor selector is outside the verified situation actor collection",
+          { actor_index: actorIndex },
+        );
+      }
       const actor = input.actors[actorIndex];
       if (actor === undefined) {
         throw commandIdentityFault(
@@ -4284,7 +4300,7 @@ function readModelIndex(
 }
 
 function localizedText(locale: string, text: string): JsonObject {
-  return Object.freeze({ locale, text });
+  return Object.freeze({ [locale]: text });
 }
 
 function modelRequestInput(

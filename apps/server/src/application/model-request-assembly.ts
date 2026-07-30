@@ -1079,20 +1079,6 @@ function readDialogueTurnLocale(
     );
   }
   const turn = matches[0] as JsonObject;
-  const finalTurn = expectJsonObject(
-    turnsValue[turnsValue.length - 1] as never,
-    "DialogueRecord.turns[last]",
-  );
-  if (expectString(finalTurn, "turn_id", "DialogueTurn") !== turnId) {
-    throw new EngineFault(
-      "model.assembly.player_turn_not_final",
-      "The command-owned player turn must be the final turn in the locked dialogue",
-      {
-        turn_id: turnId,
-        final_turn_id: expectString(finalTurn, "turn_id", "DialogueTurn"),
-      },
-    );
-  }
   const source = expectJsonObject(
     expectProperty(turn, "source", "DialogueTurn"),
     "DialogueTurn.source",

@@ -43,38 +43,44 @@ function projectByRequestKind(
   input: JsonObject,
 ): JsonObject {
   switch (requestKind) {
-    case "director.daily_settlement":
+    case "director.daily_settlement": {
+      const worldView = expectObjectProperty(
+        input,
+        "world_view",
+        "DirectorDailySettlementInput",
+      );
+      const projectedWorld = projectDirectorWorldView(worldView);
       return Object.freeze({
-        world_view: projectDirectorWorldView(
-          expectObjectProperty(
-            input,
-            "world_view",
-            "DirectorDailySettlementInput",
-          ),
-        ),
+        world_view: projectedWorld.worldView,
         objective_traces: Object.freeze(
           expectObjectArrayProperty(
             input,
             "objective_traces",
             "DirectorDailySettlementInput",
-          ).map(projectObjectiveTrace),
-        ),
-      });
-    case "director.dialogue_events":
-      return Object.freeze({
-        world_view: projectDirectorWorldView(
-          expectObjectProperty(
-            input,
-            "world_view",
-            "DirectorDialogueEventsInput",
+          ).map((trace) =>
+            projectObjectiveTrace(trace, projectedWorld.actorIndexByEntityId),
           ),
         ),
+      });
+    }
+    case "director.dialogue_events": {
+      const worldView = expectObjectProperty(
+        input,
+        "world_view",
+        "DirectorDialogueEventsInput",
+      );
+      const projectedWorld = projectDirectorWorldView(worldView);
+      return Object.freeze({
+        world_view: projectedWorld.worldView,
         dialogue: projectDialogue(
           expectObjectProperty(
             input,
             "dialogue",
             "DirectorDialogueEventsInput",
           ),
+          {
+            actorIndexByEntityId: projectedWorld.actorIndexByEntityId,
+          },
         ),
         response_locale: expectString(
           input,
@@ -82,6 +88,7 @@ function projectByRequestKind(
           "DirectorDialogueEventsInput",
         ),
       });
+    }
     case "director.system_dialogue":
       return Object.freeze({
         knowledge_view: projectKnowledgeView(
@@ -90,6 +97,7 @@ function projectByRequestKind(
             "knowledge_view",
             "DirectorSystemDialogueInput",
           ),
+          { includeViewerEntityId: true },
         ),
         dialogue: projectDialogue(
           expectObjectProperty(
@@ -104,24 +112,31 @@ function projectByRequestKind(
           "DirectorSystemDialogueInput",
         ),
       });
-    case "director.goal_plan":
+    case "director.goal_plan": {
+      const worldView = expectObjectProperty(
+        input,
+        "world_view",
+        "DirectorGoalPlanInput",
+      );
+      const projectedWorld = projectDirectorWorldView(worldView);
       return Object.freeze({
-        world_view: projectDirectorWorldView(
-          expectObjectProperty(
-            input,
-            "world_view",
-            "DirectorGoalPlanInput",
-          ),
-        ),
+        world_view: projectedWorld.worldView,
         knowledge_view: projectKnowledgeView(
           expectObjectProperty(
             input,
             "knowledge_view",
             "DirectorGoalPlanInput",
           ),
+          {
+            includeViewerEntityId: true,
+            actorIndexByEntityId: projectedWorld.actorIndexByEntityId,
+          },
         ),
         dialogue: projectDialogue(
           expectObjectProperty(input, "dialogue", "DirectorGoalPlanInput"),
+          {
+            actorIndexByEntityId: projectedWorld.actorIndexByEntityId,
+          },
         ),
         response_locale: expectString(
           input,
@@ -129,6 +144,7 @@ function projectByRequestKind(
           "DirectorGoalPlanInput",
         ),
       });
+    }
     case "director.definition_draft":
       return Object.freeze({
         knowledge_view: projectKnowledgeView(
@@ -137,6 +153,7 @@ function projectByRequestKind(
             "knowledge_view",
             "DirectorDefinitionDraftInput",
           ),
+          { includeViewerEntityId: true },
         ),
         dialogue: projectDialogue(
           expectObjectProperty(
@@ -156,17 +173,22 @@ function projectByRequestKind(
           "DirectorDefinitionDraftInput",
         ),
       });
-    case "character.dialogue":
+    case "character.dialogue": {
+      const subjective = expectObjectProperty(
+        input,
+        "subjective_view",
+        "CharacterDialogueInput",
+      );
+      const characterEntityId = expectString(
+        expectObjectProperty(subjective, "character", "CharacterSubjectiveView"),
+        "entity_id",
+        "EntityRef",
+      );
       return Object.freeze({
-        subjective_view: projectCharacterSubjectiveView(
-          expectObjectProperty(
-            input,
-            "subjective_view",
-            "CharacterDialogueInput",
-          ),
-        ),
+        subjective_view: projectCharacterSubjectiveView(subjective),
         dialogue: projectDialogue(
           expectObjectProperty(input, "dialogue", "CharacterDialogueInput"),
+          { characterEntityId },
         ),
         response_locale: expectString(
           input,
@@ -174,16 +196,16 @@ function projectByRequestKind(
           "CharacterDialogueInput",
         ),
       });
-    case "character.react":
+    }
+    case "character.react": {
+      const subjective = expectObjectProperty(
+        input,
+        "subjective_view",
+        "CharacterReactInput",
+      );
       return Object.freeze({
         day: expectInteger(input, "day", "CharacterReactInput"),
-        subjective_view: projectCharacterSubjectiveView(
-          expectObjectProperty(
-            input,
-            "subjective_view",
-            "CharacterReactInput",
-          ),
-        ),
+        subjective_view: projectCharacterSubjectiveView(subjective),
         events: Object.freeze(
           expectObjectArrayProperty(
             input,
@@ -192,6 +214,7 @@ function projectByRequestKind(
           ).map(projectCharacterReactEvent),
         ),
       });
+    }
     default:
       throw new EngineFault(
         "model.provider_input.request_kind_unknown",
@@ -201,31 +224,46 @@ function projectByRequestKind(
   }
 }
 
-function projectDirectorWorldView(world: JsonObject): JsonObject {
+function projectDirectorWorldView(world: JsonObject): {
+  readonly worldView: JsonObject;
+  readonly actorIndexByEntityId: ReadonlyMap<string, number>;
+} {
+  const actors = expectObjectArrayProperty(
+    world,
+    "actors",
+    "DirectorWorldView",
+  );
+  const actorIndexByEntityId = uniqueIndex(
+    actors.map((actor) =>
+      expectString(actor, "entity_id", "DirectorActorView"),
+    ),
+    "DirectorWorldView.actors.entity_id",
+  );
   return Object.freeze({
-    day: expectInteger(world, "day", "DirectorWorldView"),
-    actors: Object.freeze(
-      expectObjectArrayProperty(world, "actors", "DirectorWorldView").map(
-        projectDirectorActor,
+    worldView: Object.freeze({
+      day: expectInteger(world, "day", "DirectorWorldView"),
+      actors: Object.freeze(actors.map(projectDirectorActor)),
+      relations: Object.freeze(
+        expectObjectArrayProperty(
+          world,
+          "relations",
+          "DirectorWorldView",
+        ).map((relation) => projectRelation(relation, actorIndexByEntityId)),
       ),
-    ),
-    relations: Object.freeze(
-      expectObjectArrayProperty(world, "relations", "DirectorWorldView").map(
-        projectRelation,
+      world_machines: Object.freeze(
+        expectObjectArrayProperty(
+          world,
+          "world_machines",
+          "DirectorWorldView",
+        ).map(projectStateMachine),
       ),
-    ),
-    world_machines: Object.freeze(
-      expectObjectArrayProperty(
-        world,
-        "world_machines",
-        "DirectorWorldView",
-      ).map(projectStateMachine),
-    ),
-    facts: Object.freeze(
-      expectObjectArrayProperty(world, "facts", "DirectorWorldView").map(
-        projectFact,
+      facts: Object.freeze(
+        expectObjectArrayProperty(world, "facts", "DirectorWorldView").map(
+          projectFact,
+        ),
       ),
-    ),
+    }),
+    actorIndexByEntityId,
   });
 }
 
@@ -252,13 +290,14 @@ function projectDirectorActor(actor: JsonObject): JsonObject {
   return Object.freeze(projected);
 }
 
-function projectKnowledgeView(knowledge: JsonObject): JsonObject {
-  return Object.freeze({
-    viewer_entity_id: expectString(
-      knowledge,
-      "viewer_entity_id",
-      "KnowledgeView",
-    ),
+function projectKnowledgeView(
+  knowledge: JsonObject,
+  options: {
+    readonly includeViewerEntityId: boolean;
+    readonly actorIndexByEntityId?: ReadonlyMap<string, number>;
+  },
+): JsonObject {
+  const projected: Record<string, JsonValue> = {
     facts: Object.freeze(
       expectObjectArrayProperty(knowledge, "facts", "KnowledgeView").map(
         projectFact,
@@ -269,7 +308,25 @@ function projectKnowledgeView(knowledge: JsonObject): JsonObject {
         projectMemory,
       ),
     ),
-  });
+  };
+  if (options.includeViewerEntityId) {
+    const viewerEntityId = expectString(
+      knowledge,
+      "viewer_entity_id",
+      "KnowledgeView",
+    );
+    if (options.actorIndexByEntityId !== undefined) {
+      // Viewer identity lives once in world_view.actors; emit only the local index.
+      projected.viewer_actor_index = requireMappedIndex(
+        viewerEntityId,
+        options.actorIndexByEntityId,
+        "KnowledgeView.viewer_entity_id",
+      );
+    } else {
+      projected.viewer_entity_id = viewerEntityId;
+    }
+  }
+  return Object.freeze(projected);
 }
 
 function projectFact(fact: JsonObject): JsonObject {
@@ -361,7 +418,10 @@ function projectComponent(component: JsonObject): JsonObject {
   });
 }
 
-function projectRelation(relation: JsonObject): JsonObject {
+function projectRelation(
+  relation: JsonObject,
+  actorIndexByEntityId: ReadonlyMap<string, number>,
+): JsonObject {
   const relationType = expectObjectProperty(
     relation,
     "relation_type",
@@ -375,20 +435,51 @@ function projectRelation(relation: JsonObject): JsonObject {
     ),
     from: projectSubject(
       expectObjectProperty(relation, "from", "RelationState"),
+      { actorIndexByEntityId },
     ),
-    to: projectSubject(expectObjectProperty(relation, "to", "RelationState")),
+    to: projectSubject(
+      expectObjectProperty(relation, "to", "RelationState"),
+      { actorIndexByEntityId },
+    ),
     data: expectProperty(relation, "data", "RelationState"),
     state: expectString(relation, "state", "RelationState"),
   });
 }
 
-function projectSubject(subject: JsonObject): JsonObject {
+function projectSubject(
+  subject: JsonObject,
+  options: {
+    readonly actorIndexByEntityId?: ReadonlyMap<string, number>;
+    readonly characterEntityId?: string;
+  } = {},
+): JsonObject {
   const kind = expectString(subject, "kind", "SubjectRef");
   if (kind === "entity") {
     const entity = expectObjectProperty(subject, "entity", "SubjectRef");
+    const entityId = expectString(entity, "entity_id", "EntityRef");
+    if (
+      options.characterEntityId !== undefined &&
+      entityId === options.characterEntityId
+    ) {
+      // Root character identity is already character_entity_id; do not re-copy UUID.
+      return Object.freeze({
+        kind,
+        is_character_subject: true,
+      });
+    }
+    if (options.actorIndexByEntityId !== undefined) {
+      return Object.freeze({
+        kind,
+        actor_index: requireMappedIndex(
+          entityId,
+          options.actorIndexByEntityId,
+          "SubjectRef.entity",
+        ),
+      });
+    }
     return Object.freeze({
       kind,
-      entity_id: expectString(entity, "entity_id", "EntityRef"),
+      entity_id: entityId,
     });
   }
   if (kind === "definition") {
@@ -431,7 +522,10 @@ function projectDefinitionRef(definition: JsonObject): JsonObject {
   );
 }
 
-function projectObjectiveTrace(trace: JsonObject): JsonObject {
+function projectObjectiveTrace(
+  trace: JsonObject,
+  actorIndexByEntityId: ReadonlyMap<string, number>,
+): JsonObject {
   return Object.freeze({
     day: expectInteger(trace, "day", "ObjectiveTraceEntry"),
     event_type: expectString(
@@ -444,13 +538,21 @@ function projectObjectiveTrace(trace: JsonObject): JsonObject {
         trace,
         "subjects",
         "ObjectiveTraceEntry",
-      ).map(projectSubject),
+      ).map((subject) =>
+        projectSubject(subject, { actorIndexByEntityId }),
+      ),
     ),
     payload: expectProperty(trace, "payload", "ObjectiveTraceEntry"),
   });
 }
 
-function projectDialogue(dialogue: JsonObject): JsonObject {
+function projectDialogue(
+  dialogue: JsonObject,
+  options: {
+    readonly actorIndexByEntityId?: ReadonlyMap<string, number>;
+    readonly characterEntityId?: string;
+  } = {},
+): JsonObject {
   const participants = expectObjectArrayProperty(
     dialogue,
     "participants",
@@ -467,20 +569,38 @@ function projectDialogue(dialogue: JsonObject): JsonObject {
       );
     }
     participantIndices.set(key, index);
-    return projectDialogueParticipant(participant);
+    return projectDialogueParticipant(participant, options);
   });
+  const subjectOptions: {
+    readonly actorIndexByEntityId?: ReadonlyMap<string, number>;
+    readonly characterEntityId?: string;
+  } = {
+    ...(options.actorIndexByEntityId !== undefined
+      ? { actorIndexByEntityId: options.actorIndexByEntityId }
+      : {}),
+    ...(options.characterEntityId !== undefined
+      ? { characterEntityId: options.characterEntityId }
+      : {}),
+  };
   return Object.freeze({
     day: expectInteger(dialogue, "day", "DialogueRecord"),
     participants: Object.freeze(projectedParticipants),
     turns: Object.freeze(
       expectObjectArrayProperty(dialogue, "turns", "DialogueRecord").map(
-        (turn) => projectDialogueTurn(turn, participantIndices),
+        (turn) =>
+          projectDialogueTurn(turn, participantIndices, subjectOptions),
       ),
     ),
   });
 }
 
-function projectDialogueParticipant(participant: JsonObject): JsonObject {
+function projectDialogueParticipant(
+  participant: JsonObject,
+  options: {
+    readonly actorIndexByEntityId?: ReadonlyMap<string, number>;
+    readonly characterEntityId?: string;
+  },
+): JsonObject {
   const participantKind = expectString(
     participant,
     "participant_kind",
@@ -495,9 +615,29 @@ function projectDialogueParticipant(participant: JsonObject): JsonObject {
       "entity",
       "DialogueParticipantRef",
     );
+    const entityId = expectString(entity, "entity_id", "EntityRef");
+    if (
+      options.characterEntityId !== undefined &&
+      entityId === options.characterEntityId
+    ) {
+      return Object.freeze({
+        participant_kind: participantKind,
+        is_character_subject: true,
+      });
+    }
+    if (options.actorIndexByEntityId !== undefined) {
+      return Object.freeze({
+        participant_kind: participantKind,
+        actor_index: requireMappedIndex(
+          entityId,
+          options.actorIndexByEntityId,
+          "DialogueParticipantRef.entity",
+        ),
+      });
+    }
     return Object.freeze({
       participant_kind: participantKind,
-      entity_id: expectString(entity, "entity_id", "EntityRef"),
+      entity_id: entityId,
     });
   }
   throw new EngineFault(
@@ -537,6 +677,10 @@ function dialogueParticipantKey(participant: JsonObject): string {
 function projectDialogueTurn(
   turn: JsonObject,
   participantIndices: ReadonlyMap<string, number>,
+  subjectOptions?: {
+    readonly actorIndexByEntityId?: ReadonlyMap<string, number>;
+    readonly characterEntityId?: string;
+  },
 ): JsonObject {
   const source = expectObjectProperty(turn, "source", "DialogueTurn");
   const speaker = expectObjectProperty(turn, "speaker", "DialogueTurn");
@@ -558,7 +702,9 @@ function projectDialogueTurn(
         turn,
         "agency_commitments",
         "DialogueTurn",
-      ).map(projectAgencyCommitment),
+      ).map((commitment) =>
+        projectAgencyCommitment(commitment, subjectOptions),
+      ),
     ),
   };
   if (turn.emotion_id !== undefined) {
@@ -571,7 +717,13 @@ function projectDialogueTurn(
   return Object.freeze(projected);
 }
 
-function projectAgencyCommitment(commitment: JsonObject): JsonObject {
+function projectAgencyCommitment(
+  commitment: JsonObject,
+  subjectOptions?: {
+    readonly actorIndexByEntityId?: ReadonlyMap<string, number>;
+    readonly characterEntityId?: string;
+  },
+): JsonObject {
   return Object.freeze({
     semantic_intent: expectString(
       commitment,
@@ -583,7 +735,7 @@ function projectAgencyCommitment(commitment: JsonObject): JsonObject {
         commitment,
         "subjects",
         "AgencyCommitment",
-      ).map(projectSubject),
+      ).map((subject) => projectSubject(subject, subjectOptions)),
     ),
     stance: expectString(commitment, "stance", "AgencyCommitment"),
     terms: expectProperty(commitment, "terms", "AgencyCommitment"),
@@ -601,15 +753,33 @@ function projectCharacterSubjectiveView(subjective: JsonObject): JsonObject {
     "character",
     "CharacterSubjectiveView",
   );
+  const characterEntityId = expectString(character, "entity_id", "EntityRef");
+  const knowledge = expectObjectProperty(
+    subjective,
+    "knowledge_view",
+    "CharacterSubjectiveView",
+  );
+  const viewerEntityId = expectString(
+    knowledge,
+    "viewer_entity_id",
+    "KnowledgeView",
+  );
+  if (viewerEntityId !== characterEntityId) {
+    throw new EngineFault(
+      "model.provider_input.character_viewer_mismatch",
+      "Character subjective knowledge viewer must equal the subject character",
+      {
+        character_entity_id: characterEntityId,
+        viewer_entity_id: viewerEntityId,
+      },
+    );
+  }
   return Object.freeze({
-    character_entity_id: expectString(character, "entity_id", "EntityRef"),
-    knowledge_view: projectKnowledgeView(
-      expectObjectProperty(
-        subjective,
-        "knowledge_view",
-        "CharacterSubjectiveView",
-      ),
-    ),
+    character_entity_id: characterEntityId,
+    // Viewer is the subject character; do not re-emit the same UUID.
+    knowledge_view: projectKnowledgeView(knowledge, {
+      includeViewerEntityId: false,
+    }),
     action_machine: projectStateMachine(
       expectObjectProperty(
         subjective,

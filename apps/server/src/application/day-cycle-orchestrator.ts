@@ -984,21 +984,24 @@ function materializeAutomaticEventCandidate(input: {
   readonly draft: JsonObject;
   readonly proposalId: string;
 }): JsonObject {
-  const situationDraft = expectJsonObject(
-    expectProperty(
-      input.draft,
-      "situation",
-      "AutomaticEventSemanticDraft",
-    ),
-    "AutomaticEventSemanticDraft.situation",
-  );
-  const situationActorIndices = readModelIndices(
-    situationDraft,
-    "subject_actor_indices",
-    "EventSituationSemanticDraft",
+  const intent = input.draft;
+  const scope = expectString(intent, "scope", "DailySettlementEventIntent");
+  if (scope !== "world" && scope !== "character") {
+    throw new EngineFault(
+      "day_cycle.orchestration.event_scope_invalid",
+      "Verified daily Director intent has an unknown scope",
+      { proposal_id: input.proposalId, scope },
+    );
+  }
+  const actorIndexField =
+    scope === "world" ? "subject_actor_indices" : "target_actor_indices";
+  const actorIndices = readModelIndices(
+    intent,
+    actorIndexField,
+    "DailySettlementEventIntent",
     input.actors.length,
   );
-  const situationActors = situationActorIndices.map(
+  const situationActors = actorIndices.map(
     (actorIndex) => input.actors[actorIndex] as JsonObject,
   );
   const situationEntityRefs = Object.freeze(
@@ -1007,250 +1010,104 @@ function materializeAutomaticEventCandidate(input: {
         worldId: input.worldId,
         worldState: input.worldState,
         actor,
-        label: `AutomaticEventSemanticDraft.situation.actors[${actorOrdinal}]`,
+        label: `DailySettlementEventIntent.actors[${actorOrdinal}]`,
       }),
     ),
   );
-  const outcomeDrafts = asObjectArray(
-    expectProperty(
-      input.draft,
-      "candidate_outcomes",
-      "AutomaticEventSemanticDraft",
+  const subjects = Object.freeze(
+    situationEntityRefs.map(subjectFromEntityRef),
+  );
+  const outcomeId = "outcome_0";
+  const agencyValue = intent["agency"];
+  const hasAgency =
+    scope === "character" &&
+    agencyValue !== null &&
+    agencyValue !== undefined;
+  const gateId = hasAgency ? "gate_0" : undefined;
+  const outcome = Object.freeze({
+    outcome_id: outcomeId,
+    outcome_type: expectString(
+      intent,
+      "outcome_type",
+      "DailySettlementEventIntent",
     ),
-    "AutomaticEventSemanticDraft.candidate_outcomes",
-  );
-  const eventScope = expectString(
-    input.draft,
-    "event_scope",
-    "AutomaticEventSemanticDraft",
-  );
-  const gateDrafts =
-    eventScope === "character"
-      ? asObjectArray(
-          expectProperty(
-            input.draft,
-            "agency_gates",
-            "CharacterAutomaticEventSemanticDraft",
-          ),
-          "CharacterAutomaticEventSemanticDraft.agency_gates",
-        )
-      : eventScope === "world"
-        ? Object.freeze([] as JsonObject[])
-        : undefined;
-  if (gateDrafts === undefined) {
-    throw new EngineFault(
-      "day_cycle.orchestration.event_scope_invalid",
-      "Verified daily Director draft has an unknown event scope",
-      { proposal_id: input.proposalId, event_scope: eventScope },
-    );
-  }
-  const outcomeIds = outcomeDrafts.map(
-    (_, ordinal) => `outcome_${ordinal}`,
-  );
-  const gateIds = gateDrafts.map((_, ordinal) => `gate_${ordinal}`);
-  const candidateOutcomes = Object.freeze(
-    outcomeDrafts.map((draft, ordinal) =>
-      materializeAutomaticOutcome({
-        draft,
-        outcomeId: outcomeIds[ordinal] as string,
-        gateIds,
-        situationEntityRefs,
-      }),
+    subjects,
+    parameters: expectJsonObject(
+      expectProperty(intent, "parameters", "DailySettlementEventIntent"),
+      "DailySettlementEventIntent.parameters",
     ),
-  );
+    ...(gateId === undefined
+      ? {}
+      : { requires_agency_gate_id: gateId }),
+  });
   const situation = Object.freeze({
     event_type: expectString(
-      situationDraft,
+      intent,
       "event_type",
-      "EventSituationSemanticDraft",
+      "DailySettlementEventIntent",
     ),
     summary: localizedText(
       input.locale,
-      expectString(
-        situationDraft,
-        "summary",
-        "EventSituationSemanticDraft",
-      ),
+      expectString(intent, "summary", "DailySettlementEventIntent"),
     ),
-    subjects: Object.freeze(
-      situationEntityRefs.map(subjectFromEntityRef),
-    ),
-    context: expectJsonObject(
-      expectProperty(
-        situationDraft,
-        "context",
-        "EventSituationSemanticDraft",
-      ),
-      "EventSituationSemanticDraft.context",
-    ),
+    subjects,
+    context: Object.freeze({}),
   });
 
-  if (eventScope === "world") {
+  if (scope === "world") {
     return Object.freeze({
       proposal_kind: "automatic.world",
       proposal_id: input.proposalId,
       day: input.day,
       situation,
-      candidate_outcomes: candidateOutcomes,
+      candidate_outcomes: Object.freeze([outcome]),
     });
   }
 
   const targetEntityIds = Object.freeze(
-    readModelIndices(
-      input.draft,
-      "target_subject_indices",
-      "CharacterAutomaticEventSemanticDraft",
-      situationEntityRefs.length,
-    ).map((ordinal) =>
-      expectString(
-        situationEntityRefs[ordinal] as JsonObject,
-        "entity_id",
-        "EntityRef",
-      ),
+    situationEntityRefs.map((entityRef) =>
+      expectString(entityRef, "entity_id", "EntityRef"),
     ),
   );
-  const agencyGates = Object.freeze(
-    gateDrafts.map((gate, ordinal) =>
-      materializeAutomaticAgencyGate({
-        draft: gate,
-        gateId: gateIds[ordinal] as string,
-        outcomeIds,
-        situationEntityRefs,
+  let agencyGates: readonly JsonObject[] = Object.freeze([]);
+  if (hasAgency) {
+    const agency = expectJsonObject(
+      agencyValue as JsonValue,
+      "DailySettlementEventIntent.agency",
+    );
+    agencyGates = Object.freeze([
+      Object.freeze({
+        gate_id: gateId as string,
+        protected_outcome_ids: Object.freeze([outcomeId]),
+        participants: situationEntityRefs,
+        requirement: Object.freeze({
+          semantic_intent: expectString(
+            agency,
+            "semantic_intent",
+            "DailySettlementAgencyIntent",
+          ),
+          subjects,
+          terms: expectJsonObject(
+            expectProperty(agency, "terms", "DailySettlementAgencyIntent"),
+            "DailySettlementAgencyIntent.terms",
+          ),
+        }),
+        policy: expectJsonObject(
+          expectProperty(agency, "policy", "DailySettlementAgencyIntent"),
+          "DailySettlementAgencyIntent.policy",
+        ),
+        commitment_evidence: Object.freeze([]),
       }),
-    ),
-  );
+    ]);
+  }
   return Object.freeze({
     proposal_kind: "automatic.character",
     proposal_id: input.proposalId,
     day: input.day,
     situation,
     target_entity_ids: targetEntityIds,
-    candidate_outcomes: candidateOutcomes,
+    candidate_outcomes: Object.freeze([outcome]),
     agency_gates: agencyGates,
-  });
-}
-
-function materializeAutomaticOutcome(input: {
-  readonly draft: JsonObject;
-  readonly outcomeId: string;
-  readonly gateIds: readonly string[];
-  readonly situationEntityRefs: readonly JsonObject[];
-}): JsonObject {
-  const gateIndex = input.draft["requires_agency_gate_index"];
-  let gateId: string | undefined;
-  if (gateIndex !== undefined) {
-    gateId = input.gateIds[
-      readModelIndex(
-        gateIndex,
-        "SemanticOutcomeDraft.requires_agency_gate_index",
-        input.gateIds.length,
-      )
-    ];
-  }
-  return Object.freeze({
-    outcome_id: input.outcomeId,
-    outcome_type: expectString(
-      input.draft,
-      "outcome_type",
-      "SemanticOutcomeDraft",
-    ),
-    subjects: Object.freeze(
-      readModelIndices(
-        input.draft,
-        "subject_indices",
-        "SemanticOutcomeDraft",
-        input.situationEntityRefs.length,
-      ).map((ordinal) =>
-        subjectFromEntityRef(
-          input.situationEntityRefs[ordinal] as JsonObject,
-        ),
-      ),
-    ),
-    parameters: expectJsonObject(
-      expectProperty(
-        input.draft,
-        "parameters",
-        "SemanticOutcomeDraft",
-      ),
-      "SemanticOutcomeDraft.parameters",
-    ),
-    ...(gateId === undefined
-      ? {}
-      : { requires_agency_gate_id: gateId }),
-  });
-}
-
-function materializeAutomaticAgencyGate(input: {
-  readonly draft: JsonObject;
-  readonly gateId: string;
-  readonly outcomeIds: readonly string[];
-  readonly situationEntityRefs: readonly JsonObject[];
-}): JsonObject {
-  const requirementDraft = expectJsonObject(
-    expectProperty(
-      input.draft,
-      "requirement",
-      "AutomaticAgencyGateSemanticDraft",
-    ),
-    "AutomaticAgencyGateSemanticDraft.requirement",
-  );
-  return Object.freeze({
-    gate_id: input.gateId,
-    protected_outcome_ids: Object.freeze(
-      readModelIndices(
-        input.draft,
-        "protected_outcome_indices",
-        "AutomaticAgencyGateSemanticDraft",
-        input.outcomeIds.length,
-      ).map((ordinal) => input.outcomeIds[ordinal] as string),
-    ),
-    participants: Object.freeze(
-      readModelIndices(
-        input.draft,
-        "participant_subject_indices",
-        "AutomaticAgencyGateSemanticDraft",
-        input.situationEntityRefs.length,
-      ).map(
-        (ordinal) =>
-          input.situationEntityRefs[ordinal] as JsonObject,
-      ),
-    ),
-    requirement: Object.freeze({
-      semantic_intent: expectString(
-        requirementDraft,
-        "semantic_intent",
-        "AgencyRequirementSemanticDraft",
-      ),
-      subjects: Object.freeze(
-        readModelIndices(
-          requirementDraft,
-          "subject_indices",
-          "AgencyRequirementSemanticDraft",
-          input.situationEntityRefs.length,
-        ).map((ordinal) =>
-          subjectFromEntityRef(
-            input.situationEntityRefs[ordinal] as JsonObject,
-          ),
-        ),
-      ),
-      terms: expectJsonObject(
-        expectProperty(
-          requirementDraft,
-          "terms",
-          "AgencyRequirementSemanticDraft",
-        ),
-        "AgencyRequirementSemanticDraft.terms",
-      ),
-    }),
-    policy: expectJsonObject(
-      expectProperty(
-        input.draft,
-        "policy",
-        "AutomaticAgencyGateSemanticDraft",
-      ),
-      "AutomaticAgencyGateSemanticDraft.policy",
-    ),
-    commitment_evidence: Object.freeze([]),
   });
 }
 

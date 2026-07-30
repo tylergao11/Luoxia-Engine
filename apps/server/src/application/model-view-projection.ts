@@ -68,7 +68,7 @@ export function projectDirectorWorldView(
     const actionMachine = actionMachines[0];
     const actor: Record<string, JsonValue> = {
       entity_id: entityId,
-      status: expectString(entity, "status", "EntityState"),
+      status: expectString(entity, "state", "EntityState"),
       objective_components: components,
     };
     if (actionMachine !== undefined) {

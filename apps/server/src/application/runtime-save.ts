@@ -661,6 +661,11 @@ function worldRecordFromInsertedEnvelope(
         "SaveEnvelope",
       ),
       world_state: expectProperty(value, "world_state", "SaveEnvelope"),
+      world_content_lock: expectProperty(
+        value,
+        "world_content_lock",
+        "SaveEnvelope",
+      ),
     }),
     worldContentLock: contracts.assertObject(
       CONTRACT_REF.worldContentLock,

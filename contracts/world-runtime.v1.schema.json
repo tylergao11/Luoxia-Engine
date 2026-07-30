@@ -2351,7 +2351,8 @@
       "required": [
         "world_id",
         "world_revision",
-        "world_state"
+        "world_state",
+        "world_content_lock"
       ],
       "properties": {
         "world_id": {
@@ -2363,6 +2364,9 @@
         },
         "world_state": {
           "$ref": "#/$defs/WorldState"
+        },
+        "world_content_lock": {
+          "$ref": "#/$defs/WorldContentLock"
         }
       }
     },

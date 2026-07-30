@@ -49,6 +49,12 @@ export interface RuleHoldEvaluator {
     readonly worldId: string;
     readonly worldRevision: number;
     readonly worldState: JsonObject;
+    /**
+     * Locked WorldSnapshot.world_content_lock from the same apply_packet
+     * snapshot. Required so RulePluginRequest.readonly_world is a full
+     * WorldSnapshot, not a partial reconstruction.
+     */
+    readonly worldContentLock: JsonObject;
     /** Full ContentPacket.deterministic_context; not inventing Schema fields. */
     readonly deterministicContext: JsonObject;
     /** Stable path of this exact rule.holds occurrence within the packet. */
@@ -709,6 +715,14 @@ const PRECONDITION_HANDLERS: {
       worldId: context.worldId,
       worldRevision: context.worldRevision,
       worldState: context.worldState,
+      worldContentLock: expectJsonObject(
+        expectProperty(
+          context.snapshot,
+          "world_content_lock",
+          "WorldSnapshot",
+        ),
+        "WorldSnapshot.world_content_lock",
+      ),
       deterministicContext,
       packetId: expectString(
         context.packet,

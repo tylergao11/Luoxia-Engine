@@ -376,72 +376,92 @@ function assertDirectorDailyResponse(
     expectProperty(worldView, "actors", "DirectorWorldView"),
     "DirectorWorldView.actors",
   );
-  const drafts = objectArray(
+  const intents = objectArray(
     expectProperty(output, "automatic_events", "DirectorDailySettlementOutput"),
     "DirectorDailySettlementOutput.automatic_events",
   );
 
-  for (const [draftIndex, draft] of drafts.entries()) {
+  for (const [draftIndex, intent] of intents.entries()) {
     const path =
       `DirectorDailySettlementOutput.automatic_events[${draftIndex}]`;
-    const situation = expectJsonObject(
-      expectProperty(draft, "situation", "AutomaticEventSemanticDraft"),
-      `${path}.situation`,
+    const scope = expectString(intent, "scope", "DailySettlementEventIntent");
+    expectString(intent, "event_type", path);
+    expectString(intent, "summary", path);
+    expectString(intent, "outcome_type", path);
+    expectJsonObject(
+      expectProperty(intent, "parameters", path),
+      `${path}.parameters`,
     );
-    const situationActorIndices = assertEventSituationDraft(
-      situation,
-      actors.length,
-      `${path}.situation`,
-    );
-    const outcomes = objectArray(
-      expectProperty(
-        draft,
-        "candidate_outcomes",
-        "AutomaticEventSemanticDraft",
-      ),
-      `${path}.candidate_outcomes`,
-    );
-    const eventScope = expectString(
-      draft,
-      "event_scope",
-      "AutomaticEventSemanticDraft",
-    );
-    if (eventScope === "world") {
-      assertSemanticEventGraph(
-        outcomes,
-        [],
-        situationActorIndices.length,
+    if (scope === "world") {
+      const indices = assertIndexSelectorsWithin(
+        intent,
+        "subject_actor_indices",
+        actors.length,
         path,
       );
+      assertDailyIntentActorsActive(actors, indices, path);
+      if (Object.prototype.hasOwnProperty.call(intent, "agency")) {
+        throw fault(
+          "model.semantic.daily_intent_agency_scope",
+          "World daily settlement intent must not carry agency",
+          { path },
+        );
+      }
       continue;
     }
-    if (eventScope === "character") {
-      assertIndexSelectorsWithin(
-        draft,
-        "target_subject_indices",
-        situationActorIndices.length,
+    if (scope === "character") {
+      const indices = assertIndexSelectorsWithin(
+        intent,
+        "target_actor_indices",
+        actors.length,
         path,
       );
-      assertSemanticEventGraph(
-        outcomes,
-        objectArray(
-          expectProperty(
-            draft,
-            "agency_gates",
-            "CharacterAutomaticEventSemanticDraft",
-          ),
-          `${path}.agency_gates`,
-        ),
-        situationActorIndices.length,
-        path,
-      );
+      assertDailyIntentActorsActive(actors, indices, path);
+      const agency = intent["agency"];
+      if (agency !== null && agency !== undefined) {
+        const agencyObject = expectJsonObject(agency, `${path}.agency`);
+        expectString(agencyObject, "semantic_intent", `${path}.agency`);
+        expectJsonObject(
+          expectProperty(agencyObject, "policy", `${path}.agency`),
+          `${path}.agency.policy`,
+        );
+        expectJsonObject(
+          expectProperty(agencyObject, "terms", `${path}.agency`),
+          `${path}.agency.terms`,
+        );
+      }
       continue;
     }
     throw fault(
       "model.semantic.automatic_event_scope_unknown",
-      `Unknown automatic event event_scope ${eventScope}`,
-      { draft_index: draftIndex, event_scope: eventScope },
+      `Unknown daily settlement intent scope ${scope}`,
+      { draft_index: draftIndex, scope },
     );
+  }
+}
+
+function assertDailyIntentActorsActive(
+  actors: readonly JsonObject[],
+  indices: readonly number[],
+  path: string,
+): void {
+  for (const index of indices) {
+    const actor = actors[index];
+    if (actor === undefined) {
+      throw fault(
+        "model.semantic.daily_intent_actor_missing",
+        "Daily settlement intent actor index is out of range",
+        { path, index },
+      );
+    }
+    const status = expectString(actor, "status", "DirectorActorView");
+    if (status !== "active") {
+      throw fault(
+        "model.semantic.daily_intent_actor_inactive",
+        "Daily settlement intent must name active actors only",
+        { path, index, status },
+      );
+    }
   }
 }
 
@@ -1234,7 +1254,8 @@ function assertEventCardDraft(
   assertSemanticEventGraph(
     outcomes,
     gates,
-    situationActorIndices.length,
+    actorCount,
+    situationActorIndices,
     path,
   );
   for (const [gateIndex, gate] of gates.entries()) {
@@ -1344,16 +1365,19 @@ function assertDialogueCommitmentSelectors(
 function assertSemanticEventGraph(
   outcomes: readonly JsonObject[],
   gates: readonly JsonObject[],
-  situationSubjectCount: number,
+  actorCount: number,
+  situationActorIndices: readonly number[],
   path: string,
 ): void {
+  const situationActorSet = new Set(situationActorIndices);
   const requiredGateByOutcome: Array<number | undefined> = [];
   for (const [outcomeIndex, outcome] of outcomes.entries()) {
     const outcomePath = `${path}.outcomes[${outcomeIndex}]`;
-    assertIndexSelectorsWithin(
+    assertActorIndicesWithinSituation(
       outcome,
       "subject_indices",
-      situationSubjectCount,
+      actorCount,
+      situationActorSet,
       outcomePath,
     );
     requiredGateByOutcome.push(
@@ -1378,10 +1402,11 @@ function assertSemanticEventGraph(
       gatePath,
     );
     protectedByGate.push(new Set(protectedOutcomeIndices));
-    assertIndexSelectorsWithin(
+    assertActorIndicesWithinSituation(
       gate,
       "participant_subject_indices",
-      situationSubjectCount,
+      actorCount,
+      situationActorSet,
       gatePath,
     );
     const requirement = expectJsonObject(
@@ -1392,10 +1417,11 @@ function assertSemanticEventGraph(
       ),
       `${gatePath}.requirement`,
     );
-    assertIndexSelectorsWithin(
+    assertActorIndicesWithinSituation(
       requirement,
       "subject_indices",
-      situationSubjectCount,
+      actorCount,
+      situationActorSet,
       `${gatePath}.requirement`,
     );
     for (const outcomeIndex of protectedOutcomeIndices) {
@@ -1426,6 +1452,30 @@ function assertSemanticEventGraph(
       );
     }
   }
+}
+
+function assertActorIndicesWithinSituation(
+  owner: JsonObject,
+  field: string,
+  actorCount: number,
+  situationActorSet: ReadonlySet<number>,
+  path: string,
+): readonly number[] {
+  const indices = assertIndexSelectorsWithin(owner, field, actorCount, path);
+  for (const index of indices) {
+    if (!situationActorSet.has(index)) {
+      throw fault(
+        "model.semantic.subject_outside_situation",
+        "Event subject index must name a world_view actor already selected by the situation",
+        {
+          path: `${path}.${field}`,
+          index,
+          situation_actor_indices: [...situationActorSet].sort((a, b) => a - b),
+        },
+      );
+    }
+  }
+  return indices;
 }
 
 function assertModelIndexWithin(

@@ -5122,7 +5122,7 @@ function assertAutomaticEventCandidateMatchesDraft(
   assertEqual(
     "automatic_event.event_scope",
     expectedScope,
-    expectString(rawDraft, "event_scope", "AutomaticEventSemanticDraft"),
+    expectString(rawDraft, "scope", "DailySettlementEventIntent"),
     context.operationKind,
   );
   assertEqual(
@@ -5168,105 +5168,221 @@ function assertAutomaticEventCandidateMatchesDraft(
     expectProperty(worldView, "actors", "DirectorWorldView"),
     "DirectorWorldView.actors",
   );
-  const subjects = assertEventSituationCandidateMatchesDraft({
-    context,
-    actors,
-    raw: expectJsonObject(
-      expectProperty(
-        rawDraft,
-        "situation",
-        "AutomaticEventSemanticDraft",
-      ),
-      "AutomaticEventSemanticDraft.situation",
-    ),
-    candidate: expectJsonObject(
-      expectProperty(candidate, "situation", candidateLabel),
-      `${candidateLabel}.situation`,
-    ),
-    locale: undefined,
-    label: "automatic_event.situation",
-  });
-
-  const rawOutcomes = asObjectArray(
-    expectProperty(
-      rawDraft,
-      "candidate_outcomes",
-      "AutomaticEventSemanticDraft",
-    ),
-    "AutomaticEventSemanticDraft.candidate_outcomes",
+  const indexField =
+    expectedScope === "world"
+      ? "subject_actor_indices"
+      : "target_actor_indices";
+  const actorIndices = readModelIndices(
+    rawDraft,
+    indexField,
+    "DailySettlementEventIntent",
   );
+  const expectedEntityIds = actorIndices.map((index) => {
+    const actor = actors[index];
+    if (actor === undefined) {
+      throw fault(
+        "rule_plugin.semantic.daily_intent_actor_missing",
+        "Daily settlement intent actor index is missing from verified world_view",
+        { index, operation_kind: context.operationKind },
+      );
+    }
+    return expectString(actor, "entity_id", "DirectorActorView");
+  });
+  const situation = expectJsonObject(
+    expectProperty(candidate, "situation", candidateLabel),
+    `${candidateLabel}.situation`,
+  );
+  assertEqual(
+    "automatic_event.event_type",
+    expectString(rawDraft, "event_type", "DailySettlementEventIntent"),
+    expectString(situation, "event_type", `${candidateLabel}.situation`),
+    context.operationKind,
+  );
+  const summary = expectJsonObject(
+    expectProperty(situation, "summary", `${candidateLabel}.situation`),
+    `${candidateLabel}.situation.summary`,
+  );
+  // LocalizedText must contain the intent summary string as one locale value.
+  const summaryValues = Object.values(summary).filter(
+    (value): value is string => typeof value === "string",
+  );
+  if (
+    !summaryValues.includes(
+      expectString(rawDraft, "summary", "DailySettlementEventIntent"),
+    )
+  ) {
+    throw fault(
+      "rule_plugin.semantic.daily_intent_summary_mismatch",
+      "Materialized automatic event summary does not match daily settlement intent",
+      { operation_kind: context.operationKind },
+    );
+  }
+  assertJsonFieldEqual(
+    "automatic_event.situation.context",
+    Object.freeze({}),
+    expectProperty(situation, "context", `${candidateLabel}.situation`),
+    context.operationKind,
+  );
+  const situationSubjects = asObjectArray(
+    expectProperty(situation, "subjects", `${candidateLabel}.situation`),
+    `${candidateLabel}.situation.subjects`,
+  );
+  const situationEntityIds = situationSubjects.map((subject) =>
+    expectString(
+      expectJsonObject(
+        expectProperty(subject, "entity", "SubjectRef"),
+        "SubjectRef.entity",
+      ),
+      "entity_id",
+      "EntityRef",
+    ),
+  );
+  assertJsonFieldEqual(
+    "automatic_event.situation.subjects",
+    expectedEntityIds,
+    situationEntityIds,
+    context.operationKind,
+  );
+
   const outcomes = asObjectArray(
     expectProperty(candidate, "candidate_outcomes", candidateLabel),
     `${candidateLabel}.candidate_outcomes`,
   );
-  const rawGates =
-    expectedScope === "character"
-      ? asObjectArray(
-          expectProperty(
-            rawDraft,
-            "agency_gates",
-            "CharacterAutomaticEventSemanticDraft",
-          ),
-          "CharacterAutomaticEventSemanticDraft.agency_gates",
-        )
-      : Object.freeze([]);
-  const gates =
-    expectedScope === "character"
-      ? asObjectArray(
-          expectProperty(candidate, "agency_gates", candidateLabel),
-          `${candidateLabel}.agency_gates`,
-        )
-      : Object.freeze([]);
-  const gateIds = readUniqueIdentifiers(
-    context,
-    gates,
-    "gate_id",
-    "MaterializedAgencyGateCandidate",
-    "automatic_event.agency_gates",
+  if (outcomes.length !== 1) {
+    throw fault(
+      "rule_plugin.semantic.daily_intent_outcome_count",
+      "Daily settlement materialization must produce exactly one outcome",
+      {
+        operation_kind: context.operationKind,
+        outcome_count: outcomes.length,
+      },
+    );
+  }
+  const outcome = outcomes[0] as JsonObject;
+  assertEqual(
+    "automatic_event.outcome_type",
+    expectString(rawDraft, "outcome_type", "DailySettlementEventIntent"),
+    expectString(outcome, "outcome_type", "MaterializedSemanticOutcomeCandidate"),
+    context.operationKind,
   );
-  const outcomeIds = assertSemanticOutcomeCandidates({
-    context,
-    subjects,
-    rawOutcomes,
-    candidates: outcomes,
-    gateIds,
-    label: "automatic_event.candidate_outcomes",
-  });
-  assertAgencyGateCandidates({
-    context,
-    subjects,
-    rawGates,
-    candidates: gates,
-    outcomeIds,
-    commitmentEvidence: () => Object.freeze([]),
-    label: "automatic_event.agency_gates",
-  });
+  assertJsonFieldEqual(
+    "automatic_event.outcome.parameters",
+    expectProperty(rawDraft, "parameters", "DailySettlementEventIntent"),
+    expectProperty(outcome, "parameters", "MaterializedSemanticOutcomeCandidate"),
+    context.operationKind,
+  );
+  const outcomeSubjects = asObjectArray(
+    expectProperty(outcome, "subjects", "MaterializedSemanticOutcomeCandidate"),
+    "MaterializedSemanticOutcomeCandidate.subjects",
+  );
+  assertJsonFieldEqual(
+    "automatic_event.outcome.subjects",
+    expectedEntityIds,
+    outcomeSubjects.map((subject) =>
+      expectString(
+        expectJsonObject(
+          expectProperty(subject, "entity", "SubjectRef"),
+          "SubjectRef.entity",
+        ),
+        "entity_id",
+        "EntityRef",
+      ),
+    ),
+    context.operationKind,
+  );
 
   if (expectedScope === "character") {
     assertJsonFieldEqual(
       "automatic_event.target_entity_ids",
-      selectSubjects(
-        context,
-        subjects,
-        readModelIndices(
-          rawDraft,
-          "target_subject_indices",
-          "CharacterAutomaticEventSemanticDraft",
-        ),
-        "automatic_event.target_entity_ids",
-      ).map((subject) =>
-        expectString(
-          expectJsonObject(
-            expectProperty(subject, "entity", "SubjectRef"),
-            "SubjectRef.entity",
-          ),
-          "entity_id",
-          "EntityRef",
-        ),
-      ),
+      expectedEntityIds,
       expectProperty(candidate, "target_entity_ids", candidateLabel),
       context.operationKind,
     );
+    const agency = rawDraft["agency"];
+    const gates = asObjectArray(
+      expectProperty(candidate, "agency_gates", candidateLabel),
+      `${candidateLabel}.agency_gates`,
+    );
+    if (agency === null || agency === undefined) {
+      if (gates.length !== 0) {
+        throw fault(
+          "rule_plugin.semantic.daily_intent_agency_mismatch",
+          "Character intent without agency must materialize empty agency_gates",
+          { operation_kind: context.operationKind },
+        );
+      }
+      if (
+        Object.prototype.hasOwnProperty.call(outcome, "requires_agency_gate_id")
+      ) {
+        throw fault(
+          "rule_plugin.semantic.daily_intent_agency_mismatch",
+          "Character intent without agency must not require a gate on its outcome",
+          { operation_kind: context.operationKind },
+        );
+      }
+    } else {
+      const agencyObject = expectJsonObject(
+        agency as JsonValue,
+        "DailySettlementAgencyIntent",
+      );
+      if (gates.length !== 1) {
+        throw fault(
+          "rule_plugin.semantic.daily_intent_agency_mismatch",
+          "Character intent with agency must materialize exactly one gate",
+          {
+            operation_kind: context.operationKind,
+            gate_count: gates.length,
+          },
+        );
+      }
+      const gate = gates[0] as JsonObject;
+      assertEqual(
+        "automatic_event.agency.semantic_intent",
+        expectString(
+          agencyObject,
+          "semantic_intent",
+          "DailySettlementAgencyIntent",
+        ),
+        expectString(
+          expectJsonObject(
+            expectProperty(gate, "requirement", "MaterializedAgencyGateCandidate"),
+            "MaterializedAgencyGateCandidate.requirement",
+          ),
+          "semantic_intent",
+          "AgencyRequirement",
+        ),
+        context.operationKind,
+      );
+      assertJsonFieldEqual(
+        "automatic_event.agency.policy",
+        expectProperty(agencyObject, "policy", "DailySettlementAgencyIntent"),
+        expectProperty(gate, "policy", "MaterializedAgencyGateCandidate"),
+        context.operationKind,
+      );
+      assertJsonFieldEqual(
+        "automatic_event.agency.terms",
+        expectProperty(agencyObject, "terms", "DailySettlementAgencyIntent"),
+        expectProperty(
+          expectJsonObject(
+            expectProperty(gate, "requirement", "MaterializedAgencyGateCandidate"),
+            "MaterializedAgencyGateCandidate.requirement",
+          ),
+          "terms",
+          "AgencyRequirement",
+        ),
+        context.operationKind,
+      );
+      assertEqual(
+        "automatic_event.outcome.requires_agency_gate_id",
+        expectString(gate, "gate_id", "MaterializedAgencyGateCandidate"),
+        expectString(
+          outcome,
+          "requires_agency_gate_id",
+          "MaterializedSemanticOutcomeCandidate",
+        ),
+        context.operationKind,
+      );
+    }
   }
 }
 
@@ -5339,13 +5455,19 @@ function assertEventCardCandidateMatchesDraft(
     expectInteger(candidate, "day", "EventCardPublishCandidate"),
     context.operationKind,
   );
-  const subjects = assertEventSituationCandidateMatchesDraft({
+  const situationDraft = expectJsonObject(
+    expectProperty(rawDraft, "situation", "EventCardSemanticDraft"),
+    "EventCardSemanticDraft.situation",
+  );
+  const situationActorIndices = readModelIndices(
+    situationDraft,
+    "subject_actor_indices",
+    "EventSituationSemanticDraft",
+  );
+  assertEventSituationCandidateMatchesDraft({
     context,
     actors,
-    raw: expectJsonObject(
-      expectProperty(rawDraft, "situation", "EventCardSemanticDraft"),
-      "EventCardSemanticDraft.situation",
-    ),
+    raw: situationDraft,
     candidate: expectJsonObject(
       expectProperty(
         candidate,
@@ -5429,7 +5551,8 @@ function assertEventCardCandidateMatchesDraft(
   );
   const outcomeIds = assertSemanticOutcomeCandidates({
     context,
-    subjects,
+    actors,
+    allowedActorIndices: new Set(situationActorIndices),
     rawOutcomes,
     candidates: outcomeCandidates,
     gateIds,
@@ -5471,7 +5594,8 @@ function assertEventCardCandidateMatchesDraft(
   }
   assertAgencyGateCandidates({
     context,
-    subjects,
+    actors,
+    allowedActorIndices: new Set(situationActorIndices),
     rawGates,
     candidates: gates,
     outcomeIds,
@@ -5563,7 +5687,8 @@ function assertEventSituationCandidateMatchesDraft(input: {
 
 function assertSemanticOutcomeCandidates(input: {
   readonly context: EvidenceContext;
-  readonly subjects: readonly JsonObject[];
+  readonly actors: readonly JsonObject[];
+  readonly allowedActorIndices: ReadonlySet<number>;
   readonly rawOutcomes: readonly JsonObject[];
   readonly candidates: readonly JsonObject[];
   readonly gateIds: readonly string[];
@@ -5596,12 +5721,23 @@ function assertSemanticOutcomeCandidates(input: {
         input.context.operationKind,
       );
     }
+    const subjectIndices = readModelIndices(
+      raw,
+      "subject_indices",
+      "SemanticOutcomeDraft",
+    );
+    assertActorIndicesAllowed(
+      input.context,
+      subjectIndices,
+      input.allowedActorIndices,
+      `${input.label}.${ordinal}.subjects`,
+    );
     assertJsonFieldEqual(
       `${input.label}.${ordinal}.subjects`,
-      selectSubjects(
+      readActorSubjects(
         input.context,
-        input.subjects,
-        readModelIndices(raw, "subject_indices", "SemanticOutcomeDraft"),
+        input.actors,
+        subjectIndices,
         `${input.label}.${ordinal}.subjects`,
       ),
       expectProperty(
@@ -5643,7 +5779,8 @@ function assertSemanticOutcomeCandidates(input: {
 
 function assertAgencyGateCandidates(input: {
   readonly context: EvidenceContext;
-  readonly subjects: readonly JsonObject[];
+  readonly actors: readonly JsonObject[];
+  readonly allowedActorIndices: ReadonlySet<number>;
   readonly rawGates: readonly JsonObject[];
   readonly candidates: readonly JsonObject[];
   readonly outcomeIds: readonly string[];
@@ -5688,14 +5825,21 @@ function assertAgencyGateCandidates(input: {
       ),
       input.context.operationKind,
     );
-    const participantSubjects = selectSubjects(
+    const participantIndices = readModelIndices(
+      raw,
+      "participant_subject_indices",
+      "AgencyGateSemanticDraft",
+    );
+    assertActorIndicesAllowed(
       input.context,
-      input.subjects,
-      readModelIndices(
-        raw,
-        "participant_subject_indices",
-        "AgencyGateSemanticDraft",
-      ),
+      participantIndices,
+      input.allowedActorIndices,
+      `${input.label}.${ordinal}.participants`,
+    );
+    const participantSubjects = readActorSubjects(
+      input.context,
+      input.actors,
+      participantIndices,
       `${input.label}.${ordinal}.participants`,
     );
     assertJsonFieldEqual(
@@ -5737,16 +5881,23 @@ function assertAgencyGateCandidates(input: {
         input.context.operationKind,
       );
     }
+    const requirementIndices = readModelIndices(
+      rawRequirement,
+      "subject_indices",
+      "AgencyRequirementSemanticDraft",
+    );
+    assertActorIndicesAllowed(
+      input.context,
+      requirementIndices,
+      input.allowedActorIndices,
+      `${input.label}.${ordinal}.requirement.subjects`,
+    );
     assertJsonFieldEqual(
       `${input.label}.${ordinal}.requirement.subjects`,
-      selectSubjects(
+      readActorSubjects(
         input.context,
-        input.subjects,
-        readModelIndices(
-          rawRequirement,
-          "subject_indices",
-          "AgencyRequirementSemanticDraft",
-        ),
+        input.actors,
+        requirementIndices,
         `${input.label}.${ordinal}.requirement.subjects`,
       ),
       expectProperty(requirement, "subjects", "AgencyRequirement"),
@@ -6584,30 +6735,28 @@ function readActorSubjects(
   );
 }
 
-function selectSubjects(
+function assertActorIndicesAllowed(
   context: EvidenceContext,
-  subjects: readonly JsonObject[],
   indices: readonly number[],
+  allowedActorIndices: ReadonlySet<number>,
   label: string,
-): readonly JsonObject[] {
-  return Object.freeze(
-    indices.map((index) => {
-      const subject = subjects[index];
-      if (subject === undefined) {
-        throw fault(
-          "rule_plugin.semantic.model_evidence_ordinal_out_of_range",
-          "Subject selector is outside the materialized event subject collection",
-          {
-            operation_kind: context.operationKind,
-            field: label,
-            subject_index: index,
-            subject_count: subjects.length,
-          },
-        );
-      }
-      return subject;
-    }),
-  );
+): void {
+  for (const index of indices) {
+    if (!allowedActorIndices.has(index)) {
+      throw fault(
+        "rule_plugin.semantic.subject_outside_situation",
+        "Subject selector must name a world_view actor already selected by the situation",
+        {
+          operation_kind: context.operationKind,
+          field: label,
+          actor_index: index,
+          situation_actor_indices: [...allowedActorIndices].sort(
+            (left, right) => left - right,
+          ),
+        },
+      );
+    }
+  }
 }
 
 function readDialogueParticipantSubjects(input: {

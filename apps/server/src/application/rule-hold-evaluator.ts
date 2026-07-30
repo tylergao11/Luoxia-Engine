@@ -59,6 +59,7 @@ class ProductionRuleHoldEvaluator implements RuleHoldEvaluator {
     readonly worldId: string;
     readonly worldRevision: number;
     readonly worldState: JsonObject;
+    readonly worldContentLock: JsonObject;
     readonly deterministicContext: JsonObject;
     readonly packetId: string;
     readonly preconditionPath: string;
@@ -125,6 +126,7 @@ class ProductionRuleHoldEvaluator implements RuleHoldEvaluator {
         world_id: input.worldId,
         world_revision: input.worldRevision,
         world_state: input.worldState,
+        world_content_lock: input.worldContentLock,
       }),
       deterministic_context: input.deterministicContext,
       input: Object.freeze({

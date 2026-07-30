@@ -50,18 +50,19 @@ export function assertSaveEnvelopeRelationships(
     expectProperty(value, "world_state", "SaveEnvelope"),
     "SaveEnvelope.world_state",
   );
-  contracts.assertObject(CONTRACT_REF.worldSnapshot, {
-    world_id: worldId,
-    world_revision: worldRevision,
-    world_state: worldState,
-  });
-  assertStateMachineRelationships(worldState, worldId);
-  assertStageInstanceRelationships(worldState, worldId);
-  assertVisualBindingRelationships(worldState, worldId);
   const worldContentLock = expectJsonObject(
     expectProperty(value, "world_content_lock", "SaveEnvelope"),
     "SaveEnvelope.world_content_lock",
   );
+  contracts.assertObject(CONTRACT_REF.worldSnapshot, {
+    world_id: worldId,
+    world_revision: worldRevision,
+    world_state: worldState,
+    world_content_lock: worldContentLock,
+  });
+  assertStateMachineRelationships(worldState, worldId);
+  assertStageInstanceRelationships(worldState, worldId);
+  assertVisualBindingRelationships(worldState, worldId);
   const rootBundleLock = expectJsonObject(
     expectProperty(
       worldContentLock,

@@ -49,6 +49,7 @@ export function createSessionViewAssembler(
           world_id: input.session.worldId,
           world_revision: input.session.worldRevision,
           world_state: input.worldState,
+          world_content_lock: input.worldContentLock.value,
         },
       );
       const renderNodeCandidates = dependencies.renderNodes.project({

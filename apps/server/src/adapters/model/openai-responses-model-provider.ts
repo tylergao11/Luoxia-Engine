@@ -42,9 +42,11 @@ export interface OpenAIResponsesModelProviderDependencies {
 }
 
 /**
- * Real single-shot OpenAI Responses adapter. It asks for one JSON object,
- * returns that untrusted ModelOutput, and leaves all correlations,
- * Schema/digest checks, and semantic authorization to ModelGateway.
+ * Real single-shot OpenAI Responses adapter. Generation Schema is placed in
+ * the stable static developer instruction before dynamic input (same ownership
+ * pattern as DeepSeek). `text.format` only requests one JSON object; formal
+ * ModelOutput Schema, digests, and semantic authorization remain ModelGateway
+ * authority over the untrusted return value.
  */
 export function createOpenAIResponsesModelProvider(
   dependencies: OpenAIResponsesModelProviderDependencies,
@@ -120,10 +122,7 @@ class OpenAIResponsesModelProvider implements ModelProvider {
               type: "json_object",
             },
           },
-          input: buildResponsesInput(
-            resolved,
-            outputSchema,
-          ),
+          input: buildResponsesInput(resolved, outputSchema),
         }),
         signal: abort.signal,
       });
