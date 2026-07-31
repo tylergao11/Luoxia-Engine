@@ -767,21 +767,20 @@ function projectDialogueTurn(
     speaker_kind: speakerKind,
     text: expectString(turn, "text", "DialogueTurn"),
   };
-  // Empty agency_commitments are local-only noise for non-character turns;
-  // character_mind may emit an empty array when the speaker made no commitment.
+  // character_mind turns always project agency_commitments (including []) so
+  // director.dialogue_events sees explicit "no promise" vs non-empty evidence.
+  // Other speakers must not carry commitments.
   const commitments = expectObjectArrayProperty(
     turn,
     "agency_commitments",
     "DialogueTurn",
   );
   if (speakerKind === "character_mind") {
-    if (commitments.length > 0) {
-      projected.agency_commitments = Object.freeze(
-        commitments.map((commitment) =>
-          projectAgencyCommitment(commitment, subjectOptions),
-        ),
-      );
-    }
+    projected.agency_commitments = Object.freeze(
+      commitments.map((commitment) =>
+        projectAgencyCommitment(commitment, subjectOptions),
+      ),
+    );
   } else if (commitments.length > 0) {
     throw new EngineFault(
       "model.provider_input.agency_commitment_speaker",

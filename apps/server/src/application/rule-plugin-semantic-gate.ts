@@ -20,6 +20,12 @@ import type {
   WorldContentLockDocument,
 } from "@luoxia/world-core";
 
+import {
+  closeAgencyGateOutcomeLinks,
+  effectiveEventCardAgencyGates,
+  listDialogueCommitmentSelectors,
+  withEffectiveOutcomeSubjects,
+} from "./event-card-draft-normalize.js";
 import type {
   RulePluginRequestDocument,
   RulePluginResponseDocument,
@@ -4056,6 +4062,7 @@ function assertCommitmentsMatchDrafts(
   output: JsonObject,
   turn: JsonObject,
 ): void {
+  // commitments always required on model draft ([] when none).
   const drafts = asObjectArray(
     expectProperty(output, "commitments", "CharacterDialogueOutput"),
     "CharacterDialogueOutput.commitments",
@@ -5179,11 +5186,39 @@ function assertAutomaticEventCandidateMatchesDraft(
     expectedScope === "world"
       ? "subject_actor_indices"
       : "target_actor_indices";
-  const actorIndices = readModelIndices(
-    rawDraft,
-    indexField,
-    "DailySettlementEventIntent",
-  );
+  // Match day-cycle materialize defaults:
+  // world empty → all actors; character empty → machine-bearing actors only;
+  // character explicit → filter to machine-bearing (same set as target_entity_ids).
+  const worldState = requestWorldState(context);
+  let actorIndices: readonly number[];
+  if (
+    !Object.prototype.hasOwnProperty.call(rawDraft, indexField) ||
+    (Array.isArray(rawDraft[indexField]) &&
+      (rawDraft[indexField] as unknown[]).length === 0)
+  ) {
+    actorIndices =
+      expectedScope === "character"
+        ? characterMachineActorIndicesFromWorld(worldState, actors)
+        : actors.map((_, index) => index);
+  } else {
+    actorIndices = readModelIndices(
+      rawDraft,
+      indexField,
+      "DailySettlementEventIntent",
+    );
+    if (expectedScope === "character") {
+      actorIndices = actorIndices.filter((index) => {
+        const actor = actors[index];
+        if (actor === undefined) {
+          return false;
+        }
+        return entityHasCharacterActionMachineInWorld(
+          worldState,
+          expectString(actor, "entity_id", "DirectorActorView"),
+        );
+      });
+    }
+  }
   const expectedEntityIds = actorIndices.map((index) => {
     const actor = actors[index];
     if (actor === undefined) {
@@ -5305,89 +5340,26 @@ function assertAutomaticEventCandidateMatchesDraft(
       expectProperty(candidate, "target_entity_ids", candidateLabel),
       context.operationKind,
     );
-    const agency = rawDraft["agency"];
+    // Daily settlement: Server never materializes agency gates (no dialogue
+    // commitment_evidence channel). Model-authored agency is structural noise.
     const gates = asObjectArray(
       expectProperty(candidate, "agency_gates", candidateLabel),
       `${candidateLabel}.agency_gates`,
     );
-    if (agency === null || agency === undefined) {
-      if (gates.length !== 0) {
-        throw fault(
-          "rule_plugin.semantic.daily_intent_agency_mismatch",
-          "Character intent without agency must materialize empty agency_gates",
-          { operation_kind: context.operationKind },
-        );
-      }
-      if (
-        Object.prototype.hasOwnProperty.call(outcome, "requires_agency_gate_id")
-      ) {
-        throw fault(
-          "rule_plugin.semantic.daily_intent_agency_mismatch",
-          "Character intent without agency must not require a gate on its outcome",
-          { operation_kind: context.operationKind },
-        );
-      }
-    } else {
-      const agencyObject = expectJsonObject(
-        agency as JsonValue,
-        "DailySettlementAgencyIntent",
+    if (gates.length !== 0) {
+      throw fault(
+        "rule_plugin.semantic.daily_intent_agency_mismatch",
+        "Daily character automatic events must materialize empty agency_gates",
+        { operation_kind: context.operationKind, gate_count: gates.length },
       );
-      if (gates.length !== 1) {
-        throw fault(
-          "rule_plugin.semantic.daily_intent_agency_mismatch",
-          "Character intent with agency must materialize exactly one gate",
-          {
-            operation_kind: context.operationKind,
-            gate_count: gates.length,
-          },
-        );
-      }
-      const gate = gates[0] as JsonObject;
-      assertEqual(
-        "automatic_event.agency.semantic_intent",
-        expectString(
-          agencyObject,
-          "semantic_intent",
-          "DailySettlementAgencyIntent",
-        ),
-        expectString(
-          expectJsonObject(
-            expectProperty(gate, "requirement", "MaterializedAgencyGateCandidate"),
-            "MaterializedAgencyGateCandidate.requirement",
-          ),
-          "semantic_intent",
-          "AgencyRequirement",
-        ),
-        context.operationKind,
-      );
-      assertJsonFieldEqual(
-        "automatic_event.agency.policy",
-        expectProperty(agencyObject, "policy", "DailySettlementAgencyIntent"),
-        expectProperty(gate, "policy", "MaterializedAgencyGateCandidate"),
-        context.operationKind,
-      );
-      assertJsonFieldEqual(
-        "automatic_event.agency.terms",
-        expectProperty(agencyObject, "terms", "DailySettlementAgencyIntent"),
-        expectProperty(
-          expectJsonObject(
-            expectProperty(gate, "requirement", "MaterializedAgencyGateCandidate"),
-            "MaterializedAgencyGateCandidate.requirement",
-          ),
-          "terms",
-          "AgencyRequirement",
-        ),
-        context.operationKind,
-      );
-      assertEqual(
-        "automatic_event.outcome.requires_agency_gate_id",
-        expectString(gate, "gate_id", "MaterializedAgencyGateCandidate"),
-        expectString(
-          outcome,
-          "requires_agency_gate_id",
-          "MaterializedSemanticOutcomeCandidate",
-        ),
-        context.operationKind,
+    }
+    if (
+      Object.prototype.hasOwnProperty.call(outcome, "requires_agency_gate_id")
+    ) {
+      throw fault(
+        "rule_plugin.semantic.daily_intent_agency_mismatch",
+        "Daily character automatic outcomes must not require an agency gate",
+        { operation_kind: context.operationKind },
       );
     }
   }
@@ -5513,14 +5485,8 @@ function assertEventCardCandidateMatchesDraft(
     "EventCardPublishCandidate.result_options",
   );
   assertArrayLength(context, "event_card.result_options", rawOptions, options);
-  const rawGates = asObjectArray(
-    expectProperty(
-      rawDraft,
-      "agency_gates",
-      "EventCardSemanticDraft",
-    ),
-    "EventCardSemanticDraft.agency_gates",
-  );
+  // Same effective gates as materialize/semantic: omit → []; zero commitments → [].
+  const rawGates = effectiveEventCardAgencyGates(rawDraft, dialogue);
   const gates = asObjectArray(
     expectProperty(
       candidate,
@@ -5529,6 +5495,17 @@ function assertEventCardCandidateMatchesDraft(
     ),
     "EventCardPublishCandidate.agency_gates",
   );
+  if (rawGates.length !== gates.length) {
+    throw new EngineFault(
+      "rule_plugin.semantic.event_card_agency_gate_count",
+      "Materialized agency_gates count must match effective model draft (omit/zero-commitment → empty)",
+      {
+        operation_kind: context.operationKind,
+        raw_gate_count: rawGates.length,
+        candidate_gate_count: gates.length,
+      },
+    );
+  }
   const gateIds = readUniqueIdentifiers(
     context,
     gates,
@@ -5556,11 +5533,21 @@ function assertEventCardCandidateMatchesDraft(
       "MaterializedEventCardOutcomeCandidate.outcomes",
     ),
   );
+  // Same Server closure as model-output-semantic-gate + materialize.
+  const subjectClosed = withEffectiveOutcomeSubjects(
+    rawOutcomes,
+    situationActorIndices,
+    actors.length,
+  );
+  const { outcomes: closedOutcomes } = closeAgencyGateOutcomeLinks(
+    subjectClosed,
+    rawGates,
+  );
   const outcomeIds = assertSemanticOutcomeCandidates({
     context,
     actors,
     allowedActorIndices: new Set(situationActorIndices),
-    rawOutcomes,
+    rawOutcomes: closedOutcomes,
     candidates: outcomeCandidates,
     gateIds,
     label: "event_card.result_options.outcomes",
@@ -5599,6 +5586,8 @@ function assertEventCardCandidateMatchesDraft(
       label: `event_card.result_options.${ordinal}.presentation`,
     });
   }
+  // Evidence is Server-assembled from dialogue for every gate (not model draft).
+  const serverEvidenceSelectors = listDialogueCommitmentSelectors(dialogue);
   assertAgencyGateCandidates({
     context,
     actors,
@@ -5606,18 +5595,11 @@ function assertEventCardCandidateMatchesDraft(
     rawGates,
     candidates: gates,
     outcomeIds,
-    commitmentEvidence: (rawGate) =>
+    commitmentEvidence: () =>
       materializeCommitmentEvidenceRefs(
         context,
         dialogue,
-        asObjectArray(
-          expectProperty(
-            rawGate,
-            "commitment_evidence",
-            "EventCardAgencyGateSemanticDraft",
-          ),
-          "EventCardAgencyGateSemanticDraft.commitment_evidence",
-        ),
+        serverEvidenceSelectors,
       ),
     label: "event_card.agency_gates",
   });
@@ -5631,17 +5613,53 @@ function assertEventSituationCandidateMatchesDraft(input: {
   readonly locale: string | undefined;
   readonly label: string;
 }): readonly JsonObject[] {
-  for (const field of ["event_type", "context"] as const) {
-    assertJsonFieldEqual(
-      `${input.label}.${field}`,
-      expectProperty(input.raw, field, "EventSituationSemanticDraft"),
-      expectProperty(
-        input.candidate,
-        field,
-        "MaterializedEventSituationCandidate",
-      ),
-      input.context.operationKind,
+  assertJsonFieldEqual(
+    `${input.label}.event_type`,
+    expectProperty(input.raw, "event_type", "EventSituationSemanticDraft"),
+    expectProperty(
+      input.candidate,
+      "event_type",
+      "MaterializedEventSituationCandidate",
+    ),
+    input.context.operationKind,
+  );
+  // situation.context is Server-owned empty {}; model may omit. Compare only
+  // the materialized empty bag to the candidate (never require model context).
+  const candidateContext = expectJsonObject(
+    expectProperty(
+      input.candidate,
+      "context",
+      "MaterializedEventSituationCandidate",
+    ),
+    "MaterializedEventSituationCandidate.context",
+  );
+  if (Object.keys(candidateContext).length > 0) {
+    throw new EngineFault(
+      "rule_plugin.semantic.event_situation_context_not_empty",
+      "Materialized EventSituation.context must be the Server empty object",
+      {
+        operation_kind: input.context.operationKind,
+        path: `${input.label}.context`,
+        key_count: Object.keys(candidateContext).length,
+      },
     );
+  }
+  if (Object.prototype.hasOwnProperty.call(input.raw, "context")) {
+    const rawContext = expectJsonObject(
+      expectProperty(input.raw, "context", "EventSituationSemanticDraft"),
+      "EventSituationSemanticDraft.context",
+    );
+    if (Object.keys(rawContext).length > 0) {
+      throw new EngineFault(
+        "rule_plugin.semantic.event_situation_context_model_authored",
+        "Model EventSituation.context must be omitted or empty; Server materializes {}",
+        {
+          operation_kind: input.context.operationKind,
+          path: `${input.label}.context`,
+          key_count: Object.keys(rawContext).length,
+        },
+      );
+    }
   }
   const summary = expectString(
     input.raw,
@@ -6138,14 +6156,31 @@ function assertCharacterReactionCandidateMatchesDraft(input: {
     ),
     input.context.operationKind,
   );
-  const rawDecisions = asObjectArray(
+  const stimulusGates = asObjectArray(
     expectProperty(
-      input.rawDraft,
-      "agency_decisions",
-      "CharacterReactionSemanticDraft",
+      input.stimulus,
+      "agency_gates",
+      "CharacterReactEventInput",
     ),
-    "CharacterReactionSemanticDraft.agency_decisions",
+    "CharacterReactEventInput.agency_gates",
   );
+  // agency_decisions optional on draft; omit → [].
+  const rawDecisionsAll = Object.prototype.hasOwnProperty.call(
+    input.rawDraft,
+    "agency_decisions",
+  )
+    ? asObjectArray(
+        expectProperty(
+          input.rawDraft,
+          "agency_decisions",
+          "CharacterReactionSemanticDraft",
+        ),
+        "CharacterReactionSemanticDraft.agency_decisions",
+      )
+    : [];
+  // Align with materialize: no stimulus gates → ignore model decision noise.
+  const rawDecisions =
+    stimulusGates.length === 0 ? [] : rawDecisionsAll;
   const decisions = asObjectArray(
     expectProperty(
       input.candidate,
@@ -6159,14 +6194,6 @@ function assertCharacterReactionCandidateMatchesDraft(input: {
     "character_reaction.agency_decisions",
     rawDecisions,
     decisions,
-  );
-  const stimulusGates = asObjectArray(
-    expectProperty(
-      input.stimulus,
-      "agency_gates",
-      "CharacterReactEventInput",
-    ),
-    "CharacterReactEventInput.agency_gates",
   );
   for (const [ordinal, rawDecision] of rawDecisions.entries()) {
     const decision = decisions[ordinal] as JsonObject;
@@ -6685,6 +6712,48 @@ function requestWorldState(context: EvidenceContext): JsonObject {
     expectProperty(snapshot, "world_state", "WorldSnapshot"),
     "WorldSnapshot.world_state",
   );
+}
+
+function entityHasCharacterActionMachineInWorld(
+  worldState: JsonObject,
+  entityId: string,
+): boolean {
+  const machines = asObjectArray(
+    expectProperty(worldState, "state_machines", "WorldState"),
+    "WorldState.state_machines",
+  );
+  let matches = 0;
+  for (const machine of machines) {
+    const owner = expectJsonObject(
+      expectProperty(machine, "owner", "StateMachineInstanceState"),
+      "StateMachineInstanceState.owner",
+    );
+    if (
+      expectString(owner, "owner_kind", "StateMachineOwner") === "character" &&
+      expectString(owner, "entity_id", "StateMachineOwner") === entityId
+    ) {
+      matches += 1;
+    }
+  }
+  return matches === 1;
+}
+
+function characterMachineActorIndicesFromWorld(
+  worldState: JsonObject,
+  actors: readonly JsonObject[],
+): number[] {
+  const indices: number[] = [];
+  for (const [index, actor] of actors.entries()) {
+    if (
+      entityHasCharacterActionMachineInWorld(
+        worldState,
+        expectString(actor, "entity_id", "DirectorActorView"),
+      )
+    ) {
+      indices.push(index);
+    }
+  }
+  return indices;
 }
 
 function readActorSubjects(

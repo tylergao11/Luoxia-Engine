@@ -20,6 +20,12 @@ import type {
 import type { CommandJournal, StoredReceivedCommand } from "./command-journal.js";
 import type { CommandFinalizer } from "./command-finalizer.js";
 import { materializeAgencyCommitmentsFromCharacterDrafts } from "./dialogue-agency-commitment-materialize.js";
+import {
+  closeAgencyGateOutcomeLinks,
+  effectiveEventCardAgencyGates,
+  listDialogueCommitmentSelectors,
+  withEffectiveOutcomeSubjects,
+} from "./event-card-draft-normalize.js";
 import type {
   DialogueDefinitionRunRecord,
   DialogueDirectorRunJournal,
@@ -2159,6 +2165,8 @@ function createCharacterTurnCandidate(input: {
     expectProperty(input.output, "reply", "CharacterDialogueOutput"),
     "CharacterDialogueOutput.reply",
   );
+  // commitments always required on model output (use [] when none) so transcript
+  // and director.dialogue_events projection carry an explicit empty array.
   const drafts = asObjectArray(
     expectProperty(
       input.output,
@@ -3506,16 +3514,10 @@ function materializeEventCardCandidate(input: {
     ),
     "EventCardSemanticDraft.result_options",
   );
-  const gateDrafts = asObjectArray(
-    expectProperty(
-      input.draft,
-      "agency_gates",
-      "EventCardSemanticDraft",
-    ),
-    "EventCardSemanticDraft.agency_gates",
-  );
+  // Server: omit → []; zero transcript commitments → [] (drop invented gates).
+  const gateDrafts = effectiveEventCardAgencyGates(input.draft, dialogue);
   const gateIds = gateDrafts.map((_, ordinal) => `gate_${ordinal}`);
-  const flatOutcomeDrafts = optionDrafts.flatMap((option) =>
+  const flatOutcomeDraftsRaw = optionDrafts.flatMap((option) =>
     asObjectArray(
       expectProperty(
         option,
@@ -3525,21 +3527,32 @@ function materializeEventCardCandidate(input: {
       "EventCardOutcomeSemanticDraft.outcomes",
     ),
   );
+  const subjectClosed = withEffectiveOutcomeSubjects(
+    flatOutcomeDraftsRaw,
+    situationActorIndices,
+    actors.length,
+  );
+  const { outcomes: flatOutcomeDrafts } = closeAgencyGateOutcomeLinks(
+    subjectClosed,
+    gateDrafts,
+  );
   const outcomeIds = flatOutcomeDrafts.map(
     (_, ordinal) => `outcome_${ordinal}`,
   );
   let flatOutcomeOrdinal = 0;
   const resultOptions = optionDrafts.map((option, optionOrdinal) => {
-    const outcomes = asObjectArray(
+    const rawOptionOutcomes = asObjectArray(
       expectProperty(
         option,
         "outcomes",
         "EventCardOutcomeSemanticDraft",
       ),
       "EventCardOutcomeSemanticDraft.outcomes",
-    ).map((outcome) => {
+    );
+    const outcomes = rawOptionOutcomes.map(() => {
+      const outcome = flatOutcomeDrafts[flatOutcomeOrdinal];
       const outcomeId = outcomeIds[flatOutcomeOrdinal];
-      if (outcomeId === undefined) {
+      if (outcome === undefined || outcomeId === undefined) {
         throw commandIdentityFault(
           input.command,
           "EventCard outcome ordinal cannot be materialized",
@@ -3640,14 +3653,12 @@ function materializeEventCardCandidate(input: {
         ),
         "EventCardAgencyGateSemanticDraft.policy",
       ),
+      // Evidence is Server-assembled from transcript only (same ordinals the
+      // event model already saw as read-only agency_commitments projection).
       commitment_evidence: materializeCommitmentEvidence({
         command: input.command,
         dialogue,
-        value: expectProperty(
-          gate,
-          "commitment_evidence",
-          "EventCardAgencyGateSemanticDraft",
-        ),
+        value: listDialogueCommitmentSelectors(dialogue),
       }),
     });
   });
@@ -3680,14 +3691,8 @@ function materializeEventCardCandidate(input: {
         actors,
         indices: situationActorIndices,
       }),
-      context: expectJsonObject(
-        expectProperty(
-          situationDraft,
-          "context",
-          "EventSituationSemanticDraft",
-        ),
-        "EventSituationSemanticDraft.context",
-      ),
+      // Server-owned empty bag: never take model world_view echo as context.
+      context: Object.freeze({}),
     }),
     title: localizedText(
       locale,

@@ -711,8 +711,7 @@
       "required": [
         "event_type",
         "summary",
-        "subject_actor_indices",
-        "context"
+        "subject_actor_indices"
       ],
       "properties": {
         "event_type": {
@@ -732,6 +731,7 @@
           }
         },
         "context": {
+          "description": "Deprecated on model drafts. Server materializes situation.context as {}. If present, must be an empty object; non-empty context is rejected (no world_view echo).",
           "$ref": "common.v1.schema.json#/$defs/JsonObject"
         }
       }
@@ -741,7 +741,6 @@
       "additionalProperties": false,
       "required": [
         "outcome_type",
-        "subject_indices",
         "parameters"
       ],
       "properties": {
@@ -749,8 +748,8 @@
           "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
         },
         "subject_indices": {
+          "description": "Optional. Omit to inherit situation.subject_actor_indices. When present, Server keeps only indices inside the situation (and actor table); empty after filter inherits situation.",
           "type": "array",
-          "minItems": 1,
           "uniqueItems": true,
           "items": {
             "$ref": "#/$defs/ModelIndex"
@@ -817,8 +816,7 @@
         "event_type",
         "summary",
         "outcome_type",
-        "parameters",
-        "subject_actor_indices"
+        "parameters"
       ],
       "properties": {
         "scope": {
@@ -839,8 +837,8 @@
           "$ref": "common.v1.schema.json#/$defs/JsonObject"
         },
         "subject_actor_indices": {
+          "description": "Optional. Omit or [] → Server fills all world_view.actors indices.",
           "type": "array",
-          "minItems": 1,
           "uniqueItems": true,
           "items": {
             "$ref": "#/$defs/ModelIndex"
@@ -856,9 +854,7 @@
         "event_type",
         "summary",
         "outcome_type",
-        "parameters",
-        "target_actor_indices",
-        "agency"
+        "parameters"
       ],
       "properties": {
         "scope": {
@@ -879,14 +875,15 @@
           "$ref": "common.v1.schema.json#/$defs/JsonObject"
         },
         "target_actor_indices": {
+          "description": "Optional; empty/omit → Server uses all character-capable actors or all actors.",
           "type": "array",
-          "minItems": 1,
           "uniqueItems": true,
           "items": {
             "$ref": "#/$defs/ModelIndex"
           }
         },
         "agency": {
+          "description": "Optional structural noise on day settlement. Server does not materialize agency_gates from this field (no dialogue commitment_evidence channel). Omit preferred; EventCard path owns commitment-backed gates.",
           "anyOf": [
             {
               "type": "null"
@@ -909,6 +906,7 @@
       ]
     },
     "DialogueCommitmentSelector": {
+      "description": "Server-internal ordinal pair into DialogueRecord.turns[i].agency_commitments[j]. Not a model-authored EventCard field; Server assembles evidence from transcript only.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -925,14 +923,14 @@
       }
     },
     "EventCardAgencyGateSemanticDraft": {
+      "description": "Model-authored gate shell only (which outcomes/participants/requirement/policy). commitment_evidence is NOT model-owned: Server materializes it from dialogue.turns[*].agency_commitments. Zero transcript commitments ⇒ omit agency_gates or [].",
       "type": "object",
       "additionalProperties": false,
       "required": [
         "protected_outcome_indices",
         "participant_subject_indices",
         "requirement",
-        "policy",
-        "commitment_evidence"
+        "policy"
       ],
       "properties": {
         "protected_outcome_indices": {
@@ -956,14 +954,6 @@
         },
         "policy": {
           "$ref": "world-runtime.v1.schema.json#/$defs/AgencyPolicy"
-        },
-        "commitment_evidence": {
-          "type": "array",
-          "minItems": 1,
-          "uniqueItems": true,
-          "items": {
-            "$ref": "#/$defs/DialogueCommitmentSelector"
-          }
         }
       }
     },
@@ -1058,8 +1048,7 @@
         "situation",
         "title",
         "summary",
-        "result_options",
-        "agency_gates"
+        "result_options"
       ],
       "properties": {
         "situation": {
@@ -1084,6 +1073,7 @@
           }
         },
         "agency_gates": {
+          "description": "Optional gate shells. Omit or [] when dialogue has no NPC agency_commitments. Do not re-copy commitment rows or invent evidence; Server binds commitment_evidence from transcript. Non-empty gates are rejected at materialize when commitment count is 0.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/EventCardAgencyGateSemanticDraft"
@@ -1201,7 +1191,6 @@
       "additionalProperties": false,
       "required": [
         "impact",
-        "agency_decisions",
         "self_outcomes",
         "machine_decision"
       ],
@@ -1213,6 +1202,7 @@
           ]
         },
         "agency_decisions": {
+          "description": "Optional. Omit or [] when event.agency_gates is empty; Server defaults missing to []. Non-empty only when gates exist.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/AgencyDecisionSemanticDraft"
@@ -1267,6 +1257,7 @@
         },
         "automatic_events": {
           "type": "array",
+          "minItems": 1,
           "items": {
             "$ref": "#/$defs/DailySettlementEventIntent"
           }
@@ -1358,6 +1349,7 @@
           "$ref": "#/$defs/DialogueReplyDraft"
         },
         "commitments": {
+          "description": "Always present. Use [] when no face-to-face executable commitment. Non-empty only for explicit NPC promises that EventCard agency_gates may cite.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/AgencyCommitmentSemanticDraft"
@@ -2066,8 +2058,8 @@
           "$ref": "common.v1.schema.json#/$defs/Identifier"
         },
         "agency_commitments": {
+          "description": "character_mind turns always project this array (including [] when no promise). Other speakers must omit the field.",
           "type": "array",
-          "minItems": 1,
           "items": {
             "$ref": "#/$defs/ProviderAgencyCommitmentView"
           }
@@ -2086,6 +2078,9 @@
             ]
           },
           "then": {
+            "required": [
+              "agency_commitments"
+            ],
             "properties": {
               "agency_commitments": {
                 "type": "array",

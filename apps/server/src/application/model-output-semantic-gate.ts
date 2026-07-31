@@ -8,6 +8,11 @@ import {
   type JsonValue,
 } from "@luoxia/contracts-runtime";
 
+import {
+  closeAgencyGateOutcomeLinks,
+  effectiveEventCardAgencyGates,
+  withEffectiveOutcomeSubjects,
+} from "./event-card-draft-normalize.js";
 import type {
   ModelRequestDocument,
   ModelResponseDocument,
@@ -380,6 +385,15 @@ function assertDirectorDailyResponse(
     expectProperty(output, "automatic_events", "DirectorDailySettlementOutput"),
     "DirectorDailySettlementOutput.automatic_events",
   );
+  // Empty is closed (models otherwise always emit []). Multiple intents are
+  // allowed; each is AutomaticEvent (auto-applied), never an EventCard envelope.
+  if (intents.length < 1) {
+    throw fault(
+      "model.output.daily_settlement_event_count",
+      "director.daily_settlement must return at least one automatic_events intent",
+      { automatic_event_count: intents.length },
+    );
+  }
 
   for (const [draftIndex, intent] of intents.entries()) {
     const path =
@@ -393,13 +407,20 @@ function assertDirectorDailyResponse(
       `${path}.parameters`,
     );
     if (scope === "world") {
-      const indices = assertIndexSelectorsWithin(
-        intent,
-        "subject_actor_indices",
-        actors.length,
-        path,
-      );
-      assertDailyIntentActorsActive(actors, indices, path);
+      // Empty subject_actor_indices allowed; Server materialize fills all actors.
+      if (
+        Object.prototype.hasOwnProperty.call(intent, "subject_actor_indices") &&
+        Array.isArray(intent["subject_actor_indices"]) &&
+        (intent["subject_actor_indices"] as unknown[]).length > 0
+      ) {
+        const indices = assertIndexSelectorsWithin(
+          intent,
+          "subject_actor_indices",
+          actors.length,
+          path,
+        );
+        assertDailyIntentActorsActive(actors, indices, path);
+      }
       if (Object.prototype.hasOwnProperty.call(intent, "agency")) {
         throw fault(
           "model.semantic.daily_intent_agency_scope",
@@ -410,13 +431,22 @@ function assertDirectorDailyResponse(
       continue;
     }
     if (scope === "character") {
-      const indices = assertIndexSelectorsWithin(
-        intent,
-        "target_actor_indices",
-        actors.length,
-        path,
-      );
-      assertDailyIntentActorsActive(actors, indices, path);
+      if (
+        Object.prototype.hasOwnProperty.call(intent, "target_actor_indices") &&
+        Array.isArray(intent["target_actor_indices"]) &&
+        (intent["target_actor_indices"] as unknown[]).length > 0
+      ) {
+        const indices = assertIndexSelectorsWithin(
+          intent,
+          "target_actor_indices",
+          actors.length,
+          path,
+        );
+        assertDailyIntentActorsActive(actors, indices, path);
+      }
+      // Daily settlement has no dialogue commitment_evidence channel. Model may
+      // still emit character.agency shape noise; Server materialize ignores it
+      // and never builds agency_gates here (EventCard owns commitment-backed gates).
       const agency = intent["agency"];
       if (agency !== null && agency !== undefined) {
         const agencyObject = expectJsonObject(agency, `${path}.agency`);
@@ -823,6 +853,7 @@ function assertCharacterDialogueResponse(
     expectProperty(dialogue, "participants", "DialogueRecord"),
     "DialogueRecord.participants",
   );
+  // commitments always required; [] means no face-to-face promise for EventCard.
   const commitments = objectArray(
     expectProperty(output, "commitments", "CharacterDialogueOutput"),
     "CharacterDialogueOutput.commitments",
@@ -1202,6 +1233,24 @@ function assertEventSituationDraft(
   actorCount: number,
   path: string,
 ): number[] {
+  // situation.context is Server-owned empty object after materialize. Model may
+  // omit it; non-empty authoring (e.g. world_view echo) is rejected.
+  if (Object.prototype.hasOwnProperty.call(situation, "context")) {
+    const context = expectJsonObject(
+      expectProperty(situation, "context", "EventSituationSemanticDraft"),
+      `${path}.context`,
+    );
+    if (Object.keys(context).length > 0) {
+      throw fault(
+        "model.semantic.event_situation_context_not_empty",
+        "EventSituationSemanticDraft.context is Server-materialized empty; omit context or send {}",
+        {
+          path: `${path}.context`,
+          key_count: Object.keys(context).length,
+        },
+      );
+    }
+  }
   return assertIndexSelectorsWithin(
     situation,
     "subject_actor_indices",
@@ -1240,9 +1289,9 @@ function assertEventCardDraft(
       },
     );
   }
-  const outcomes: JsonObject[] = [];
+  const rawOutcomes: JsonObject[] = [];
   for (const [optionIndex, option] of options.entries()) {
-    outcomes.push(
+    rawOutcomes.push(
       ...objectArray(
         expectProperty(
           option,
@@ -1266,31 +1315,19 @@ function assertEventCardDraft(
       `${path}.result_options[${optionIndex}].presentation`,
     );
   }
-  const gates = objectArray(
-    expectProperty(card, "agency_gates", "EventCardSemanticDraft"),
-    `${path}.agency_gates`,
+  // agency_gates: model shells only. commitment_evidence is Server-owned from
+  // dialogue (not on model draft). Zero commitments ⇒ effective [].
+  const rawGates = [...effectiveEventCardAgencyGates(card, dialogue)];
+  // Server closes index graph: inherit/repair subjects; fill gate back-links.
+  const subjectClosed = withEffectiveOutcomeSubjects(
+    rawOutcomes,
+    situationActorIndices,
+    actorCount,
   );
-  // Non-empty gate requires commitment_evidence; else use agency_gates: [].
-  for (const [gateIndex, gate] of gates.entries()) {
-    const evidence = objectArray(
-      expectProperty(
-        gate,
-        "commitment_evidence",
-        "EventCardAgencyGateSemanticDraft",
-      ),
-      `${path}.agency_gates[${gateIndex}].commitment_evidence`,
-    );
-    if (evidence.length === 0) {
-      throw fault(
-        "model.semantic.agency_gate_without_commitment_evidence",
-        "EventCard agency_gates must cite at least one dialogue commitment_evidence entry; use an empty agency_gates array when no NPC commitment applies",
-        {
-          path: `${path}.agency_gates[${gateIndex}]`,
-          gate_index: gateIndex,
-        },
-      );
-    }
-  }
+  const { outcomes, gates } = closeAgencyGateOutcomeLinks(
+    subjectClosed,
+    rawGates,
+  );
   assertSemanticEventGraph(
     outcomes,
     gates,
@@ -1298,13 +1335,6 @@ function assertEventCardDraft(
     situationActorIndices,
     path,
   );
-  for (const [gateIndex, gate] of gates.entries()) {
-    assertDialogueCommitmentSelectors(
-      gate,
-      dialogue,
-      `${path}.agency_gates[${gateIndex}]`,
-    );
-  }
 }
 
 function assertNarrativeSegments(
@@ -1339,66 +1369,6 @@ function assertNarrativeSegments(
         `${path}.segments[${segmentIndex}]`,
       );
     }
-  }
-}
-
-function assertDialogueCommitmentSelectors(
-  gate: JsonObject,
-  dialogue: JsonObject,
-  path: string,
-): void {
-  const turns = objectArray(
-    expectProperty(dialogue, "turns", "DialogueRecord"),
-    "DialogueRecord.turns",
-  );
-  const selectors = objectArray(
-    expectProperty(
-      gate,
-      "commitment_evidence",
-      "EventCardAgencyGateSemanticDraft",
-    ),
-    `${path}.commitment_evidence`,
-  );
-  const seen = new Set<string>();
-  for (const [selectorIndex, selector] of selectors.entries()) {
-    const selectorPath = `${path}.commitment_evidence[${selectorIndex}]`;
-    const turnIndex = assertModelIndexWithin(
-      selector,
-      "turn_index",
-      turns.length,
-      selectorPath,
-    );
-    const turn = turns[turnIndex];
-    if (turn === undefined) {
-      throw fault(
-        "model.semantic.index_out_of_range",
-        "Dialogue commitment selector turn is outside the verified dialogue",
-        { path: `${selectorPath}.turn_index`, index: turnIndex },
-      );
-    }
-    const commitments = objectArray(
-      expectProperty(turn, "agency_commitments", "DialogueTurn"),
-      `DialogueRecord.turns[${turnIndex}].agency_commitments`,
-    );
-    const commitmentIndex = assertModelIndexWithin(
-      selector,
-      "commitment_index",
-      commitments.length,
-      selectorPath,
-    );
-    const key = `${turnIndex}:${commitmentIndex}`;
-    if (seen.has(key)) {
-      throw fault(
-        "model.semantic.commitment_selector_duplicate",
-        "EventCard agency gate cannot cite the same dialogue commitment twice",
-        {
-          path: `${path}.commitment_evidence`,
-          turn_index: turnIndex,
-          commitment_index: commitmentIndex,
-        },
-      );
-    }
-    seen.add(key);
   }
 }
 
@@ -1640,6 +1610,24 @@ function assertReactionAgency(
     expectProperty(event, "agency_gates", "CharacterReactEventInput"),
     "CharacterReactEventInput.agency_gates",
   );
+  // agency_decisions optional on draft; omit → [].
+  const decisions = Object.prototype.hasOwnProperty.call(
+    reaction,
+    "agency_decisions",
+  )
+    ? objectArray(
+        expectProperty(
+          reaction,
+          "agency_decisions",
+          "CharacterReactionSemanticDraft",
+        ),
+        `CharacterReactOutput.reactions[${reactionIndex}].agency_decisions`,
+      )
+    : [];
+  // No gates on the event: ignore model-authored agency_decisions noise.
+  if (gates.length === 0) {
+    return;
+  }
   const eligibleGateIndices = new Set(
     gates
       .map((gate, gateIndex) => ({ gate, gateIndex }))
@@ -1654,14 +1642,6 @@ function assertReactionAgency(
         ).includes(characterId),
       )
       .map(({ gateIndex }) => gateIndex),
-  );
-  const decisions = objectArray(
-    expectProperty(
-      reaction,
-      "agency_decisions",
-      "CharacterReactionSemanticDraft",
-    ),
-    `CharacterReactOutput.reactions[${reactionIndex}].agency_decisions`,
   );
   const decisionGateIndices = new Set<number>();
   for (const [decisionIndex, decision] of decisions.entries()) {

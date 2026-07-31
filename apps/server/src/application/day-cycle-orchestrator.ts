@@ -1003,12 +1003,63 @@ function materializeAutomaticEventCandidate(input: {
   }
   const actorIndexField =
     scope === "world" ? "subject_actor_indices" : "target_actor_indices";
-  const actorIndices = readModelIndices(
-    intent,
-    actorIndexField,
-    "DailySettlementEventIntent",
-    input.actors.length,
-  );
+  // Empty/omit indices (structural default; model still chose event_type/summary):
+  // - world → all world_view.actors
+  // - character → only actors that own exactly one character action machine
+  //   (never demote character→world; never expand then drop player silently)
+  let actorIndices: readonly number[];
+  if (
+    !Object.prototype.hasOwnProperty.call(intent, actorIndexField) ||
+    (Array.isArray(intent[actorIndexField]) &&
+      (intent[actorIndexField] as unknown[]).length === 0)
+  ) {
+    actorIndices =
+      scope === "character"
+        ? Object.freeze(
+            characterMachineActorIndices(input.worldState, input.actors),
+          )
+        : Object.freeze(input.actors.map((_, index) => index));
+  } else {
+    actorIndices = readModelIndices(
+      intent,
+      actorIndexField,
+      "DailySettlementEventIntent",
+      input.actors.length,
+    );
+    if (scope === "character") {
+      // Explicit model indices: drop non-machine entities so react targets
+      // match situation subjects / target_entity_ids (same set).
+      actorIndices = Object.freeze(
+        actorIndices.filter((index) => {
+          const actor = input.actors[index];
+          if (actor === undefined) {
+            return false;
+          }
+          return entityHasCharacterActionMachine(
+            input.worldState,
+            expectString(actor, "entity_id", "DirectorActorView"),
+          );
+        }),
+      );
+    }
+  }
+  // Explicit indices that filter to nothing → same structural default as omit
+  // (do not fail the day on mis-pointed player/place indices).
+  if (actorIndices.length === 0) {
+    actorIndices =
+      scope === "character"
+        ? Object.freeze(
+            characterMachineActorIndices(input.worldState, input.actors),
+          )
+        : Object.freeze(input.actors.map((_, index) => index));
+  }
+  if (actorIndices.length === 0) {
+    throw new EngineFault(
+      "day_cycle.orchestration.event_actors_empty",
+      "Daily settlement intent has no eligible actors after Server index defaulting",
+      { proposal_id: input.proposalId, scope },
+    );
+  }
   const situationActors = actorIndices.map(
     (actorIndex) => input.actors[actorIndex] as JsonObject,
   );
@@ -1026,12 +1077,10 @@ function materializeAutomaticEventCandidate(input: {
     situationEntityRefs.map(subjectFromEntityRef),
   );
   const outcomeId = "outcome_0";
-  const agencyValue = intent["agency"];
-  const hasAgency =
-    scope === "character" &&
-    agencyValue !== null &&
-    agencyValue !== undefined;
-  const gateId = hasAgency ? "gate_0" : undefined;
+  // Daily settlement has no dialogue commitment_evidence channel. Server does
+  // not materialize agency gates from invented character.agency (empty
+  // commitment_evidence would be a structural lie). EventCard path owns
+  // commitment-backed gates.
   const outcome = Object.freeze({
     outcome_id: outcomeId,
     outcome_type: expectString(
@@ -1044,9 +1093,6 @@ function materializeAutomaticEventCandidate(input: {
       expectProperty(intent, "parameters", "DailySettlementEventIntent"),
       "DailySettlementEventIntent.parameters",
     ),
-    ...(gateId === undefined
-      ? {}
-      : { requires_agency_gate_id: gateId }),
   });
   const situation = Object.freeze({
     event_type: expectString(
@@ -1077,37 +1123,6 @@ function materializeAutomaticEventCandidate(input: {
       expectString(entityRef, "entity_id", "EntityRef"),
     ),
   );
-  let agencyGates: readonly JsonObject[] = Object.freeze([]);
-  if (hasAgency) {
-    const agency = expectJsonObject(
-      agencyValue as JsonValue,
-      "DailySettlementEventIntent.agency",
-    );
-    agencyGates = Object.freeze([
-      Object.freeze({
-        gate_id: gateId as string,
-        protected_outcome_ids: Object.freeze([outcomeId]),
-        participants: situationEntityRefs,
-        requirement: Object.freeze({
-          semantic_intent: expectString(
-            agency,
-            "semantic_intent",
-            "DailySettlementAgencyIntent",
-          ),
-          subjects,
-          terms: expectJsonObject(
-            expectProperty(agency, "terms", "DailySettlementAgencyIntent"),
-            "DailySettlementAgencyIntent.terms",
-          ),
-        }),
-        policy: expectJsonObject(
-          expectProperty(agency, "policy", "DailySettlementAgencyIntent"),
-          "DailySettlementAgencyIntent.policy",
-        ),
-        commitment_evidence: Object.freeze([]),
-      }),
-    ]);
-  }
   return Object.freeze({
     proposal_kind: "automatic.character",
     proposal_id: input.proposalId,
@@ -1115,8 +1130,50 @@ function materializeAutomaticEventCandidate(input: {
     situation,
     target_entity_ids: targetEntityIds,
     candidate_outcomes: Object.freeze([outcome]),
-    agency_gates: agencyGates,
+    agency_gates: Object.freeze([]),
   });
+}
+
+function characterMachineActorIndices(
+  worldState: JsonObject,
+  actors: readonly JsonObject[],
+): number[] {
+  const indices: number[] = [];
+  for (const [index, actor] of actors.entries()) {
+    if (
+      entityHasCharacterActionMachine(
+        worldState,
+        expectString(actor, "entity_id", "DirectorActorView"),
+      )
+    ) {
+      indices.push(index);
+    }
+  }
+  return indices;
+}
+
+function entityHasCharacterActionMachine(
+  worldState: JsonObject,
+  entityId: string,
+): boolean {
+  const machines = asObjectArray(
+    expectProperty(worldState, "state_machines", "WorldState"),
+    "WorldState.state_machines",
+  );
+  let matches = 0;
+  for (const machine of machines) {
+    const owner = expectJsonObject(
+      expectProperty(machine, "owner", "StateMachineInstanceState"),
+      "StateMachineInstanceState.owner",
+    );
+    if (
+      expectString(owner, "owner_kind", "StateMachineOwner") === "character" &&
+      expectString(owner, "entity_id", "StateMachineOwner") === entityId
+    ) {
+      matches += 1;
+    }
+  }
+  return matches === 1;
 }
 
 function materializeActorEntityRef(input: {
@@ -1474,6 +1531,8 @@ function createReactionBatch(
           draft: reaction,
           event,
           subjectiveView,
+          // proposal_id is Server-owned automatic identity, not a model event field
+          proposalId,
         }),
       }),
     ]),
@@ -1484,6 +1543,7 @@ function materializeCharacterReactionCandidate(input: {
   readonly draft: JsonObject;
   readonly event: JsonObject;
   readonly subjectiveView: JsonObject;
+  readonly proposalId: string;
 }): JsonObject {
   const gates = asObjectArray(
     expectProperty(
@@ -1496,41 +1556,51 @@ function materializeCharacterReactionCandidate(input: {
   const gateIds = gates.map((gate) =>
     expectString(gate, "gate_id", "CharacterReactAgencyGateInput"),
   );
-  const agencyDecisions = Object.freeze(
-    asObjectArray(
-      expectProperty(
-        input.draft,
-        "agency_decisions",
-        "CharacterReactionSemanticDraft",
-      ),
-      "CharacterReactionSemanticDraft.agency_decisions",
-    ).map((decision, ordinal) => {
-      const gateIndex = readModelIndex(
+  // agency_decisions optional on draft; omit → [].
+  const rawDecisions = Object.prototype.hasOwnProperty.call(
+    input.draft,
+    "agency_decisions",
+  )
+    ? asObjectArray(
         expectProperty(
-          decision,
-          "gate_index",
-          "AgencyDecisionSemanticDraft",
+          input.draft,
+          "agency_decisions",
+          "CharacterReactionSemanticDraft",
         ),
-        `AgencyDecisionSemanticDraft[${ordinal}].gate_index`,
-        gateIds.length,
-      );
-      return Object.freeze({
-        gate_id: gateIds[gateIndex] as string,
-        stance: expectString(
-          decision,
-          "stance",
-          "AgencyDecisionSemanticDraft",
-        ),
-        terms: expectJsonObject(
-          expectProperty(
-            decision,
-            "terms",
-            "AgencyDecisionSemanticDraft",
-          ),
-          "AgencyDecisionSemanticDraft.terms",
-        ),
-      });
-    }),
+        "CharacterReactionSemanticDraft.agency_decisions",
+      )
+    : [];
+  // No gates → ignore model agency_decisions (common flash noise).
+  const agencyDecisions = Object.freeze(
+    gateIds.length === 0
+      ? []
+      : rawDecisions.map((decision, ordinal) => {
+          const gateIndex = readModelIndex(
+            expectProperty(
+              decision,
+              "gate_index",
+              "AgencyDecisionSemanticDraft",
+            ),
+            `AgencyDecisionSemanticDraft[${ordinal}].gate_index`,
+            gateIds.length,
+          );
+          return Object.freeze({
+            gate_id: gateIds[gateIndex] as string,
+            stance: expectString(
+              decision,
+              "stance",
+              "AgencyDecisionSemanticDraft",
+            ),
+            terms: expectJsonObject(
+              expectProperty(
+                decision,
+                "terms",
+                "AgencyDecisionSemanticDraft",
+              ),
+              "AgencyDecisionSemanticDraft.terms",
+            ),
+          });
+        }),
   );
   const selfOutcomes = Object.freeze(
     asObjectArray(
@@ -1580,11 +1650,7 @@ function materializeCharacterReactionCandidate(input: {
     ),
     source_event: Object.freeze({
       source_kind: "automatic",
-      proposal_id: expectString(
-        input.event,
-        "proposal_id",
-        "CharacterReactEventInput",
-      ),
+      proposal_id: input.proposalId,
     }),
   });
 }

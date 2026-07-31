@@ -129,7 +129,7 @@ ContentBundle 直接初始化角色行动状态机、世界状态机、角色私
 ```text
 角色行动状态机与世界状态机推进当日意图，形成客观轨迹
   → Runtime 以最新已提交 world revision 投影 Director 动态上下文
-  → director.daily_settlement 返回 DailySettlementEventIntent[]（`automatic_events`，允许空）
+  → director.daily_settlement 返回 DailySettlementEventIntent[]（`automatic_events` 至少 1 条，可多条；空数组失败）
   → daily proposal journal 按 model request + draft ordinal 分配稳定根 ID
   → Server 从 verified 意图 / request / snapshot / Content lock 本地装配 Materialized 候选
       ├─ WorldEvent candidate → RulePlugin 裁决并落地
@@ -162,12 +162,12 @@ ContentBundle 直接初始化角色行动状态机、世界状态机、角色私
 
 事件只有两种派发模式：
 
-1. **AutomaticEvent**：由 `director.daily_settlement` 派发并自动处理。WorldEvent 直接交规则；CharacterEvent 交给受影响角色的小 LLM 决定主观影响、主体选择与自身状态机变化。NPC 在日结中的移动属于此模式，不占用玩家 EventBudget。
+1. **AutomaticEvent**：由 `director.daily_settlement` 派发并**自动落地**（无需 EventCard、不扣玩家 AP、无需玩家开启）。WorldEvent 直接交规则；CharacterEvent 交给受影响角色的小 LLM 决定主观影响、主体选择与自身状态机变化。NPC 在日结中的移动属于此模式。
 2. **EventCard**：只由 `director.dialogue_events` 据已提交 transcript 提出；System reply 与规划输出不夹带事件。形状与时序的唯一细则见 **§5.2.4**。此处只定权力边界：`remaining === 0` 时跳过该模型调用；`remaining > 0` 时必须调用且草稿经 RulePlugin **Accept 并 publish**（Reject 则对话失败，不得静默无卡）。不得按 transcript 形态猜测是否跳过。Provider 投影可省略状态机 outgoing transitions 与空 `objective_components`；generation 指令不携带 `$schema` 元 URI。
 
 玩家地图移动是独立导航命令：`navigation_resolver` → `EntityRelocateOp`，不调用模型、不生成 EventCard、不扣 AP。结果性行动无全局文本命令行；玩家只在已选 NPC/System 对话中表达，由 Director 观察 transcript 提出 EventCard。对 System 的遥远物理目标只得指引，不视为行动已发生。
 
-事件是一次结果性因果，不是任务或话题列表。EventCard 不调用 Character Mind。NPC 回复可附带 `AgencyCommitmentSemanticDraft`，Runtime 仅将 verified 输出封装为 turn 上的 AgencyCommitment。EventCard 只提出 `EventCardAgencyGateSemanticDraft`；日结算 agency 意图由 Server 本地装配 `MaterializedAgencyGateCandidate`（`commitment_evidence=[]` 不由模型发明）。Director 只能引用既有 commitment，不能编造同意。受保护结果缺少匹配且仍有效的承诺则拒发；Automatic CharacterEvent 的 gate 只用目标 Mind 对同一 requirement 的 AgencyDecision。
+事件是一次结果性因果，不是任务或话题列表。EventCard 不调用 Character Mind。NPC 回复可附带 `AgencyCommitmentSemanticDraft`，Runtime 仅将 verified 输出封装为 turn 上的 AgencyCommitment。EventCard 模型草稿若写 `agency_gates`，只交**门禁壳**（保护哪些 outcome、参与者、requirement、policy）；`commitment_evidence` 由 Server 从 transcript 的 `agency_commitments` 确定性装配，不由事件模型抄写。**日结算不开放 agency 门禁路径**：character 意图上的 `agency` 被忽略，物化 `agency_gates` 恒为 `[]`（无 dialogue commitment 证据链）。Director 不能编造同意；受保护结果缺少匹配且仍有效的承诺则拒发。
 
 ### 5.2.4 EventCard：开封信封（形状、时序、agency、Stage）
 
@@ -178,6 +178,17 @@ ContentBundle 直接初始化角色行动状态机、世界状态机、角色私
 **谁发起**：Director 据关系、世界状态与 transcript 决定是否出卡与封存内容；玩家不挑选模式。
 
 **形状**：一次观察恰好一张卡；恰好一条 `result_options[0]`（内部封存身份）；多影响在其 `outcomes[]` → 封存 `EventOutcomeOp[]`。
+
+**模型 vs Server 所有权（dialogue_events / EventCard 草稿）**：
+
+| 模型拥有（判断，不可本地猜） | Server 拥有（结构/身份物化） |
+|---|---|
+| title、summary、situation.event_type/summary、**subject_actor_indices（主索引集）** | situation.context → 固定 `{}`；outcome.subject_indices 省略/误抄 → **继承 situation** |
+| outcomes 的 outcome_type、parameters；可选显式 subject_indices（⊆ situation） | result_options 壳、本地 ID、LocalizedText、day、cost、proposal_id |
+| presentation 叙事语义 | presentation_id 与封存结构 |
+| 可选 **agency 门禁壳**（protected / participants / requirement / policy）；outcome 可省略 gate 回指；**不写** `commitment_evidence` | 缺省 gates `[]`；零 transcript 承诺时丢弃非空壳；**从 dialogue.turns[*].agency_commitments 装配 commitment_evidence**；**补全** gate↔outcome 双向闭合 |
+
+不得按关键词或 transcript 形态本地发明卡内容或 outcome_type。
 
 **时序**：
 1. **publish**：RulePlugin 裁决唯一 option → `SealedEventResult`；与 AP charge 同包提交；卡 `available`。
@@ -192,7 +203,7 @@ available 卡 + SealedEventResult
       └─ invalidate：preconditions 空；至少一条 sealed precondition 不成立 → event_card.invalidate
 ```
 
-**Agency**：`agency_gates` 仅引用真实 dialogue commitment evidence；无承诺的强制/社交后果用 `agency_gates: []`。无证据 gate 或越界 commitment 索引 fail-closed。受保护 outcome 在封存时写入 `agency.commitment_valid` 前置条件。
+**Agency / 证据不双写**：`character.dialogue` **必须**输出 `commitments` 数组（无当面承诺时 `[]`）。Server 写入 turn 后，Provider 对 `character_mind` 回合**始终投影** `agency_commitments`（含 `[]`）给 `director.dialogue_events`——这是**只读上下文**，不是让事件模型再抄一遍。`commitment_evidence` **不是** EventCard 模型草稿字段；物化时 Server 仅从 `dialogue.turns[*].agency_commitments` 确定性装配证据引用。事件模型若写 `agency_gates`，只写门禁壳（保护哪些 outcome、参与者、requirement、policy）；零承诺时有效 gates 为 `[]` 并清除悬空 `requires_agency_gate_index`。受保护 outcome 在封存时写入 `agency.commitment_valid` 前置条件。
 
 **Stage**：若封存含 `stage.open`，仅在 **trigger 成功后** 打开；胜负由 `stage_outcome.resolve`，不在卡上预封。日切离 player 时同包 expire 未开启卡；下一日 player 同包 `event_budget.open`。
 
@@ -501,7 +512,7 @@ ModelGateway 是模型可见字段的唯一投影所有者：它从已经验证�
 固定入口与 ModelProfile 只有以下七个，彼此独立：
 
 ```text
-director.daily_settlement  → DailySettlementEventIntent[]（意图层；空数组=模型判定无自动事件）
+director.daily_settlement  → DailySettlementEventIntent[]（意图层；至少 1 条、可多条；空失败；自动落地，非 EventCard）
 director.dialogue_events   → EventCardSemanticDraft[]（长度恒为 1；仅 remaining>0 时调用）
 director.system_dialogue   → DialogueReplyDraft
 director.goal_plan         → GoalPlanSemanticDraft
@@ -510,11 +521,20 @@ character.dialogue         → DialogueReplyDraft + AgencyCommitmentSemanticDraf
 character.react            → CharacterReactionSemanticDraft[]（与 input.events 按 ordinal 对应）
 ```
 
-`director.daily_settlement` 的模型输出是 **意图层**：有无事件、scope、event_type、summary、outcome_type、parameters、显式 actor 索引，以及 character 可选 agency 意图。主体选择必须由模型在 verified `world_view.actors` 上显式给出，本地不得全员默认。每条意图装配为恰好一个 outcome 的 Materialized 候选（RulePlugin 只 Accept/Reject，不再多选结果）。结构装配（EntityRef、proposal_id、day、locale、gate/outcome 本地 ID、`context={}`）只由 Server 从 verified 意图与锁定快照确定性完成；禁止猜语义字段或补洞。Provider 只负责把已路由的 invocation 发给部署显式绑定的模型实现；形状约束以该 adapter 的能力为准，**不得**为日结算再挂第二家供应商默认/可选回退。正式 Schema 与语义门禁仍是唯一验收真相。
+`director.daily_settlement` 的模型输出是 **意图层**：`automatic_events` **至少 1 条，可多条**（空数组会被模型偷懒成常态，故合同禁止空，不禁止多）。每条是 **AutomaticEvent**：经 RulePlugin 后**自动提交**进世界，**不**走 EventCard 封存/扣 AP/开启。
+
+**模型 vs Server（daily_settlement）**：
+
+| 模型拥有 | Server 拥有 |
+|---|---|
+| 每条 intent 的 scope、event_type、summary、outcome_type、parameters；可选 subject/target 索引 | proposal_id、day、locale、EntityRef、outcome 本地 ID、`context={}`；**空索引默认**（world=全 actors，character=仅有 action machine 的 actors）；Materialized 壳；**日结 `agency_gates` 恒为 []**（无 dialogue commitment 证据链，不物化空证据 gate） |
+| 不得输出空 `automatic_events` | 不得 demote character→world；不得按关键词发明自动事件；commitment 背书的 agency 只在 EventCard 路径 |
+
+主体索引：模型可显式给出；**省略或空数组时 Server 做结构默认**——world 意图填 `world_view.actors` 全表下标，character 意图仅填**恰好一台 character action machine** 的 actor 下标（不含玩家等无机器实体）。不得按关键词发明 event_type/summary。每条意图装配为恰好一个 outcome 的 Materialized 候选（RulePlugin 只 Accept/Reject）。结构装配只由 Server 从 verified 意图与锁定快照确定性完成；禁止猜语义字段或补洞。Provider 只负责把已路由的 invocation 发给部署显式绑定的模型实现；形状约束以该 adapter 的能力为准，**不得**为日结算再挂第二家供应商默认/可选回退。正式 Schema 与语义门禁仍是唯一验收真相。
 
 不存在独立 `System.*`、`Narrator.render` 或 `materialization.spec` 文本模型入口。`request_kind` 是 ModelRequest 的唯一入口 discriminator；ModelResponse 必须回显 request_kind、resident_context_digest、dynamic_input_digest 与 output_digest。ModelGateway 先把已经 Schema 验证的 WorldSnapshot 与 ModelRequest 封成 prepared invocation；Provider 调用只接受持久化 Journal 在数据库确认 dispatched 后签发的一次性 opaque authorization。响应必须再经过 Schema、digest、correlation 与入口语义门禁，之后才能把 snapshot、request、response、VerifiedModelOutputRef、world ID 与观察 revision 封成同一份 verified receipt；从数据库恢复时也只能通过同一 Gateway 重新验证全部四份合同，禁止公开 seal 工厂。prepared invocation 与 verified receipt 的来源集合属于具体 Gateway 实例；Journal、RulePluginGateway 与 proposal journal 只能持有配对生产实例的只读 verifier，不接受另一实例生成的对象。`failed` 输出直接成为 EngineFault，绝不签发 proof。
 
-ModelOutput 只表达模型真正拥有的语义选择：文本、语义 Draft，以及 verified request 数组中的局部 index。EventCard 的 situation / outcome / agency 主体 index 一律指向同一 `world_view.actors` 表；outcome 与 gate 主体必须是 situation 已选 actor 的子集，禁止再引入第二套 situation-local 编号。它不得生成 UUID、day、source、locale、visibility、cost、WorldState 写路径或 EffectOp。Server 以 verified request、锁定 snapshot 与 Content lock 为唯一输入，在本地补齐根身份、逻辑时间、LocalizedText、精确 Entity / DialogueTurn / Fact / Catalog / StateMachine 引用和来源证明；这些物化结果仍只是候选。RulePlugin 独占合法性、visibility、cost、WorldLaw 与允许的 EffectOp，World Core 独占最终状态变换。七种入口分别校验自己的最小关联：Character resident、主观角色与知识 viewer 必须一致，角色状态机实例/owner 只在本地投影前核验而不进入模型上下文；对话必须 active 且回复当前最后 human turn；所有 ModelIndex 必须在对应 request 集合内，图引用必须闭合；`character.react` 必须按 ordinal 对每个输入 event 返回一个 reaction，并精确覆盖该角色参与的 gate。Character Mind 的 commitment 只是未落地语义 Draft：Server 仅可新增 commitment ID、时间与精确主体引用，其余字段必须逐项保持 verified Draft，再经 append-only 对话 Packet 写入。Director、System、客户端和内容包均无 commitment 写入口。EventCard 结果叙事与语义结果一同提出并在发卡时封存，但 NPC 原话只能用 turn index 引用既有 DialogueTurn；资产引擎直接根据 Definition、ArtProfile、MaterializationProfile 与视觉槽生成规格。
+ModelOutput 只表达模型真正拥有的语义选择：文本、语义 Draft，以及 verified request 数组中的局部 index。EventCard 的 situation / outcome / agency 主体 index 一律指向同一 `world_view.actors` 表；outcome 与 gate 主体必须是 situation 已选 actor 的子集，禁止再引入第二套 situation-local 编号。**结构壳**（空 `situation.context`、缺省空 `agency_gates`、ID/locale/LocalizedText）由 Server 物化，不要求模型编造。它不得生成 UUID、day、source、locale、visibility、cost、WorldState 写路径或 EffectOp。Server 以 verified request、锁定 snapshot 与 Content lock 为唯一输入，在本地补齐根身份、逻辑时间、LocalizedText、精确 Entity / DialogueTurn / Fact / Catalog / StateMachine 引用和来源证明；这些物化结果仍只是候选。RulePlugin 独占合法性、visibility、cost、WorldLaw 与允许的 EffectOp，World Core 独占最终状态变换。七种入口分别校验自己的最小关联：Character resident、主观角色与知识 viewer 必须一致，角色状态机实例/owner 只在本地投影前核验而不进入模型上下文；对话必须 active 且回复当前最后 human turn；所有 ModelIndex 必须在对应 request 集合内，图引用必须闭合；`character.react` 必须按 ordinal 对每个输入 event 返回一个 reaction，并精确覆盖该角色参与的 gate。Character Mind 的 commitment 只是未落地语义 Draft：Server 仅可新增 commitment ID、时间与精确主体引用，其余字段必须逐项保持 verified Draft，再经 append-only 对话 Packet 写入。Director、System、客户端和内容包均无 commitment 写入口。EventCard 结果叙事与语义结果一同提出并在发卡时封存，但 NPC 原话只能用 turn index 引用既有 DialogueTurn；资产引擎直接根据 Definition、ArtProfile、MaterializationProfile 与视觉槽生成规格。
 
 RulePluginGateway 不保存全局模型证明，也不按 request ID 猜测证明。每次 `resolve` 必须显式传入本次作用域的 verified model receipts（没有模型输入时也传空数组），并在调用 RulePlugin adapter 前确认请求内每个 proof 与某一 receipt 完全一致、receipt 属于同一 world，且 candidate 的 `draft_ordinal` 与内容逐值对应原 ModelOutput 的精确 Draft 成员；reply 与 commitment append 同样必须绑定原 verified 输出。模型 proof 的 `basis_revision` 表示模型观察世界的 revision；连续裁决同一次模型输出时它可以小于当前 RulePluginRequest revision，但不得大于当前 revision。PacketProposal 仍必须使用本次 RulePluginRequest 的当前 basis revision。
 
@@ -538,9 +558,33 @@ Character：persona_blocks
   → 最小 Provider input
 ```
 
+### 12.1.1 槽位式 Prompt 与能力分离
+
+ContentBundle 的 mode / persona `PromptFragment` 是**固定短模板**：只声明 **mode 标签、输出槽义务、与 Server 分工**；**不是**叙事教程，**不是** few-shot。
+
+**禁止写入 PromptFragment 正文**（避免照着学）：
+
+- 完整示例 JSON / 示例卡片 title·summary·event_type
+- 编造的对话对白、「若玩家说 X 则答 Y」剧本
+- 与 Schema/Server 已负责行为重复的长说明（如手写双向 gate 教程、要求模型填写 `situation.context`）
+
+**允许**：字段/槽位名、长度约束、索引空间名称（`world_view.actors`）、人设身份与口吻（内容真相，非范文）、一句自动落地/开封信封等产品边界。
+
+**动态真相只进 Provider `input` 投影**（transcript、actors、traces），不把「样例世界」写进 resident 文本。
+
+**槽位 ↔ 能力（与 §5.2.4 / 日结表一致）**：
+
+| 槽位类 | 谁填 |
+|---|---|
+| 语义槽：title/summary/reply、event_type、outcome_type、situation 主体索引、parameters、presentation、`commitments`（无承诺时必写 `[]`）、可选 agency **门禁壳**（无 commitment_evidence）、react 的 impact/machine/self_outcomes | **模型** |
+| 结构槽：`situation.context={}`；`commitment_evidence` 从 transcript 装配；缺省 `agency_gates=[]` / `agency_decisions=[]`；日结空索引默认；outcome 主体继承；gate 回指闭合；ID/locale；`character_mind` 投影 `agency_commitments`（含 `[]`，只读） | **Server 物化 / Provider 投影** |
+| 形状：`event_cards`/`result_options` 长度、日结 `automatic_events` 非空、`reactions.length === events.length` | **Schema + 语义门禁** |
+
+mode 文案应用槽位标签列出模型应填项即可；不得要求模型再写 Server 已自动填充的结构。
+
 `selection_space_block` 只属于 `director.goal_plan` 与 `director.definition_draft`，由 `ContentRuntimeCatalog` 对锁定 ContentBundle 做只读投影；它可丢弃、可重建，不是第二内容真相。块内只提供零基 index 与完成语义选择真正需要的名称、描述、规则模式、基数和 guidance，不暴露仅供 Server 恢复的正式 local ID、Rule ID 或 runtime-mutable 元数据。若某条 planning/explanation/guidance 文本的 `content_digest` 已出现在同一 materialization 更早的 resident 块中，materializer 必须省略该字段，而不是把同一 PromptFragment 再抄进 selection_space。模型只返回 ordinal，Server 必须从 verified request 与同一 Content lock 本地恢复正式 Catalog 引用及 RuleRef，模型不能回传或发明正式内容引用。
 
-Provider 静态输出指令只携带一次输出 Schema（或 Ollama 的 native grammar 权威说明），不得再口头重复 `request_kind` / `output_kind`；动态 user JSON 只含该 kind 的 Provider 投影，空 `agency_commitments` 不进入投影。
+Provider 静态输出指令只携带一次输出 Schema（或 Ollama 的 native grammar 权威说明），不得再口头重复 `request_kind` / `output_kind`；动态 user JSON 只含该 kind 的 Provider 投影。`character.dialogue` 的 `commitments` 与 transcript 上 `character_mind` 回合的 `agency_commitments` **始终是数组**（无承诺时 `[]`），不得省略字段，以便 `director.dialogue_events` 明确看到零证据；非 `character_mind` 回合不得带 commitments。
 
 持续运行的首要优化指标是每单位游戏进程的未缓存输入 token，而不是模型调用次数。只有职责相同、生命周期相同的静态内容才能共享常驻前缀；静态块必须在前，变化的 operation input 必须在末尾，禁止为了减少调用次数合并职责域并破坏可复用前缀。缓存身份只使用内容地址 `block_id` / `resident_key` 与 `content_digest` / `resident_digest`；**禁止**人工 `block_revision`、`resident_revision`、`context_revision` 与无所有者的随机 resident/context UUID。任一常驻源变化必须产生新 digest，不得原地覆盖。Prompt 文本是只读派生物；ContentBundle 仍是唯一真相。本地 digest 只证明派生身份，真实缓存率必须由 `model_invocations` 的完整 usage 样本观测，不能在架构中预设命中率。
 
