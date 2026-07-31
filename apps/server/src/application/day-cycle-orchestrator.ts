@@ -808,6 +808,12 @@ function requireProposal(
     ),
     "RulePluginResponse.output",
   );
+  const rejectCode =
+    typeof output["code"] === "string" ? (output["code"] as string) : null;
+  const rejectMessage =
+    typeof output["message"] === "string"
+      ? (output["message"] as string)
+      : null;
   throw new EngineFault(
     "day_cycle.orchestration.required_operation_unresolved",
     "A required day-cycle RulePlugin operation did not produce a ContentPacket proposal",
@@ -823,6 +829,8 @@ function requireProposal(
         "request_id",
         "RulePluginRequest",
       ),
+      reject_code: rejectCode,
+      reject_message: rejectMessage,
       ...details,
     },
   );

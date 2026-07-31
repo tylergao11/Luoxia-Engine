@@ -144,7 +144,11 @@ class DefaultPlayerDayCommandOrchestrator
             {
               session_id: stored.session.sessionId,
               command_id: stored.commandId,
+              from_day: run.fromDay,
+              world_id: run.worldId,
               operation_fault: error.code,
+              // Surface nested day-cycle stage fields (operation_kind, reject_code)
+              // so repair knows which required step failed after mutation.
               ...(error.details ?? {}),
             },
           );

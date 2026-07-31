@@ -1232,6 +1232,18 @@ function assertEventCardDraft(
     expectProperty(card, "result_options", "EventCardSemanticDraft"),
     `${path}.result_options`,
   );
+  // One sealed world result per card: multiple world effects live in that
+  // single option's outcomes[], not as multiple mutually exclusive options.
+  if (options.length !== 1) {
+    throw fault(
+      "model.semantic.event_card_result_options_count",
+      "EventCardSemanticDraft.result_options must contain exactly one result option",
+      {
+        path: `${path}.result_options`,
+        result_option_count: options.length,
+      },
+    );
+  }
   const outcomes: JsonObject[] = [];
   for (const [optionIndex, option] of options.entries()) {
     outcomes.push(
@@ -1262,6 +1274,29 @@ function assertEventCardDraft(
     expectProperty(card, "agency_gates", "EventCardSemanticDraft"),
     `${path}.agency_gates`,
   );
+  // Gates without commitment evidence cannot be sealed at publish; models often
+  // invent empty gates and then fail bidirectional checks. Fail closed early
+  // with an explicit code so the fix is "omit agency_gates" or cite real turns.
+  for (const [gateIndex, gate] of gates.entries()) {
+    const evidence = objectArray(
+      expectProperty(
+        gate,
+        "commitment_evidence",
+        "EventCardAgencyGateSemanticDraft",
+      ),
+      `${path}.agency_gates[${gateIndex}].commitment_evidence`,
+    );
+    if (evidence.length === 0) {
+      throw fault(
+        "model.semantic.agency_gate_without_commitment_evidence",
+        "EventCard agency_gates must cite at least one dialogue commitment_evidence entry; use an empty agency_gates array when no NPC commitment applies",
+        {
+          path: `${path}.agency_gates[${gateIndex}]`,
+          gate_index: gateIndex,
+        },
+      );
+    }
+  }
   assertSemanticEventGraph(
     outcomes,
     gates,

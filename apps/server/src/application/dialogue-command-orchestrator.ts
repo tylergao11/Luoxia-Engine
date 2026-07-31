@@ -1268,8 +1268,37 @@ class DefaultDialogueCommandOrchestrator
         requestId: identity.ruleRequestId,
         expectedWorldRevision,
       });
+      // One observation → one card: Reject must fail the dialogue command.
+      // Silent skip would leave remaining>0 talk without a published world card.
       if (receipt.proposal === undefined) {
-        continue;
+        const output = expectJsonObject(
+          expectProperty(
+            receipt.response.value,
+            "output",
+            "RulePluginResponse",
+          ),
+          "RulePluginResponse.output",
+        );
+        throw new EngineFault(
+          "dialogue.orchestration.event_card_publish_rejected",
+          "EventCard RulePlugin rejected the single dialogue observation card; the command cannot complete without publishing it",
+          {
+            session_id: input.command.session.sessionId,
+            command_id: input.command.commandId,
+            proposal_id: identity.proposalId,
+            request_id: identity.ruleRequestId,
+            draft_ordinal: ordinal,
+            output_kind: expectString(
+              output,
+              "output_kind",
+              "RulePluginResponse.output",
+            ),
+            reject_code:
+              typeof output["code"] === "string"
+                ? (output["code"] as string)
+                : null,
+          },
+        );
       }
       const committed =
         await this.#mutations.commitRulePluginReceipt(receipt);
@@ -1302,6 +1331,21 @@ class DefaultDialogueCommandOrchestrator
         );
       }
       expectedWorldRevision = nextRevision;
+    }
+    if (
+      drafts.length === 1 &&
+      expectedWorldRevision === input.startingWorldRevision
+    ) {
+      throw new EngineFault(
+        "dialogue.orchestration.event_card_not_published",
+        "Dialogue observation produced a card draft but no EventCard was committed",
+        {
+          session_id: input.command.session.sessionId,
+          command_id: input.command.commandId,
+          draft_count: drafts.length,
+          starting_world_revision: input.startingWorldRevision,
+        },
+      );
     }
     return expectedWorldRevision;
   }
