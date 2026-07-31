@@ -146,7 +146,7 @@ ContentBundle 直接初始化角色行动状态机、世界状态机、角色私
       └─ GUI 明确选择 planning 时，才调用 director.goal_plan 或 director.definition_draft
   → responder turn 提交后，director.dialogue_events 独立观察 transcript
   → EventCard 发布前完成裁决与结果封存；发布与 AP 扣除原子提交
-  → 玩家点击卡片：只验证必要前置条件并应用封存结果
+  → 玩家开启 EventCard（event_card.trigger）：应用封存结果，世界事实落地
   → 玩家结束当日；仍 available 的当日卡过期且不退款
 ```
 
@@ -163,26 +163,38 @@ ContentBundle 直接初始化角色行动状态机、世界状态机、角色私
 事件只有两种派发模式：
 
 1. **AutomaticEvent**：由 `director.daily_settlement` 派发并自动处理。WorldEvent 直接交规则；CharacterEvent 交给受影响角色的小 LLM 决定主观影响、主体选择与自身状态机变化。NPC 在日结中的移动属于此模式，不占用玩家 EventBudget。
-2. **EventCard**：只由独立 `director.dialogue_events` 根据玩家与已选 NPC/System 的已提交 transcript 提出；System reply 与规划输出都不能夹带事件。RulePlugin 在发卡前裁决，Runtime 封存精确结果并原子扣 AP。余额不足则不发布。卡片仅当日有效，无论玩家是否点击都不退款。**本质**：EventCard 是一次**会对世界状态产生可封存结果**的玩家选择信封——不是聊天气泡、不是“接下来聊什么”的话题菜单、也不是把多句寒暄拆成多张卡。**一次对话观察（`remaining > 0`）对应恰好一张卡**（`event_cards` 长度恒为 1）；该卡的 `result_options` **恰好一条**（不是多选一菜单）：玩家在对话中已表达的态度由这条唯一结果承接；多个世界影响（关系、位置、账本、状态机等）落在该 option 的 **`outcomes[]`** 内，不拆成多条 `result_options`，也不拆成多张顶层卡。**预算门禁**：当且仅当 `remaining === 0` 时 Server 跳过 `director.dialogue_events`（不写 model invocation、不伪造 receipt）。`remaining > 0` 时必须调用；空数组或多张顶层卡均为合同失败，阻塞该次交互，引擎不发明兜底卡内容。唯一卡草稿经 RulePlugin 后必须 **Accept 并 publish** 进世界；明确 Reject 则对话命令失败（不得静默无卡完成）。`agency_gates` 必须引用真实 dialogue commitment evidence，否则应为空数组——禁止无证据的空 gate 造成双向闭合失败。不得按 transcript 形态或关键词猜测是否跳过调用。Provider 侧 `dialogue_events` / `goal_plan` 的 world_view 与 `character.dialogue` 的 action_machine 可省略状态机 outgoing transitions，仅保留当前态语义；空 `objective_components` 不进入 Provider 线。generation Schema 指令不携带 `$schema` 元 URI，文案保持最短「JSON object only. Match schema:」；formal ModelRequest 与正式 Schema 验收仍可持有完整形状。
+2. **EventCard**：只由 `director.dialogue_events` 据已提交 transcript 提出；System reply 与规划输出不夹带事件。形状与时序的唯一细则见 **§5.2.4**。此处只定权力边界：`remaining === 0` 时跳过该模型调用；`remaining > 0` 时必须调用且草稿经 RulePlugin **Accept 并 publish**（Reject 则对话失败，不得静默无卡）。不得按 transcript 形态猜测是否跳过。Provider 投影可省略状态机 outgoing transitions 与空 `objective_components`；generation 指令不携带 `$schema` 元 URI。
 
-玩家地图移动是独立的导航命令：点击目标地点后，Runtime 通过内容包绑定的 `navigation_resolver` 校验并提交 `EntityRelocateOp`。它不调用模型、不生成 EventCard、不扣 AP，但提交后的位移与客观轨迹会被后续 Director 看见。砍人、做饭等结果性事件没有结构化按钮，也不存在全局动作文本或自然语言命令行。玩家只能在有接收者的 NPC/System 对话中表达；Director 根据接收者、位置、关系、世界状态与完整 transcript 提出**恰好一张**可裁决 EventCard。对 System 表达遥远的物理行动目标只会得到指引，不会被视为行动已经发生。
+玩家地图移动是独立导航命令：`navigation_resolver` → `EntityRelocateOp`，不调用模型、不生成 EventCard、不扣 AP。结果性行动无全局文本命令行；玩家只在已选 NPC/System 对话中表达，由 Director 观察 transcript 提出 EventCard。对 System 的遥远物理目标只得指引，不视为行动已发生。
 
-事件表达一次结果性因果，不是任务、日程、话题列表或“去找某人说话”的待办。EventCard 也绝不调用 Character Mind。NPC 对话回复可以附带 `AgencyCommitmentSemanticDraft`；Runtime 只能把经过验证的 Character Mind 输出封装成 AgencyCommitment 并追加到该 NPC 的 DialogueTurn。EventCard 模型只提出 `EventCardAgencyGateSemanticDraft`；日结算角色 agency 只提出可选 `DailySettlementAgencyIntent`，Server 从 verified 意图本地装配恰好一个 `MaterializedAgencyGateCandidate`（outcome/gate 本地 ID、subjects 与 `commitment_evidence=[]` 不由模型发明）。每个候选必须声明受保护的 outcome ID、精确 semantic_intent、subjects 与 terms。Director 只能引用这份证据，不能替 NPC 编造或挪用同意。受保护的 EventCard 缺少逐字段匹配且仍有效的承诺时必须拒绝发布；Automatic CharacterEvent 的 gate 不接受既有承诺，只使用目标 Character Mind 针对同一 requirement 返回的 AgencyDecision。
+事件是一次结果性因果，不是任务或话题列表。EventCard 不调用 Character Mind。NPC 回复可附带 `AgencyCommitmentSemanticDraft`，Runtime 仅将 verified 输出封装为 turn 上的 AgencyCommitment。EventCard 只提出 `EventCardAgencyGateSemanticDraft`；日结算 agency 意图由 Server 本地装配 `MaterializedAgencyGateCandidate`（`commitment_evidence=[]` 不由模型发明）。Director 只能引用既有 commitment，不能编造同意。受保护结果缺少匹配且仍有效的承诺则拒发；Automatic CharacterEvent 的 gate 只用目标 Mind 对同一 requirement 的 AgencyDecision。
 
-### 5.2.4 EventCard 的裁决、封存与点击
+### 5.2.4 EventCard：开封信封（形状、时序、agency、Stage）
 
-发卡时，RulePlugin 对 Director 给出的**唯一** `result_options[0]` 做合法性裁决，并把其中 `outcomes` 对应的精确 `EventOutcomeOp[]`、额外必要前置条件、完整 `DeterministicContext` 和结果叙事组成 `SealedEventResult`（`result_options` 长度必须为 1，禁止多方案候选菜单）。封存结果不得只保留 context ID/digest 而把可执行证据留在 CommittedEvent；完整上下文本身已经拥有 ID、摘要与 issuer token，是卡片跨重启、存档导入后继续执行的唯一事实。涉及主体性的结果必须逐一解析所选 outcome 对应 `MaterializedAgencyGateCandidate` 的 AgencyCommitmentRef，核对说话者、semantic_intent、subjects、terms 与有效日，并把每份 `agency.commitment_valid` 写入封存前置条件。自由叙事不能伪装成 NPC 台词；NPC 原话只能存为 `dialogue_quote`，引用已经提交的 DialogueTurn。Core 复算 `result_digest` 后，`EventCardPublishOp`、卡片状态和 AP charge 在同一个 ContentPacket 中提交。证据、规则或余额不成立时提案不成卡，也不扣费。
+本节是 EventCard 产品与运行时语义的**唯一权威叙述**；机器形状以 Schema 为准（`event_cards` / `result_options` 均为 min=max=1；`EventCardView` 仅 teaser；`event_card.trigger` 仅 `event_card_id`）。
 
-点击时不再调用 LLM 或 RulePlugin，不重新裁决、不改写结果、不预留资源：
+**是什么**：已裁决的**开封信封**。SessionView 只暴露 teaser（`event_card_id` / day / title / summary / cost / status）。客户端唯一动作是「开启」=`event_card.trigger`。不是话题菜单、多选结局或模式选择。
+
+**谁发起**：Director 据关系、世界状态与 transcript 决定是否出卡与封存内容；玩家不挑选模式。
+
+**形状**：一次观察恰好一张卡；恰好一条 `result_options[0]`（内部封存身份）；多影响在其 `outcomes[]` → 封存 `EventOutcomeOp[]`。
+
+**时序**：
+1. **publish**：RulePlugin 裁决唯一 option → `SealedEventResult`；与 AP charge 同包提交；卡 `available`。
+2. **开启前**：封存 ops **未**写入权威世界；teaser 可显示，完整结果对 UI 为开封后揭示。
+3. **开启**：不再调模型/RulePlugin；校验 day、phase、control、digest 与 sealed preconditions 后应用封存 ops + `event_card.trigger`，事实落地并播结果叙事。
+4. **invalidate**：仅当 sealed precondition 真实不成立；`expired` 为跨日未开启。开启与否均不退 AP。
 
 ```text
-加载 available 卡片与 SealedEventResult
-  → Core 固定校验 card.day = current day、player phase、卡片控制权、sealed digest 与确定性上下文
-      ├─ trigger：Packet.preconditions 精确等于 sealed.preconditions；全部成立后只允许封存 ops + 匹配的 event_card.trigger
-      └─ invalidate：Packet.preconditions 必须为空；同一锁定快照中至少一条 sealed precondition 真实不成立后，只允许一个匹配的 event_card.invalidate，reason_code 固定为 event_card.precondition_failed
+available 卡 + SealedEventResult
+  → Core：day / player phase / control / digest / context
+      ├─ trigger：preconditions = sealed.preconditions → 封存 ops + event_card.trigger
+      └─ invalidate：preconditions 空；至少一条 sealed precondition 不成立 → event_card.invalidate
 ```
 
-`expired` 只表示跨日未处理；`invalidated` 表示点击时必要条件已不成立。两者均不退款。未知 precondition、协议形状错误或规则/摘要依赖故障不能伪装成卡片失效，必须作为原错误拒绝整包。`event_card.trigger` 的 `PacketStateTransition` 语义固定要求 available、同一 control、card.day 与当前 day 相等且 digest 一致，不能由插件或空 preconditions 放宽；从 player phase 离开时，同一个 `day_cycle.advance` Packet 必须穷举并 expire 当日全部未处理卡，进入下一次 player phase 时在同一 Packet 打开该日唯一 EventBudget。若卡片结果是发起决斗，封存的结果只能是打开权威 StageInstance，胜负仍由后续 `stage_outcome.resolve` 决定，不能提前封存胜者。
+**Agency**：`agency_gates` 仅引用真实 dialogue commitment evidence；无承诺的强制/社交后果用 `agency_gates: []`。无证据 gate 或越界 commitment 索引 fail-closed。受保护 outcome 在封存时写入 `agency.commitment_valid` 前置条件。
+
+**Stage**：若封存含 `stage.open`，仅在 **trigger 成功后** 打开；胜负由 `stage_outcome.resolve`，不在卡上预封。日切离 player 时同包 expire 未开启卡；下一日 player 同包 `event_budget.open`。
 
 ### 5.2.5 Character Mind 对自身状态机负责
 
@@ -198,7 +210,7 @@ CharacterEvent 只描述角色遭遇了什么，不替角色规定反应。目�
 
 System 是常驻角色包装，但不是独立 LLM。`director.system_dialogue` 复用同一 Director，只增加 System 人设与回复模式 Prompt；它有独立对话历史与缓存键，不能形成第二份世界真相。该 request kind 的唯一输出是玩家可见 reply，不拥有 EventCard、GoalPlan 或 Definition 草案。
 
-`dialogue.start` / `dialogue.continue` 的 `interaction_kind` 是 GUI 明确选择，不从文本推断。System 交互总是先以 `director.system_dialogue` 生成独立 reply；只有 `interaction_kind=goal_plan` 或 `definition_draft` 时，才分别调用一次 `director.goal_plan` 或 `director.definition_draft`，普通 `dialogue` 不调用规划模型。Responder turn 提交后，若当日 EventBudget `remaining > 0`，事件由独立 `director.dialogue_events` 读取当前 transcript，且必须提出 **恰好一张** EventCardSemanticDraft（空数组或多张顶层卡均为合同失败；该卡 `result_options` 恰好一条，多影响在其 `outcomes`）；`remaining === 0` 则跳过该模型调用。reply、规划与事件各自使用独立 request kind、ModelProfile、Journal 身份和输出合同。任一**已发起**的必要模型失败都会阻塞本次交互，不生成兜底回复或兜底结果。
+`dialogue.start` / `dialogue.continue` 的 `interaction_kind` 是 GUI 明确选择，不从文本推断。System 交互总是先以 `director.system_dialogue` 生成独立 reply；只有 `interaction_kind=goal_plan` 或 `definition_draft` 时，才分别调用一次 `director.goal_plan` 或 `director.definition_draft`，普通 `dialogue` 不调用规划模型。Responder turn 提交后，`remaining > 0` 时独立调用 `director.dialogue_events`（形状与失败规则见 §5.2.4）；`remaining === 0` 则跳过。reply、规划与事件各自使用独立 request kind、ModelProfile、Journal 身份和输出合同。任一**已发起**的必要模型失败都会阻塞本次交互，不生成兜底回复或兜底结果。
 
 ### 6.2 Goal 到可行路径
 
@@ -210,12 +222,12 @@ System 是常驻角色包装，但不是独立 LLM。`director.system_dialogue` 
      interaction_kind=dialogue：不调用 planning model
   → Server 从 verified request / snapshot / Content lock 本地补齐运行时身份与精确引用
   → RulePlugin / World Law 校验候选；必要时形成最小 WorldExtension 入口
-  → director.dialogue_events 独立观察已提交 transcript；remaining>0 时恰好一张 EventCardSemanticDraft（唯一 result_option；多影响在 outcomes）
+  → director.dialogue_events 独立观察 transcript（§5.2.4）
   → 玩家亲自完成所需世界行为
   → 仅由 CommittedEvent / WorldState 判定完成
 ```
 
-System 对话仍处于 Director 的事件观察范围，但 `director.system_dialogue` 自身不输出事件；只有随后独立的 `director.dialogue_events` 可以提出 EventCard 语义 Draft。任何分支都没有直接写世界或 `act_as_player` 路径，不能绕过 EventCard 的发卡、封存、扣费和点击规则，也不能替玩家移动、交谈、战斗、交易或免费获得结果。
+System 对话仍处于 Director 的事件观察范围，但 `director.system_dialogue` 自身不输出事件；只有随后独立的 `director.dialogue_events` 可以提出 EventCard 语义 Draft。任何分支都没有直接写世界或 `act_as_player` 路径，不能绕过 EventCard 的发卡、封存、扣费与开启规则，也不能替玩家移动、交谈、战斗、交易或免费获得结果。
 
 ### 6.3 GoalPlan 与 WorldExtension
 
@@ -254,7 +266,7 @@ verified Model semantic Draft / client StageOutcomeProposal
 - **密钥**：仅由部署组合根显式注入 keyring（`activeKeyId` + `keys`）；无环境变量读取、默认密钥或自动生成。active key 签发；仍配置的全部 key 可验旧 token（rotation）。删除 key 后旧 token 明确失败。HMAC 密钥至少 32 字节；验真使用 `timingSafeEqual`；错误不得泄漏密钥或 MAC。
 - **接线顺序**：ContentPacket 在 packet identity 之后、source/preconditions 之前验真；RulePluginRequest 在进入不可信 adapter 之前按 `readonly_world.world_id` 验真。`context_id` 仅由 Authority 经注入的 ID factory 生成。
 
-EventCard 点击路径只复用已经裁决的封存结果：
+EventCard 开启路径只复用封存结果（见 §5.2.4）：
 
 ```text
 event_card.trigger command
@@ -416,7 +428,7 @@ Server 必须只有一个完整 SessionView 组装入口：Session 打开使用�
 
 `client.ready` 是同一同步端口的连接入场消息：客户端必须在 `supported_protocols` 中显式包含 `client-bridge.v1`；命中后 Server 从锁定的当前 Session/WorldState 返回关联到该请求的完整 `session.view`，随后按稳定 Stage ID 顺序返回当前玩家全部 `stage.open`，这份 Stage 列表与 resync 一样是本地实例的权威全集。未命中时只返回 `client.protocol.unsupported` 的 fatal `protocol.error`，原子消耗一个 ServerEnvelope sequence，但不推进 View/world revision。`client_build_digest` 是经过 Schema 校验的客户端制品身份，不在 Engine 内形成默认或隐式 allowlist；需要限制具体客户端制品时，由已认证部署网关在调用 Engine 前用自己的显式部署配置门禁。
 
-客户端适配器只认识固定渲染原语、通用交互消息和不透明内容 ID，不接收完整 WorldState，不按 `world_id` 分剧情。Bridge 客户端只能提交正式 `client.ready`、`session.resync_request`、在 GUI 已选择 NPC/System 与 `interaction_kind` 后对该对象说的话、显式关闭自己参与的 active Dialogue、`map.move`、EventCard 触发、结束玩家日与 `stage.outcome_proposal`；协议没有独立 ACK。首版不存在全局自由文本行动框或命令行，不把对话文本解释为选择规划模式、移动、战斗、修炼、做饭等通用行动；也没有砍人、做饭等结构化行动按钮、事件派发或 AP 写入接口。玩家对 3D 秘境的逐帧操作只由 Unity Runtime 本地消费，不是自然语言行动，也不是 Engine ClientMessage。
+客户端适配器只认识固定渲染原语、通用交互消息和不透明内容 ID，不接收完整 WorldState，不按 `world_id` 分剧情。Bridge 客户端只能提交正式 `client.ready`、`session.resync_request`、在 GUI 已选择 NPC/System 与 `interaction_kind` 后对该对象说的话、显式关闭自己参与的 active Dialogue、`map.move`、EventCard 开启、结束玩家日与 `stage.outcome_proposal`；协议没有独立 ACK。首版不存在全局自由文本行动框或命令行，不把对话文本解释为选择规划模式、移动、战斗、修炼、做饭等通用行动；也没有砍人、做饭等结构化行动按钮、事件派发或 AP 写入接口。玩家对 3D 秘境的逐帧操作只由 Unity Runtime 本地消费，不是自然语言行动，也不是 Engine ClientMessage。
 
 `map.move` 只携带目标地点；actor 从鉴权 Session 的 human ControlBinding 推导，内容包的 `navigation_resolver` 决定可达性并产生位置提案。它不调用模型，RulePlugin Reject code 原样成为 CommandResult code；接受分支只允许一个 `entity.relocate`。Finalizer 必须把命令持有的 request ID、resolved proposal、CommittedEvent、actor 与 destination 全部关联一致后，才推进 Session 并返回新 SessionView；重复命令重放同一出站结果。失败不改变世界，也不转交 Director。
 
@@ -436,9 +448,9 @@ Renderable PackBinding 必须在直接 `asset_id` 与 `materialization_profile_i
 
 Server 当前实现把上述状态分字段保存在 `engine_sessions`：打开 Session 时从同一 WorldState 精确解析 active human ControlBinding 与 active player Entity，session ID 与 nonce 只能由 Server 随机生成；刷新 View 以 session view revision 做 CAS，并同步当前 world revision。`command_journal` 只接受 Schema 验证且 message 同时含 `command_id` 与 `basis_token` 的 ClientEnvelope。接收顺序固定为先查 `(session_id, command_id)`：相同完整 ClientEnvelope 的 JCS 请求摘要及逐值正文直接恢复，即使其中 token 已因后续进度失效；message ID、client sequence、correlation 或正文任一不同都明确冲突；只有全新命令才锁 Session/World、确认 binding 未改变、world revision 当前并验证 HMAC。CommandResult 只有 `accepted` 与 `rejected` 两种终态，并与同一 command ID、当前 view revision 绑定；执行中的状态只属于 Command Journal，不进入客户端结果合同。
 
-`dialogue.start/continue` 已闭合 NPC 与 System 两种 responder，并要求 GUI 明确提交 `interaction_kind`。玩家 Entity 只能来自 Session；Entity recipient 必须是同世界 active Entity、恰有一个 active CharacterMind binding，且只能选择 `dialogue`；System dialogue 的参与者必须恰好是玩家与 System，允许明确选择 `dialogue`、`goal_plan` 或 `definition_draft`。Human RulePlugin packet 固定提交 `R→R+1`。NPC 调用 `character.dialogue`，System 调用独立 `director.system_dialogue`；两者的 verified reply 都经 `dialogue.turn.append` 提交 `R+1→R+2`。System reply 只含 reply；只有 GUI 选择 planning 时才调用对应 `director.goal_plan` 或 `director.definition_draft`，普通 dialogue 不调用二者。随后无论 responder 类型与 planning 选择为何，在 `remaining > 0` 时事件都走独立 `director.dialogue_events`，读取已提交 transcript 并返回 **恰好一张** EventCard 语义 Draft（空数组或多张顶层卡失败；`result_options` 恰好一条，多影响在 `outcomes`）；`remaining === 0` 跳过该调用。Server 分别从 request-kind proposal Journal 为 Definition、GoalPlan、EventCard Draft 按 ordinal 分配根 ID，并从 verified request / snapshot / Content lock 本地补齐时间、LocalizedText、精确 Fact / Catalog / Dialogue 引用；RulePlugin 再独占合法性、visibility、cost、WorldLaw 与 EffectOp。新 GoalPlan 固定 `expected_revision=0`、revision 1、active；其 RuleRef、FactRef、Capability 与 GenerationArchetype 必须在当前锁定世界解析。demand 节点只能落成 blocked，并携带引用同一 goal node/demand ID、request ID 在本计划内唯一且 selected archetype 精确属于 allowed 集合的 WorldExtensionRequest。有效 `goal_plan.upsert` 仍只经 `apply_packet` 把完整请求写入 WorldState；System 对话完成后不立即扩展世界。最终化逐 revision 核对 human/responder packet，并把可选 planning commit 与独立 EventCard commit 精确关联回对应 request-kind proposal Journal、RulePlugin Journal 与 CommittedEvent，之后才从最终 WorldState 生成 SessionView 并提取 DialogueTurnView 组成 DialogueReply。Session view revision、world revision、basis token、Server sequence/outbox 与命令完成原子提交。Human 提案拒绝只能在世界未变时结束；模型 ambiguous 或 human 已提交后的任何必要阶段拒绝保持 blocked，禁止默认 `no_effect`、固定回复或回滚已提交事实。`dialogue.close` 是独立客户端命令：Client 只提交 dialogue ID，Server 从 accepted Session 证明玩家是 active Dialogue 参与者，以 Command Journal 的全局 request ID 调用精确 `dialogue.close` resolver，并固定通用原因 `player_requested`；日末不自动关闭，客户端也不能自报 reason。
+`dialogue.start/continue` 已闭合 NPC 与 System 两种 responder，并要求 GUI 明确提交 `interaction_kind`。玩家 Entity 只能来自 Session；Entity recipient 必须是同世界 active Entity、恰有一个 active CharacterMind binding，且只能选择 `dialogue`；System dialogue 的参与者必须恰好是玩家与 System，允许明确选择 `dialogue`、`goal_plan` 或 `definition_draft`。Human RulePlugin packet 固定提交 `R→R+1`。NPC 调用 `character.dialogue`，System 调用独立 `director.system_dialogue`；两者的 verified reply 都经 `dialogue.turn.append` 提交 `R+1→R+2`。System reply 只含 reply；只有 GUI 选择 planning 时才调用对应 `director.goal_plan` 或 `director.definition_draft`，普通 dialogue 不调用二者。随后无论 responder 与 planning 如何，`remaining > 0` 时走独立 `director.dialogue_events`（§5.2.4），`remaining === 0` 跳过。Server 分别从 request-kind proposal Journal 为 Definition、GoalPlan、EventCard Draft 按 ordinal 分配根 ID，并从 verified request / snapshot / Content lock 本地补齐时间、LocalizedText、精确 Fact / Catalog / Dialogue 引用；RulePlugin 再独占合法性、visibility、cost、WorldLaw 与 EffectOp。新 GoalPlan 固定 `expected_revision=0`、revision 1、active；其 RuleRef、FactRef、Capability 与 GenerationArchetype 必须在当前锁定世界解析。demand 节点只能落成 blocked，并携带引用同一 goal node/demand ID、request ID 在本计划内唯一且 selected archetype 精确属于 allowed 集合的 WorldExtensionRequest。有效 `goal_plan.upsert` 仍只经 `apply_packet` 把完整请求写入 WorldState；System 对话完成后不立即扩展世界。最终化逐 revision 核对 human/responder packet，并把可选 planning commit 与独立 EventCard commit 精确关联回对应 request-kind proposal Journal、RulePlugin Journal 与 CommittedEvent，之后才从最终 WorldState 生成 SessionView 并提取 DialogueTurnView 组成 DialogueReply。Session view revision、world revision、basis token、Server sequence/outbox 与命令完成原子提交。Human 提案拒绝只能在世界未变时结束；模型 ambiguous 或 human 已提交后的任何必要阶段拒绝保持 blocked，禁止默认 `no_effect`、固定回复或回滚已提交事实。`dialogue.close` 是独立客户端命令：Client 只提交 dialogue ID，Server 从 accepted Session 证明玩家是 active Dialogue 参与者，以 Command Journal 的全局 request ID 调用精确 `dialogue.close` resolver，并固定通用原因 `player_requested`；日末不自动关闭，客户端也不能自报 reason。
 
-`event_card.trigger` 使用同一 Command Journal/finalizer 边界。首次接收时 Server 生成并持久化全局 packet ID，world/control 只能从 accepted Session 推导；客户端 command ID、card 内 control 或公开 card ID 都不能单独授权点击。Runtime 从卡片内封存结果构造 trigger packet；只有正式 sealed precondition failure 才改走同一 packet ID 的 invalidate 分支，其他摘要、规则或合同错误保持原错误。最终分支只从 CommittedEvent 的末尾闭合 op 推导；trigger 成功后 `dialogue_quote` 只能解析玩家可见的既有 DialogueTurn，并按 `session.view + presentation.frame(narrative.show) + command.result` 写出，invalidate 则写 `session.view + command.result`。重复命令返回同一 message ID、sequence 与正文。
+`event_card.trigger` 使用同一 Command Journal/finalizer 边界。首次接收时 Server 生成并持久化全局 packet ID，world/control 只能从 accepted Session 推导；客户端 command ID、card 内 control 或公开 card ID 都不能单独授权开启。Runtime 从卡片内封存结果构造 trigger packet；只有正式 sealed precondition failure 才改走同一 packet ID 的 invalidate 分支，其他摘要、规则或合同错误保持原错误。最终分支只从 CommittedEvent 的末尾闭合 op 推导；trigger 成功后 `dialogue_quote` 只能解析玩家可见的既有 DialogueTurn，并按 `session.view + presentation.frame(narrative.show) + command.result` 写出，invalidate 则写 `session.view + command.result`。重复命令返回同一 message ID、sequence 与正文。
 
 `player_day.end` 使用同一个 Command Journal/finalizer 边界：命令在世界仍等于 accepted revision 时持久化 `from_day`，先提交到下一日 autonomous，再由 WorldExtension scheduler 解析全部 active pending request，之后才运行原有状态机、Director settlement、Character Reaction 与 AutomaticEvent。每一子步骤只由既有 Journal、确定性派生身份与 CommittedEvent 证明。成功必须到达 `from_day + 1` 的 player phase，并且当前 human control 恰有一个 EventBudget，随后才原子推进 Session、写 `session.view + command.result` outbox 并完成命令。若首个必需 RulePlugin 阶段拒绝且世界未变，可以正常完成 rejected；一旦已有权威 packet 提交，任何后续 unresolved 都保持 received/blocked，finalizer 不得用拒绝掩盖部分世界变化。
 
@@ -561,7 +573,7 @@ ContentBundle 不是预制任务全集。它提供初始世界、角色行动状
 2. ContentBundle 本地 `Identifier` 到运行时 UUID 的唯一映射固定为 RFC 9562 UUIDv5：namespace 是运行时 `world_id`，name 是 UTF-8 `pack_id + "\0" + kind + "\0" + local_id`；初始实体、关系和状态机绑定分别使用 `entity`、`relation`、`state_machine_binding`。同一世界实例内映射可重算且稳定；Content Upgrade 改 local ID 时必须显式声明映射。
 3. ContentBundle 的 `catalog.entities` / `catalog.relations` 是同包全部 WorldDefinition 共享的初始世界图；不同初始图必须使用不同 ContentBundle，禁止再建立隐式 world 过滤规则。每条 InitialRelation 必须声明内容侧 `InitialVisibility`；`known_to.actors` 只允许符号玩家或本包本地 Entity，创建时才映射为 runtime `actor_ids`。WorldDefinition 选择该共享图上的起点、玩家 archetype、`player_initial_components`、`player_location_relation_type_id`、`player_location_fields`、`player_location_visibility`、规则、Director 与表现配置；玩家起点 fields 必须按 relation type 的 ExtensionField 合同校验。
 4. 新世界创建请求必须显式携带已验证 WorldContentLock 与玩家名。Server 生成随机 runtime world、player、human/CharacterMind ControlBinding 与玩家起点关系；内容初始 entity / relation / machine binding 使用上述 UUIDv5 映射。玩家 archetype 保持 StaticDefinitionRef，不复制静态定义组件为可变状态；只物化 WorldDefinition 的 `player_initial_components`。起点关系使用 `player_location_relation_type_id` 指向 `start_location_entity_id`，data 与 visibility 只来自同一 WorldDefinition。revision 0 不预造 EventBudget；Runtime 首次完成 `autonomous → director_settlement → player` 时，`day_cycle.advance` 才在同一权威 Packet 内创建 day-1 唯一预算，capacity 只取所选 WorldDefinition 的 `event_budget.daily_capacity`，不得由 SessionView 投影补造。内容实体/关系 provenance 固定为锁定 bundle digest，玩家及其起点关系 provenance 固定为本次 runtime world 创建。每个初始 machine binding 直接物化为一个实例，`state_id` 取锁定定义的 `initial_state_id`，`entered_day` 为 1。新世界固定为 world revision 0、day 1、`autonomous` phase、phase revision 0；完整 WorldSnapshot 与 WorldContentLock 先经 Schema，再在一个 PostgreSQL 事务内插入并回读精确复核。
-5. SaveEnvelope 只作为导入/导出合同，不与数据库并行保存整份副本；PostgreSQL 分字段拥有 WorldState、唯一 revision、内容/依赖/插件/Stage 锁、Save/Engine 版本与迁移历史。资产可达集合只能在需要导出或预取时，从锁定 ContentBundle 图与当前 WorldState 引用派生，不存入 SaveEnvelope 或数据库成为第二真相。新世界创建先组成完整 revision-0 SaveEnvelope，再与外部导入共用同一原子分解入口；导出在 repeatable-read 快照内重建并整体验证。导入只接受正式 `SaveSchemaImportRequest`：`current` 模式要求候选已经是当前版本，`migrate` 模式要求显式 `plan_id` 并先完成 Save Schema Migration；随后才做顶层关联和当前激活依赖图精确兼容门禁，并且只能创建不存在的 `world_id`，禁止覆盖现有 world、Session 或 Journal。v1 固定 `event_cursor === world_revision`，因此导出字段直接从 revision 派生；PostgreSQL 只另存真正独立的 event-history floor：本地新世界为 0，导入世界为导入 revision，后续 `apply_packet` 只推进 revision，不伪造导入前的 CommittedEvent。`SealedEventResult` 因此必须携带完整 DeterministicContext，任何可用 EventCard 都不能依赖存档外的历史事件才能点击。
+5. SaveEnvelope 只作为导入/导出合同，不与数据库并行保存整份副本；PostgreSQL 分字段拥有 WorldState、唯一 revision、内容/依赖/插件/Stage 锁、Save/Engine 版本与迁移历史。资产可达集合只能在需要导出或预取时，从锁定 ContentBundle 图与当前 WorldState 引用派生，不存入 SaveEnvelope 或数据库成为第二真相。新世界创建先组成完整 revision-0 SaveEnvelope，再与外部导入共用同一原子分解入口；导出在 repeatable-read 快照内重建并整体验证。导入只接受正式 `SaveSchemaImportRequest`：`current` 模式要求候选已经是当前版本，`migrate` 模式要求显式 `plan_id` 并先完成 Save Schema Migration；随后才做顶层关联和当前激活依赖图精确兼容门禁，并且只能创建不存在的 `world_id`，禁止覆盖现有 world、Session 或 Journal。v1 固定 `event_cursor === world_revision`，因此导出字段直接从 revision 派生；PostgreSQL 只另存真正独立的 event-history floor：本地新世界为 0，导入世界为导入 revision，后续 `apply_packet` 只推进 revision，不伪造导入前的 CommittedEvent。`SealedEventResult` 因此必须携带完整 DeterministicContext，任何可用 EventCard 都不能依赖存档外的历史事件才能开启。
 6. 普通 `apply_packet` 不得修改 WorldContentLock、实现锁或迁移历史；唯一例外是 source_kind 固定为 `content_upgrade` 且 ops 只有一个 `content_upgrade.apply` 的封闭升级 packet。该操作不能携带任意路径修改，只能提交已经通过 SaveEnvelope Schema、关联、目标激活兼容与 transformer 专属语义门禁的完整候选。
 7. 已发布 ContentBundle 不得原地修改；存档同时锁定 RulePlugin 与 StageModule 精确实现 digest，服务器保留所有活跃存档仍引用的 bundle、实现与资产 blob。
 8. Save Schema Migration 与 Content Upgrade 是两条独立流程：前者只改变存档结构，禁止改变 bundle lock 或重新解释世界事实；后者只由玩家通过 `content_upgrade.accept` 显式发起，不存在启动时自动升级。数据库 DDL migration 是第三条独立流程，也不得代替或触发前两者。

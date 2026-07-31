@@ -486,10 +486,7 @@ function assertDirectorDialogueEventsResponse(
     expectProperty(output, "event_cards", "DirectorDialogueEventsOutput"),
     "DirectorDialogueEventsOutput.event_cards",
   );
-  // remaining > 0 is the only path that invokes this kind. Exactly one card:
-  // one dialogue observation → one sealed world-affecting opportunity; branches
-  // live in result_options, not as extra top-level cards. Empty or multi-card
-  // free-runs are rejected (no engine-invented default card content).
+  // Schema + product: one observation → one open-envelope card.
   if (cards.length !== 1) {
     throw fault(
       "model.output.dialogue_events_card_count",
@@ -1232,8 +1229,7 @@ function assertEventCardDraft(
     expectProperty(card, "result_options", "EventCardSemanticDraft"),
     `${path}.result_options`,
   );
-  // One sealed world result per card: multiple world effects live in that
-  // single option's outcomes[], not as multiple mutually exclusive options.
+  // One sealed result path; multi effects → outcomes[], not multi options.
   if (options.length !== 1) {
     throw fault(
       "model.semantic.event_card_result_options_count",
@@ -1274,9 +1270,7 @@ function assertEventCardDraft(
     expectProperty(card, "agency_gates", "EventCardSemanticDraft"),
     `${path}.agency_gates`,
   );
-  // Gates without commitment evidence cannot be sealed at publish; models often
-  // invent empty gates and then fail bidirectional checks. Fail closed early
-  // with an explicit code so the fix is "omit agency_gates" or cite real turns.
+  // Non-empty gate requires commitment_evidence; else use agency_gates: [].
   for (const [gateIndex, gate] of gates.entries()) {
     const evidence = objectArray(
       expectProperty(
