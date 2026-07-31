@@ -486,6 +486,17 @@ function assertDirectorDialogueEventsResponse(
     expectProperty(output, "event_cards", "DirectorDialogueEventsOutput"),
     "DirectorDialogueEventsOutput.event_cards",
   );
+  // remaining > 0 is the only path that invokes this kind. Exactly one card:
+  // one dialogue observation → one sealed world-affecting opportunity; branches
+  // live in result_options, not as extra top-level cards. Empty or multi-card
+  // free-runs are rejected (no engine-invented default card content).
+  if (cards.length !== 1) {
+    throw fault(
+      "model.output.dialogue_events_card_count",
+      "director.dialogue_events must return exactly one EventCardSemanticDraft",
+      { event_card_count: cards.length },
+    );
+  }
   for (const [cardIndex, card] of cards.entries()) {
     assertEventCardDraft(
       card,

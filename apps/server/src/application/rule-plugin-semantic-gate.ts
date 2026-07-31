@@ -4145,6 +4145,13 @@ function assertCommitmentsMatchDrafts(
       ),
       context.operationKind,
     );
+    // valid_through_day is Server-owned (not in model draft); must be present on
+    // the materialized candidate / committed AgencyCommitment and match.
+    expectInteger(
+      commitment,
+      "valid_through_day",
+      "MaterializedAgencyCommitmentCandidate",
+    );
   }
 }
 
@@ -6406,6 +6413,7 @@ function assertCharacterTurnProposalMatchesCandidate(
       "subjects",
       "stance",
       "terms",
+      "valid_through_day",
     ] as const) {
       assertJsonFieldEqual(
         `dialogue.append.character.commitments.${ordinal}.${field}`,

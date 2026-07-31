@@ -19,6 +19,7 @@ import type {
 
 import type { CommandJournal, StoredReceivedCommand } from "./command-journal.js";
 import type { CommandFinalizer } from "./command-finalizer.js";
+import { materializeAgencyCommitmentsFromCharacterDrafts } from "./dialogue-agency-commitment-materialize.js";
 import type {
   DialogueDefinitionRunRecord,
   DialogueDirectorRunJournal,
@@ -2122,35 +2123,18 @@ function createCharacterTurnCandidate(input: {
     ),
     "CharacterDialogueOutput.commitments",
   );
-  const usedIds = new Set<string>();
-  const commitments = drafts.map((draft, index) => {
-    const commitmentId = input.contracts.assert(
-      CONTRACT_REF.uuid,
-      input.localIds.createId(),
-    ).value as string;
-    if (
-      commitmentId !== commitmentId.toLowerCase() ||
-      usedIds.has(commitmentId)
-    ) {
-      throw new EngineFault(
-        "dialogue.orchestration.commitment_identity_invalid",
-        "Generated commitment IDs must be canonical lowercase and unique within the character turn",
-        {
-          command_id: input.command.commandId,
-          commitment_index: index,
-          commitment_id: commitmentId,
-        },
-      );
-    }
-    usedIds.add(commitmentId);
-    return Object.freeze({
-      commitment_id: commitmentId,
-      semantic_intent: expectString(
-        draft,
-        "semantic_intent",
-        "AgencyCommitmentSemanticDraft",
-      ),
-      subjects: materializeDialogueParticipantSubjects({
+  const participantCount = asObjectArray(
+    expectProperty(input.dialogue, "participants", "DialogueRecord"),
+    "DialogueRecord.participants",
+  ).length;
+  const commitments = materializeAgencyCommitmentsFromCharacterDrafts({
+    drafts,
+    worldState: input.worldState,
+    createCommitmentId: () =>
+      input.contracts.assert(CONTRACT_REF.uuid, input.localIds.createId())
+        .value as string,
+    materializeSubjects: (draft) =>
+      materializeDialogueParticipantSubjects({
         command: input.command,
         worldState: input.worldState,
         dialogue: input.dialogue,
@@ -2158,30 +2142,22 @@ function createCharacterTurnCandidate(input: {
           draft,
           "subject_participant_indices",
           "AgencyCommitmentSemanticDraft",
-          asObjectArray(
-            expectProperty(
-              input.dialogue,
-              "participants",
-              "DialogueRecord",
-            ),
-            "DialogueRecord.participants",
-          ).length,
+          participantCount,
         ),
       }),
-      stance: expectString(
-        draft,
-        "stance",
-        "AgencyCommitmentSemanticDraft",
-      ),
-      terms: expectJsonObject(
-        expectProperty(
-          draft,
-          "terms",
-          "AgencyCommitmentSemanticDraft",
-        ),
-        "AgencyCommitmentSemanticDraft.terms",
-      ),
-    });
+    assertCanonicalCommitmentId: (commitmentId, index) => {
+      if (commitmentId !== commitmentId.toLowerCase()) {
+        throw new EngineFault(
+          "dialogue.orchestration.commitment_identity_invalid",
+          "Generated commitment IDs must be canonical lowercase and unique within the character turn",
+          {
+            command_id: input.command.commandId,
+            commitment_index: index,
+            commitment_id: commitmentId,
+          },
+        );
+      }
+    },
   });
   const turn: Record<string, JsonValue> = {
     turn_id: execution.characterTurnId,

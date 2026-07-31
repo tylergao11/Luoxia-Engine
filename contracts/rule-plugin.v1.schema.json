@@ -2046,7 +2046,8 @@
         "semantic_intent",
         "subjects",
         "stance",
-        "terms"
+        "terms",
+        "valid_through_day"
       ],
       "properties": {
         "commitment_id": {
@@ -2071,6 +2072,9 @@
         },
         "terms": {
           "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        },
+        "valid_through_day": {
+          "$ref": "common.v1.schema.json#/$defs/DayNumber"
         }
       }
     },
