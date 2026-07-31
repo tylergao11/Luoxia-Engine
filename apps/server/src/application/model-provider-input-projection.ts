@@ -69,7 +69,11 @@ function projectByRequestKind(
         "world_view",
         "DirectorDialogueEventsInput",
       );
-      const projectedWorld = projectDirectorWorldView(worldView);
+      // Lean world_view: keep actors/relations/facts for EventCard subjects;
+      // drop outgoing state-machine transitions (not required for card drafts).
+      const projectedWorld = projectDirectorWorldViewForDialogueEvents(
+        worldView,
+      );
       return Object.freeze({
         world_view: projectedWorld.worldView,
         dialogue: projectDialogue(
@@ -118,7 +122,11 @@ function projectByRequestKind(
         "world_view",
         "DirectorGoalPlanInput",
       );
-      const projectedWorld = projectDirectorWorldView(worldView);
+      // Planning uses selection_space in resident context; wire world_view
+      // only needs actor graph + current machine state, not transition graphs.
+      const projectedWorld = projectDirectorWorldViewForDialogueEvents(
+        worldView,
+      );
       return Object.freeze({
         world_view: projectedWorld.worldView,
         knowledge_view: projectKnowledgeView(
@@ -184,8 +192,11 @@ function projectByRequestKind(
         "entity_id",
         "EntityRef",
       );
+      // Dialogue output is reply + commitments, not machine transitions.
       return Object.freeze({
-        subjective_view: projectCharacterSubjectiveView(subjective),
+        subjective_view: projectCharacterSubjectiveView(subjective, {
+          machineMode: "current_only",
+        }),
         dialogue: projectDialogue(
           expectObjectProperty(input, "dialogue", "CharacterDialogueInput"),
           { characterEntityId },
@@ -228,6 +239,33 @@ function projectDirectorWorldView(world: JsonObject): {
   readonly worldView: JsonObject;
   readonly actorIndexByEntityId: ReadonlyMap<string, number>;
 } {
+  return projectDirectorWorldViewInternal(world, {
+    projectMachine: projectStateMachine,
+  });
+}
+
+/**
+ * Dialogue-events Provider view: same actor index table and graph facts, but
+ * state machines only carry current_state (no outgoing transition graph).
+ */
+function projectDirectorWorldViewForDialogueEvents(world: JsonObject): {
+  readonly worldView: JsonObject;
+  readonly actorIndexByEntityId: ReadonlyMap<string, number>;
+} {
+  return projectDirectorWorldViewInternal(world, {
+    projectMachine: projectStateMachineCurrentOnly,
+  });
+}
+
+function projectDirectorWorldViewInternal(
+  world: JsonObject,
+  options: {
+    readonly projectMachine: (machine: JsonObject) => JsonObject;
+  },
+): {
+  readonly worldView: JsonObject;
+  readonly actorIndexByEntityId: ReadonlyMap<string, number>;
+} {
   const actors = expectObjectArrayProperty(
     world,
     "actors",
@@ -242,7 +280,11 @@ function projectDirectorWorldView(world: JsonObject): {
   return Object.freeze({
     worldView: Object.freeze({
       day: expectInteger(world, "day", "DirectorWorldView"),
-      actors: Object.freeze(actors.map(projectDirectorActor)),
+      actors: Object.freeze(
+        actors.map((actor) =>
+          projectDirectorActor(actor, options.projectMachine),
+        ),
+      ),
       relations: Object.freeze(
         expectObjectArrayProperty(
           world,
@@ -255,7 +297,7 @@ function projectDirectorWorldView(world: JsonObject): {
           world,
           "world_machines",
           "DirectorWorldView",
-        ).map(projectStateMachine),
+        ).map(options.projectMachine),
       ),
       facts: Object.freeze(
         expectObjectArrayProperty(world, "facts", "DirectorWorldView").map(
@@ -267,20 +309,25 @@ function projectDirectorWorldView(world: JsonObject): {
   });
 }
 
-function projectDirectorActor(actor: JsonObject): JsonObject {
+function projectDirectorActor(
+  actor: JsonObject,
+  projectMachine: (machine: JsonObject) => JsonObject = projectStateMachine,
+): JsonObject {
+  const components = expectObjectArrayProperty(
+    actor,
+    "objective_components",
+    "DirectorActorView",
+  ).map(projectComponent);
   const projected: Record<string, JsonValue> = {
     entity_id: expectString(actor, "entity_id", "DirectorActorView"),
     status: expectString(actor, "status", "DirectorActorView"),
-    objective_components: Object.freeze(
-      expectObjectArrayProperty(
-        actor,
-        "objective_components",
-        "DirectorActorView",
-      ).map(projectComponent),
-    ),
   };
+  // Empty component lists are local shape noise; omit rather than send [].
+  if (components.length > 0) {
+    projected.objective_components = Object.freeze(components);
+  }
   if (actor.action_machine !== undefined) {
-    projected.action_machine = projectStateMachine(
+    projected.action_machine = projectMachine(
       expectJsonObject(
         actor.action_machine,
         "DirectorActorView.action_machine",
@@ -363,6 +410,23 @@ function projectStateMachine(machine: JsonObject): JsonObject {
         "outgoing_transitions",
         "StateMachineModelView",
       ).map(projectMachineTransition),
+    ),
+  });
+}
+
+function projectStateMachineCurrentOnly(machine: JsonObject): JsonObject {
+  return Object.freeze({
+    entered_day: expectInteger(
+      machine,
+      "entered_day",
+      "StateMachineModelView",
+    ),
+    current_state: projectMachineState(
+      expectObjectProperty(
+        machine,
+        "current_state",
+        "StateMachineModelView",
+      ),
     ),
   });
 }
@@ -693,20 +757,38 @@ function projectDialogueTurn(
       { speaker_key: speakerKey },
     );
   }
+  const speakerKind = expectString(
+    source,
+    "source_kind",
+    "DialogueTurnSource",
+  );
   const projected: Record<string, JsonValue> = {
     speaker_index: speakerIndex,
-    speaker_kind: expectString(source, "source_kind", "DialogueTurnSource"),
+    speaker_kind: speakerKind,
     text: expectString(turn, "text", "DialogueTurn"),
-    agency_commitments: Object.freeze(
-      expectObjectArrayProperty(
-        turn,
-        "agency_commitments",
-        "DialogueTurn",
-      ).map((commitment) =>
-        projectAgencyCommitment(commitment, subjectOptions),
-      ),
-    ),
   };
+  // Empty agency_commitments are local-only noise for non-character turns;
+  // character_mind may emit an empty array when the speaker made no commitment.
+  const commitments = expectObjectArrayProperty(
+    turn,
+    "agency_commitments",
+    "DialogueTurn",
+  );
+  if (speakerKind === "character_mind") {
+    if (commitments.length > 0) {
+      projected.agency_commitments = Object.freeze(
+        commitments.map((commitment) =>
+          projectAgencyCommitment(commitment, subjectOptions),
+        ),
+      );
+    }
+  } else if (commitments.length > 0) {
+    throw new EngineFault(
+      "model.provider_input.agency_commitment_speaker",
+      "Only character_mind dialogue turns may carry agency_commitments into the provider projection",
+      { speaker_kind: speakerKind, commitment_count: commitments.length },
+    );
+  }
   if (turn.emotion_id !== undefined) {
     projected.emotion_id = expectString(
       turn,
@@ -747,7 +829,12 @@ function projectAgencyCommitment(
   });
 }
 
-function projectCharacterSubjectiveView(subjective: JsonObject): JsonObject {
+function projectCharacterSubjectiveView(
+  subjective: JsonObject,
+  options: {
+    readonly machineMode?: "full" | "current_only";
+  } = {},
+): JsonObject {
   const character = expectObjectProperty(
     subjective,
     "character",
@@ -774,19 +861,22 @@ function projectCharacterSubjectiveView(subjective: JsonObject): JsonObject {
       },
     );
   }
+  const machine = expectObjectProperty(
+    subjective,
+    "action_machine",
+    "CharacterSubjectiveView",
+  );
+  const projectMachine =
+    options.machineMode === "current_only"
+      ? projectStateMachineCurrentOnly
+      : projectStateMachine;
   return Object.freeze({
     character_entity_id: characterEntityId,
     // Viewer is the subject character; do not re-emit the same UUID.
     knowledge_view: projectKnowledgeView(knowledge, {
       includeViewerEntityId: false,
     }),
-    action_machine: projectStateMachine(
-      expectObjectProperty(
-        subjective,
-        "action_machine",
-        "CharacterSubjectiveView",
-      ),
-    ),
+    action_machine: projectMachine(machine),
   });
 }
 

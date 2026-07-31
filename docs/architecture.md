@@ -163,7 +163,7 @@ ContentBundle 直接初始化角色行动状态机、世界状态机、角色私
 事件只有两种派发模式：
 
 1. **AutomaticEvent**：由 `director.daily_settlement` 派发并自动处理。WorldEvent 直接交规则；CharacterEvent 交给受影响角色的小 LLM 决定主观影响、主体选择与自身状态机变化。NPC 在日结中的移动属于此模式，不占用玩家 EventBudget。
-2. **EventCard**：只由独立 `director.dialogue_events` 根据玩家与已选 NPC/System 的已提交 transcript 提出；System reply 与规划输出都不能夹带事件。RulePlugin 在发卡前裁决，Runtime 封存精确结果并原子扣 AP。余额不足则不发布。卡片仅当日有效，无论玩家是否点击都不退款。
+2. **EventCard**：只由独立 `director.dialogue_events` 根据玩家与已选 NPC/System 的已提交 transcript 提出；System reply 与规划输出都不能夹带事件。RulePlugin 在发卡前裁决，Runtime 封存精确结果并原子扣 AP。余额不足则不发布。卡片仅当日有效，无论玩家是否点击都不退款。**预算门禁**：当且仅当当前 Session 的 human control 在当日 EventBudget 上 `remaining === 0` 时，Server 可跳过 `director.dialogue_events` 模型调用（不写 model invocation、不伪造 receipt）；语义等价于已判定不可能发卡。`remaining > 0` 时必须调用，不得按 transcript 形态或关键词猜测。Provider 侧 `dialogue_events` / `goal_plan` 的 world_view 与 `character.dialogue` 的 action_machine 可省略状态机 outgoing transitions，仅保留当前态语义；空 `objective_components` 不进入 Provider 线。generation Schema 指令不携带 `$schema` 元 URI，文案保持最短「JSON object only. Match schema:」；formal ModelRequest 与正式 Schema 验收仍可持有完整形状。
 
 玩家地图移动是独立的导航命令：点击目标地点后，Runtime 通过内容包绑定的 `navigation_resolver` 校验并提交 `EntityRelocateOp`。它不调用模型、不生成 EventCard、不扣 AP，但提交后的位移与客观轨迹会被后续 Director 看见。砍人、做饭等结果性事件没有结构化按钮，也不存在全局动作文本或自然语言命令行。玩家只能在有接收者的 NPC/System 对话中表达；Director 根据接收者、位置、关系、世界状态与完整 transcript 判断是否提出 EventCard。对 System 表达遥远的物理行动目标只会得到指引，不会被视为行动已经发生。
 
@@ -198,7 +198,7 @@ CharacterEvent 只描述角色遭遇了什么，不替角色规定反应。目�
 
 System 是常驻角色包装，但不是独立 LLM。`director.system_dialogue` 复用同一 Director，只增加 System 人设与回复模式 Prompt；它有独立对话历史与缓存键，不能形成第二份世界真相。该 request kind 的唯一输出是玩家可见 reply，不拥有 EventCard、GoalPlan 或 Definition 草案。
 
-`dialogue.start` / `dialogue.continue` 的 `interaction_kind` 是 GUI 明确选择，不从文本推断。System 交互总是先以 `director.system_dialogue` 生成独立 reply；只有 `interaction_kind=goal_plan` 或 `definition_draft` 时，才分别调用一次 `director.goal_plan` 或 `director.definition_draft`，普通 `dialogue` 不调用规划模型。Responder turn 提交后，事件始终由独立 `director.dialogue_events` 读取当前 transcript；reply、规划与事件各自使用独立 request kind、ModelProfile、Journal 身份和输出合同。任一必要模型失败都会阻塞本次交互，不生成兜底回复或兜底结果。
+`dialogue.start` / `dialogue.continue` 的 `interaction_kind` 是 GUI 明确选择，不从文本推断。System 交互总是先以 `director.system_dialogue` 生成独立 reply；只有 `interaction_kind=goal_plan` 或 `definition_draft` 时，才分别调用一次 `director.goal_plan` 或 `director.definition_draft`，普通 `dialogue` 不调用规划模型。Responder turn 提交后，若当日 EventBudget `remaining > 0`，事件由独立 `director.dialogue_events` 读取当前 transcript；`remaining === 0` 则跳过该模型调用。reply、规划与事件各自使用独立 request kind、ModelProfile、Journal 身份和输出合同。任一**已发起**的必要模型失败都会阻塞本次交互，不生成兜底回复或兜底结果。
 
 ### 6.2 Goal 到可行路径
 
@@ -526,7 +526,9 @@ Character：persona_blocks
   → 最小 Provider input
 ```
 
-`selection_space_block` 只属于 `director.goal_plan` 与 `director.definition_draft`，由 `ContentRuntimeCatalog` 对锁定 ContentBundle 做只读投影；它可丢弃、可重建，不是第二内容真相。块内只提供零基 index 与完成语义选择真正需要的名称、描述、规则模式、基数和 guidance，不暴露仅供 Server 恢复的正式 local ID、Rule ID 或 runtime-mutable 元数据。模型只返回 ordinal，Server 必须从 verified request 与同一 Content lock 本地恢复正式 Catalog 引用及 RuleRef，模型不能回传或发明正式内容引用。
+`selection_space_block` 只属于 `director.goal_plan` 与 `director.definition_draft`，由 `ContentRuntimeCatalog` 对锁定 ContentBundle 做只读投影；它可丢弃、可重建，不是第二内容真相。块内只提供零基 index 与完成语义选择真正需要的名称、描述、规则模式、基数和 guidance，不暴露仅供 Server 恢复的正式 local ID、Rule ID 或 runtime-mutable 元数据。若某条 planning/explanation/guidance 文本的 `content_digest` 已出现在同一 materialization 更早的 resident 块中，materializer 必须省略该字段，而不是把同一 PromptFragment 再抄进 selection_space。模型只返回 ordinal，Server 必须从 verified request 与同一 Content lock 本地恢复正式 Catalog 引用及 RuleRef，模型不能回传或发明正式内容引用。
+
+Provider 静态输出指令只携带一次输出 Schema（或 Ollama 的 native grammar 权威说明），不得再口头重复 `request_kind` / `output_kind`；动态 user JSON 只含该 kind 的 Provider 投影，空 `agency_commitments` 不进入投影。
 
 持续运行的首要优化指标是每单位游戏进程的未缓存输入 token，而不是模型调用次数。只有职责相同、生命周期相同的静态内容才能共享常驻前缀；静态块必须在前，变化的 operation input 必须在末尾，禁止为了减少调用次数合并职责域并破坏可复用前缀。缓存身份只使用内容地址 `block_id` / `resident_key` 与 `content_digest` / `resident_digest`；**禁止**人工 `block_revision`、`resident_revision`、`context_revision` 与无所有者的随机 resident/context UUID。任一常驻源变化必须产生新 digest，不得原地覆盖。Prompt 文本是只读派生物；ContentBundle 仍是唯一真相。本地 digest 只证明派生身份，真实缓存率必须由 `model_invocations` 的完整 usage 样本观测，不能在架构中预设命中率。
 

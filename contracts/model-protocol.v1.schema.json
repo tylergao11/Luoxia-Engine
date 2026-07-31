@@ -1707,6 +1707,91 @@
         }
       }
     },
+    "ProviderDialogueEventsStateMachineView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entered_day",
+        "current_state"
+      ],
+      "properties": {
+        "entered_day": {
+          "$ref": "common.v1.schema.json#/$defs/DayNumber"
+        },
+        "current_state": {
+          "$ref": "#/$defs/ProviderMachineStateView"
+        }
+      }
+    },
+    "ProviderDialogueEventsActorView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entity_id",
+        "status"
+      ],
+      "properties": {
+        "entity_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "status": {
+          "enum": [
+            "active",
+            "retired"
+          ]
+        },
+        "objective_components": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/ProviderComponentView"
+          }
+        },
+        "action_machine": {
+          "$ref": "#/$defs/ProviderDialogueEventsStateMachineView"
+        }
+      }
+    },
+    "ProviderDialogueEventsWorldView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "day",
+        "actors",
+        "relations",
+        "world_machines",
+        "facts"
+      ],
+      "properties": {
+        "day": {
+          "$ref": "common.v1.schema.json#/$defs/DayNumber"
+        },
+        "actors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProviderDialogueEventsActorView"
+          }
+        },
+        "relations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProviderRelationView"
+          }
+        },
+        "world_machines": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProviderDialogueEventsStateMachineView"
+          }
+        },
+        "facts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProviderFactView"
+          }
+        }
+      }
+    },
     "ProviderComponentView": {
       "type": "object",
       "additionalProperties": false,
@@ -1759,8 +1844,7 @@
       "additionalProperties": false,
       "required": [
         "entity_id",
-        "status",
-        "objective_components"
+        "status"
       ],
       "properties": {
         "entity_id": {
@@ -1774,6 +1858,7 @@
         },
         "objective_components": {
           "type": "array",
+          "minItems": 1,
           "items": {
             "$ref": "#/$defs/ProviderComponentView"
           }
@@ -1956,8 +2041,7 @@
       "required": [
         "speaker_index",
         "speaker_kind",
-        "text",
-        "agency_commitments"
+        "text"
       ],
       "properties": {
         "speaker_index": {
@@ -1980,6 +2064,7 @@
         },
         "agency_commitments": {
           "type": "array",
+          "minItems": 1,
           "items": {
             "$ref": "#/$defs/ProviderAgencyCommitmentView"
           }
@@ -1997,11 +2082,21 @@
               "speaker_kind"
             ]
           },
-          "else": {
+          "then": {
             "properties": {
               "agency_commitments": {
-                "maxItems": 0
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/ProviderAgencyCommitmentView"
+                }
               }
+            }
+          },
+          "else": {
+            "not": {
+              "required": [
+                "agency_commitments"
+              ]
             }
           }
         }
@@ -2052,7 +2147,14 @@
           "$ref": "#/$defs/ProviderKnowledgeView"
         },
         "action_machine": {
-          "$ref": "#/$defs/ProviderStateMachineView"
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ProviderStateMachineView"
+            },
+            {
+              "$ref": "#/$defs/ProviderDialogueEventsStateMachineView"
+            }
+          ]
         }
       }
     },
@@ -2198,7 +2300,7 @@
       ],
       "properties": {
         "world_view": {
-          "$ref": "#/$defs/ProviderDirectorWorldView"
+          "$ref": "#/$defs/ProviderDialogueEventsWorldView"
         },
         "dialogue": {
           "$ref": "#/$defs/ProviderDialogueView"
@@ -2241,7 +2343,7 @@
       ],
       "properties": {
         "world_view": {
-          "$ref": "#/$defs/ProviderDirectorWorldView"
+          "$ref": "#/$defs/ProviderDialogueEventsWorldView"
         },
         "knowledge_view": {
           "$ref": "#/$defs/ProviderKnowledgeView"

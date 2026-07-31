@@ -121,10 +121,19 @@ class DefaultPromptMaterializer implements PromptMaterializer {
       prompt_id: modePromptId,
       expectedPurposePrefix: "director_",
     });
+    // Selection-space guidance must not re-embed PromptFragment text already
+    // present earlier in this resident prefix (same content_digest).
+    const priorResidentDigests = new Set<string>(
+      directorCoreBlocks.map((block) => block.content_digest),
+    );
+    if (systemPersonaBlock !== undefined) {
+      priorResidentDigests.add(systemPersonaBlock.content_digest);
+    }
     const selectionSpaceBlock =
       this.#materializeSelectionSpace(
         input.contentBinding,
         input.mode,
+        priorResidentDigests,
       );
 
     const ordered_blocks = Object.freeze([
@@ -349,6 +358,7 @@ class DefaultPromptMaterializer implements PromptMaterializer {
   #materializeSelectionSpace(
     contentBinding: WorldContentBinding,
     mode: DirectorMode,
+    priorResidentDigests: ReadonlySet<string>,
   ): MaterializedPromptBlock | undefined {
     if (
       mode !== "goal_plan" &&
@@ -380,6 +390,7 @@ class DefaultPromptMaterializer implements PromptMaterializer {
             ref,
             worldId,
             catalog,
+            priorResidentDigests,
           )
         : definitionSelectionSpace(catalog);
     const text =
@@ -408,6 +419,7 @@ class DefaultPromptMaterializer implements PromptMaterializer {
     catalog: ReturnType<
       ContentRuntimeCatalog["listModelSelectionCatalog"]
     > & object,
+    priorResidentDigests: ReadonlySet<string>,
   ): JsonObject {
     const capabilities = catalog.capabilities.filter(
       (entry) =>
@@ -449,8 +461,8 @@ class DefaultPromptMaterializer implements PromptMaterializer {
     return Object.freeze({
       selection_space_kind: "goal_plan",
       capabilities: Object.freeze(
-        capabilities.map((entry, index) =>
-          Object.freeze({
+        capabilities.map((entry, index) => {
+          const base: Record<string, JsonValue> = {
             index,
             name: expectProperty(entry, "name", "Capability"),
             description: expectProperty(
@@ -458,24 +470,27 @@ class DefaultPromptMaterializer implements PromptMaterializer {
               "description",
               "Capability",
             ),
-            ...(entry.planning_prompt_id === undefined
-              ? {}
-              : {
-                  planning_guidance: this.#promptText(
-                    ref,
-                    expectString(
-                      entry,
-                      "planning_prompt_id",
-                      "Capability",
-                    ),
-                  ),
-                }),
-          }),
-        ),
+          };
+          if (entry.planning_prompt_id !== undefined) {
+            const guidance = this.#promptTextIfNew(
+              ref,
+              expectString(
+                entry,
+                "planning_prompt_id",
+                "Capability",
+              ),
+              priorResidentDigests,
+            );
+            if (guidance !== undefined) {
+              base.planning_guidance = guidance;
+            }
+          }
+          return Object.freeze(base);
+        }),
       ),
       world_laws: Object.freeze(
-        worldLaws.map((entry, index) =>
-          Object.freeze({
+        worldLaws.map((entry, index) => {
+          const base: Record<string, JsonValue> = {
             index,
             name: expectProperty(entry, "name", "WorldLaw"),
             description: expectProperty(
@@ -493,24 +508,27 @@ class DefaultPromptMaterializer implements PromptMaterializer {
               "priority",
               "WorldLaw",
             ),
-            ...(entry.explanation_prompt_id === undefined
-              ? {}
-              : {
-                  explanation: this.#promptText(
-                    ref,
-                    expectString(
-                      entry,
-                      "explanation_prompt_id",
-                      "WorldLaw",
-                    ),
-                  ),
-                }),
-          }),
-        ),
+          };
+          if (entry.explanation_prompt_id !== undefined) {
+            const explanation = this.#promptTextIfNew(
+              ref,
+              expectString(
+                entry,
+                "explanation_prompt_id",
+                "WorldLaw",
+              ),
+              priorResidentDigests,
+            );
+            if (explanation !== undefined) {
+              base.explanation = explanation;
+            }
+          }
+          return Object.freeze(base);
+        }),
       ),
       generation_archetypes: Object.freeze(
-        generationArchetypes.map((entry, index) =>
-          Object.freeze({
+        generationArchetypes.map((entry, index) => {
+          const base: Record<string, JsonValue> = {
             index,
             name: expectProperty(
               entry,
@@ -527,18 +545,44 @@ class DefaultPromptMaterializer implements PromptMaterializer {
               "result_kind",
               "GenerationArchetype",
             ),
-            guidance: this.#promptText(
-              ref,
-              expectString(
-                entry,
-                "prompt_fragment_id",
-                "GenerationArchetype",
-              ),
+          };
+          const guidance = this.#promptTextIfNew(
+            ref,
+            expectString(
+              entry,
+              "prompt_fragment_id",
+              "GenerationArchetype",
             ),
-          }),
-        ),
+            priorResidentDigests,
+          );
+          if (guidance !== undefined) {
+            base.guidance = guidance;
+          }
+          return Object.freeze(base);
+        }),
       ),
     });
+  }
+
+  /**
+   * Returns prompt text only when its digest is not already carried by an
+   * earlier resident block of the same materialization. Missing fragments still
+   * fail hard; omission means the model already has the identical text.
+   */
+  #promptTextIfNew(
+    ref: {
+      readonly bundle_id: string;
+      readonly bundle_digest: string;
+    },
+    promptId: string,
+    priorResidentDigests: ReadonlySet<string>,
+  ): string | undefined {
+    const text = this.#promptText(ref, promptId);
+    const textDigest = this.#digest.sha256(text);
+    if (priorResidentDigests.has(textDigest)) {
+      return undefined;
+    }
+    return text;
   }
 
   #promptText(

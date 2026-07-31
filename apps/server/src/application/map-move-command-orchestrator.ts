@@ -301,6 +301,7 @@ function createNavigationInput(
       binding_id: stored.session.controlBindingId,
     }),
     actor: Object.freeze({
+      world_id: stored.session.worldId,
       entity_id: stored.session.playerEntityId,
     }),
     destination: expectJsonObject(

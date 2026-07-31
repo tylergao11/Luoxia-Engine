@@ -14,6 +14,7 @@ import type {
   ResolvedModelInvocation,
 } from "../../application/model-gateway.js";
 import {
+  buildProviderStructuredOutputInstruction,
   deriveProviderOutputSchema,
   parseProviderJsonObject,
   readProviderTokenCount,
@@ -211,11 +212,7 @@ function buildOllamaMessages(
   messages.push(
     Object.freeze({
       role: "system",
-      content:
-        `Return exactly one JSON object for Luoxia operation ${resolved.requestKind}. ` +
-        `Set output_kind to ${JSON.stringify(resolved.requestKind)}. ` +
-        "The following user JSON is the operation input. Do not add Markdown, prose, or wrapper fields. " +
-        "The native structured-output grammar supplied with this request is authoritative.",
+      content: buildProviderStructuredOutputInstruction(),
     }),
   );
   messages.push(

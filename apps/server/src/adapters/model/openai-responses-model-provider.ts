@@ -16,6 +16,7 @@ import type {
   ResolvedModelInvocation,
 } from "../../application/model-gateway.js";
 import {
+  buildProviderOutputSchemaInstruction,
   deriveProviderOutputSchema,
   parseProviderJsonObject,
   readProviderTokenCount,
@@ -221,12 +222,7 @@ function buildResponsesInput(
       content: [
         Object.freeze({
           type: "input_text",
-          text:
-            `Return exactly one JSON object for Luoxia operation ${resolved.requestKind}. ` +
-            `Set output_kind to ${JSON.stringify(resolved.requestKind)}. ` +
-            "The following user JSON is the operation input. " +
-            "Do not add Markdown, prose, or wrapper fields. " +
-            `The following JSON Schema is the exact output contract: ${JSON.stringify(outputSchema)}`,
+          text: buildProviderOutputSchemaInstruction(outputSchema),
         }),
       ],
     }),

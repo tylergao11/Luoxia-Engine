@@ -151,7 +151,47 @@ export function deriveProviderOutputSchema(input: {
   }
   const requestKind =
     input.requestKind as keyof typeof MODEL_OUTPUT_SCHEMA_REF_BY_REQUEST_KIND;
-  return input.contracts.exportStandaloneSchema(
-    MODEL_OUTPUT_SCHEMA_REF_BY_REQUEST_KIND[requestKind],
+  return stripGenerationSchemaMeta(
+    input.contracts.exportStandaloneSchema(
+      MODEL_OUTPUT_SCHEMA_REF_BY_REQUEST_KIND[requestKind],
+    ),
   );
+}
+
+/**
+ * Generation Schema is a derived view of formal ModelOutput. Drop meta the
+ * model cannot use ($schema draft URI) so the cacheable static instruction
+ * carries only validation shape.
+ */
+function stripGenerationSchemaMeta(schema: JsonObject): JsonObject {
+  if (!Object.prototype.hasOwnProperty.call(schema, "$schema")) {
+    return schema;
+  }
+  const next: Record<string, JsonValue> = {};
+  for (const [key, value] of Object.entries(schema)) {
+    if (key === "$schema") {
+      continue;
+    }
+    next[key] = value as JsonValue;
+  }
+  return Object.freeze(next);
+}
+
+/**
+ * Static trailing developer/system instruction before dynamic user JSON.
+ * output_kind is already constrained by the schema; keep wording minimal and
+ * stable for provider prefix caching.
+ */
+export function buildProviderOutputSchemaInstruction(
+  outputSchema: JsonObject,
+): string {
+  return `JSON object only. Match schema: ${JSON.stringify(outputSchema)}`;
+}
+
+/**
+ * Ollama uses a native structured-output grammar instead of inlining the full
+ * schema; keep the static instruction short and free of dynamic content.
+ */
+export function buildProviderStructuredOutputInstruction(): string {
+  return "JSON object only. Native format grammar is authoritative.";
 }

@@ -316,30 +316,21 @@ class DefaultDialogueCommandOrchestrator
       "character",
     );
 
-    const directorRun = await this.#directorRuns.prepare({
+    const eventObservation = await this.#observeDialogueEventsIfBudgetAllows({
       command: stored,
-      dialogueId: stored.dialogueExecution.dialogueId,
-      requestKind: "director.dialogue_events",
-    });
-    const directorReceipt = await this.#models.directorDialogueEvents({
-      worldId: stored.session.worldId,
       dialogueId: stored.dialogueExecution.dialogueId,
       latestPlayerTurnId: stored.dialogueExecution.humanTurnId,
-      requestId: directorRun.modelRequestId,
-    });
-    assertDirectorDialogueReceiptIdentity({
-      command: stored,
-      requestId: directorRun.modelRequestId,
-      receipt: directorReceipt,
       expectedBasisRevision: characterWorldRevision,
     });
     const finalWorldRevision =
-      await this.#publishDirectorEventCards({
-        command: stored,
-        run: directorRun,
-        modelReceipt: directorReceipt,
-        startingWorldRevision: characterWorldRevision,
-      });
+      eventObservation === undefined
+        ? characterWorldRevision
+        : await this.#publishDirectorEventCards({
+            command: stored,
+            run: eventObservation.run,
+            modelReceipt: eventObservation.modelReceipt,
+            startingWorldRevision: characterWorldRevision,
+          });
 
     return this.#finalizer.completeDialogueAccepted({
       sessionId: stored.session.sessionId,
@@ -425,41 +416,34 @@ class DefaultDialogueCommandOrchestrator
       "director_system",
     );
 
+    // Observe events at post-reply revision before planning may advance the world.
+    const eventObservation = await this.#observeDialogueEventsIfBudgetAllows({
+      command: input.command,
+      dialogueId: execution.dialogueId,
+      latestPlayerTurnId: execution.humanTurnId,
+      expectedBasisRevision: responseWorldRevision,
+    });
     const planningInvocation =
       await this.#invokeSystemPlanningModel({
         command: input.command,
         interactionKind: input.interactionKind,
         basisRevision: responseWorldRevision,
       });
-    const eventRun = await this.#directorRuns.prepare({
-      command: input.command,
-      dialogueId: execution.dialogueId,
-      requestKind: "director.dialogue_events",
-    });
-    const eventReceipt = await this.#models.directorDialogueEvents({
-      worldId: input.command.session.worldId,
-      dialogueId: execution.dialogueId,
-      latestPlayerTurnId: execution.humanTurnId,
-      requestId: eventRun.modelRequestId,
-    });
-    assertDirectorDialogueReceiptIdentity({
-      command: input.command,
-      requestId: eventRun.modelRequestId,
-      receipt: eventReceipt,
-      expectedBasisRevision: responseWorldRevision,
-    });
     const planningWorldRevision =
       await this.#publishSystemPlanningDraft({
         command: input.command,
         planningInvocation,
         startingWorldRevision: responseWorldRevision,
       });
-    const finalWorldRevision = await this.#publishDirectorEventCards({
-      command: input.command,
-      run: eventRun,
-      modelReceipt: eventReceipt,
-      startingWorldRevision: planningWorldRevision,
-    });
+    const finalWorldRevision =
+      eventObservation === undefined
+        ? planningWorldRevision
+        : await this.#publishDirectorEventCards({
+            command: input.command,
+            run: eventObservation.run,
+            modelReceipt: eventObservation.modelReceipt,
+            startingWorldRevision: planningWorldRevision,
+          });
 
     return this.#finalizer.completeDialogueAccepted({
       sessionId: input.command.session.sessionId,
@@ -1161,6 +1145,66 @@ class DefaultDialogueCommandOrchestrator
       expectedPreparedAt: input.identity.preparedAt,
       digest: this.#digest,
       expectedConstraints: undefined,
+    });
+  }
+
+  /**
+   * Observe transcript for EventCards when budget can still fund a card.
+   * remaining === 0: skip model (no fabricated receipt). Callers publish
+   * cards after any planning applies, possibly at a higher world revision.
+   */
+  async #observeDialogueEventsIfBudgetAllows(input: {
+    readonly command: StoredReceivedCommand;
+    readonly dialogueId: string;
+    readonly latestPlayerTurnId: string;
+    readonly expectedBasisRevision: number;
+  }): Promise<
+    | {
+        readonly run: DialogueDirectorRunRecord;
+        readonly modelReceipt: VerifiedModelInvocationReceipt;
+      }
+    | undefined
+  > {
+    const binding = await this.#worlds.resolveCurrent(
+      input.command.session.worldId,
+    );
+    assertWorldRevision(
+      binding,
+      input.expectedBasisRevision,
+      input.command,
+      "event_card",
+    );
+    const worldState = worldStateFromSnapshot(
+      binding.record.snapshot.value,
+    );
+    const remaining = readEventBudgetRemaining(
+      worldState,
+      input.command.session.controlBindingId,
+    );
+    if (remaining === 0) {
+      return undefined;
+    }
+
+    const eventRun = await this.#directorRuns.prepare({
+      command: input.command,
+      dialogueId: input.dialogueId,
+      requestKind: "director.dialogue_events",
+    });
+    const eventReceipt = await this.#models.directorDialogueEvents({
+      worldId: input.command.session.worldId,
+      dialogueId: input.dialogueId,
+      latestPlayerTurnId: input.latestPlayerTurnId,
+      requestId: eventRun.modelRequestId,
+    });
+    assertDirectorDialogueReceiptIdentity({
+      command: input.command,
+      requestId: eventRun.modelRequestId,
+      receipt: eventReceipt,
+      expectedBasisRevision: input.expectedBasisRevision,
+    });
+    return Object.freeze({
+      run: eventRun,
+      modelReceipt: eventReceipt,
     });
   }
 
@@ -2933,6 +2977,68 @@ function worldStateFromSnapshot(snapshot: JsonObject): JsonObject {
     expectProperty(snapshot, "world_state", "WorldSnapshot"),
     "WorldSnapshot.world_state",
   );
+}
+
+/**
+ * EventBudget remaining for the session control on the world's current day.
+ * Matches SessionView arithmetic: capacity - sum(charge cost amounts).
+ * Missing or ambiguous budget is a hard fault (player phase must own exactly one).
+ */
+function readEventBudgetRemaining(
+  worldState: JsonObject,
+  controlBindingId: string,
+): number {
+  const dayCycle = expectJsonObject(
+    expectProperty(worldState, "day_cycle", "WorldState"),
+    "WorldState.day_cycle",
+  );
+  const day = expectInteger(dayCycle, "day", "DayCycleState");
+  const matches = asObjectArray(
+    expectProperty(worldState, "event_budgets", "WorldState"),
+    "WorldState.event_budgets",
+  ).filter((budget) => {
+    const control = expectJsonObject(
+      expectProperty(budget, "control", "EventBudgetState"),
+      "EventBudgetState.control",
+    );
+    return (
+      expectInteger(budget, "day", "EventBudgetState") === day &&
+      expectString(control, "binding_id", "ControlBindingRef") ===
+        controlBindingId
+    );
+  });
+  if (matches.length !== 1) {
+    throw new EngineFault(
+      "dialogue.orchestration.event_budget_match",
+      "Current day and control binding must resolve to exactly one event budget before dialogue_events",
+      {
+        day,
+        control_binding_id: controlBindingId,
+        matches: matches.length,
+      },
+    );
+  }
+  const budget = matches[0] as JsonObject;
+  const capacity = expectInteger(budget, "capacity", "EventBudgetState");
+  const spent = asObjectArray(
+    expectProperty(budget, "charges", "EventBudgetState"),
+    "EventBudgetState.charges",
+  ).reduce((total, charge) => {
+    const cost = expectJsonObject(
+      expectProperty(charge, "cost", "EventCharge"),
+      "EventCharge.cost",
+    );
+    return total + expectInteger(cost, "amount", "EventCost");
+  }, 0);
+  const remaining = capacity - spent;
+  if (remaining < 0) {
+    throw new EngineFault(
+      "dialogue.orchestration.event_budget_negative",
+      "Event budget charges exceed its capacity",
+      { capacity, spent, remaining },
+    );
+  }
+  return remaining;
 }
 
 function requireSystemRunIdentity(
