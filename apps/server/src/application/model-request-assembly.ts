@@ -1083,8 +1083,12 @@ async function continueModelFromStored(input: {
 
 /**
  * Closed set of definite failures after a complete provider HTTP response
- * whose body/output is unusable. Timeout / transport / no-response stay
- * ambiguous and never authorize re-dispatch.
+ * whose body/output is unusable. Timeout / transport / no-response and
+ * HTTP 5xx stay ambiguous and never authorize re-dispatch.
+ *
+ * `model.provider.http_error` is definite only when `details.http_status`
+ * is an integer in 400..499 (client error with a complete HTTP response).
+ * Missing or non-4xx status stays ambiguous.
  *
  * `contract.value.invalid` is definite only with
  * `failure_provenance === "provider_output_gate"` (stamped by ModelGateway
@@ -1119,6 +1123,9 @@ function isDefiniteModelProviderFailure(
   if (DEFINITE_COMPLETED_PROVIDER_FAILURE_CODES.has(error.code)) {
     return true;
   }
+  if (isDefiniteHttpClientError(error)) {
+    return true;
+  }
   if (error.code === "contract.value.invalid") {
     return (
       error.details !== undefined &&
@@ -1128,6 +1135,22 @@ function isDefiniteModelProviderFailure(
   return (
     error.code.startsWith("model.semantic.") ||
     error.code.startsWith("model.output.")
+  );
+}
+
+function isDefiniteHttpClientError(error: EngineFault): boolean {
+  if (error.code !== "model.provider.http_error") {
+    return false;
+  }
+  if (error.details === undefined) {
+    return false;
+  }
+  const status = error.details.http_status;
+  return (
+    typeof status === "number" &&
+    Number.isInteger(status) &&
+    status >= 400 &&
+    status <= 499
   );
 }
 

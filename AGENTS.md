@@ -126,7 +126,7 @@ unity-host        → contracts-runtime/portable
 - MaterializationProfile 不再把资产生成或审核策略伪装成 RulePlugin operation。`on_demand` profile 必须通过 `asset_provider_dependency_id` 精确引用一个 required `asset_provider` DependencyLock；生成、存储 I/O 属于 Server AssetProvider adapter，返回值按 Materialization Schema 视为不可信 JSON；review / promotion 只使用 profile 的闭合声明。required asset provider 必须命中组合根显式注册的 adapter，不得默认或降级。
 - Server Materialization Ledger 是 Request、Candidate、ReviewReceipt 与 AssetAcceptance 的唯一事实所有者。AssetAcceptance packet 固定使用 `asset_acceptance { acceptance_id }` source，`packet_id === acceptance_id`、`cause_id === request_id`，并且只能包含一个带 `source_request_id + acceptance_id` 的 `visual_binding.upsert`；普通 RulePlugin 与 EventOutcome 无权写 VisualBinding。Review 与 Acceptance 原子入账，World Core 必须在持锁快照内重验全链、确定性上下文、主体 revision 与唯一 op，旧 revision 只转为 `superseded`，不得回退、重生成或直接写 WorldState。
 - RulePlugin v1 制品 ABI 固定为进程内 `RulePluginModuleV1`。Unity 是唯一目标 Client / Stage Runtime；公开 Client Bridge 保持引擎中立以维护正确依赖边界，但不建设其他引擎 Host 或跨引擎制品兼容。Unity Host 只接受部署组合根显式注册的 Stage Runtime 实现，manifest `entrypoint` 只由 Unity 构建与部署流程解释，Engine 不扫描或动态加载目录。
-- ModelProvider 是组合根唯一显式注入的 Server adapter；具体供应商、模型、密钥与超时是必填部署配置，不进入 ContentBundle、WorldState 或公共协议。v1 不做 Engine 级模型响应缓存，也不在 dispatched 后自动重试；超时或结果未知保持 ambiguous/blocked；完整响应上的确定失败写入 `failed_definite` 并以原始失败码返回。
+- ModelProvider 是组合根唯一显式注入的 Server adapter；具体供应商、模型、密钥与超时是必填部署配置，不进入 ContentBundle、WorldState 或公共协议。v1 不做 Engine 级模型响应缓存，也不在 dispatched 后自动重试；超时、传输失败、HTTP 5xx 或结果未知保持 ambiguous/blocked；完整响应上的确定失败（含 `http_error` 且 `http_status` 为 4xx）写入 `failed_definite` 并以原始失败码返回。
 - `DecimalString` 是最长 128 字符的规范十进制定点串，只做精确运算，不使用浮点或舍入；禁止负零、无效前导零与小数尾零。首个严格零和的 `ledger.post` 可以原子创建不存在的 ledger，之后所有过账仍必须严格零和；v1 没有 mint/burn 特权，发行与库存账户由内容定义并通过普通平衡分录表达，Engine 不内置财政账户。
 
 ## 变更授权边界
