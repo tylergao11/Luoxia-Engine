@@ -8,6 +8,7 @@ import type {
 import type { ApplyPacketResultDocument } from "@luoxia/world-core";
 import {
   CONTRACT_REF,
+  type JsonObject,
   type PackLockDocument,
   type RulePluginChoiceResolutionDocument,
   type SaveEnvelopeDocument,
@@ -127,6 +128,18 @@ export interface StoredAmbiguousModelInvocation
   readonly phase: "dispatched_ambiguous";
 }
 
+/**
+ * Internal journal stage only. Not a public protocol field. Records that a
+ * provider returned a complete response which failed a closed definite gate.
+ * The same request_id may re-dispatch on the next explicit command retry.
+ */
+export interface StoredFailedDefiniteModelInvocation
+  extends StoredModelInvocationBase {
+  readonly phase: "failed_definite";
+  readonly failureCode: string;
+  readonly outputSummary: JsonObject;
+}
+
 export interface StoredVerifiedModelInvocation
   extends StoredModelInvocationBase {
   readonly phase: "verified";
@@ -137,6 +150,7 @@ export interface StoredVerifiedModelInvocation
 export type StoredModelInvocation =
   | StoredPreparedModelInvocation
   | StoredAmbiguousModelInvocation
+  | StoredFailedDefiniteModelInvocation
   | StoredVerifiedModelInvocation;
 
 export interface RecordedModelInvocationVerifier {
@@ -171,11 +185,17 @@ export interface ModelInvocationJournal
     receipt: VerifiedModelInvocationReceipt,
     usage: ProviderUsageObservation,
   ): Promise<StoredVerifiedModelInvocation>;
+  recordFailedDefinite(input: {
+    readonly requestId: string;
+    readonly failureCode: string;
+    readonly outputSummary: JsonObject;
+  }): Promise<StoredFailedDefiniteModelInvocation>;
 }
 
 export type DailySettlementRunPhase =
   | "prepared"
   | "blocked_ambiguous"
+  | "failed_definite"
   | "response_verified";
 
 export interface DailySettlementRunRecord {

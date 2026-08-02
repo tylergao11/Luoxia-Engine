@@ -72,4 +72,4 @@ deployment module 导出异步 `createLuoxiaRuntimeDeployment({ contracts, diges
 psql "$env:DATABASE_URL" -v ON_ERROR_STOP=1 -f apps/server/migrations/0001_atomic_packet_store.sql
 ```
 
-`0001_atomic_packet_store.sql` 是空数据库的完整初始 DDL。已有库若早于 `dialogue.close` 日结执行身份，需在确认源状态后显式执行 `0002_day_cycle_dialogue_close_identity.sql`；Engine 不同时维护新旧表形状，也不自动升级。
+`0001_atomic_packet_store.sql` 是空数据库的完整初始 DDL。已有库若早于 `dialogue.close` 日结执行身份，需在确认源状态后显式执行 `0002_day_cycle_dialogue_close_identity.sql`；已有库若早于模型调用内部阶段 `failed_definite`，需显式执行 `0003_model_invocation_failed_definite.sql`。Engine 不同时维护新旧表形状，也不自动升级。

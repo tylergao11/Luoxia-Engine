@@ -34,6 +34,7 @@ import type {
   RecordedModelInvocationVerifier,
   RuntimeModelInvocationJournal,
   StoredAmbiguousModelInvocation,
+  StoredFailedDefiniteModelInvocation,
   StoredModelInvocation,
   StoredVerifiedModelInvocation,
 } from "../../application/runtime-persistence.js";
@@ -237,6 +238,41 @@ class PostgresRuntimeInvocationJournalAdapter
             current,
             documents,
             usage,
+          );
+        },
+      );
+    } catch (error: unknown) {
+      throw normalizeInvocationJournalError(error);
+    }
+  }
+
+  public async recordFailedDefinite(input: {
+    readonly requestId: string;
+    readonly failureCode: string;
+    readonly outputSummary: JsonObject;
+  }): Promise<StoredFailedDefiniteModelInvocation> {
+    const verifiedRequestId = assertUuid(this.#contracts, input.requestId);
+    assertFailureCode(input.failureCode, verifiedRequestId);
+    const outputSummary = expectJsonObject(
+      input.outputSummary,
+      "ModelInvocation.failure_output_summary",
+    );
+    try {
+      return await withPostgresTransaction(
+        this.#pool,
+        "BEGIN ISOLATION LEVEL READ COMMITTED",
+        async (client) => {
+          const current = await readModelInvocationByRequestIdLocked(
+            client,
+            this.#contracts,
+            verifiedRequestId,
+          );
+          return persistFailedDefiniteInvocation(
+            client,
+            this.#contracts,
+            current,
+            input.failureCode,
+            outputSummary,
           );
         },
       );
@@ -538,6 +574,8 @@ interface ModelInvocationRow {
   readonly input_tokens_text: string | null;
   readonly cached_input_tokens_text: string | null;
   readonly output_tokens_text: string | null;
+  readonly failure_code: string | null;
+  readonly failure_output_summary: unknown | null;
 }
 
 interface DailySettlementRunRow extends ModelInvocationRow {
@@ -567,7 +605,9 @@ const MODEL_INVOCATION_SELECT = `SELECT
   token_usage_status,
   input_tokens::text AS input_tokens_text,
   cached_input_tokens::text AS cached_input_tokens_text,
-  output_tokens::text AS output_tokens_text
+  output_tokens::text AS output_tokens_text,
+  failure_code,
+  failure_output_summary
 FROM luoxia_engine.model_invocations`;
 
 const DAILY_RUN_SELECT = `SELECT
@@ -589,7 +629,9 @@ const DAILY_RUN_SELECT = `SELECT
   invocation.token_usage_status,
   invocation.input_tokens::text AS input_tokens_text,
   invocation.cached_input_tokens::text AS cached_input_tokens_text,
-  invocation.output_tokens::text AS output_tokens_text
+  invocation.output_tokens::text AS output_tokens_text,
+  invocation.failure_code,
+  invocation.failure_output_summary
 FROM luoxia_engine.daily_settlement_runs AS run
 JOIN luoxia_engine.model_invocations AS invocation
   ON invocation.request_id = run.model_request_id
@@ -631,8 +673,11 @@ async function insertOrMatchPreparedInvocation(
        input_tokens,
        cached_input_tokens,
        output_tokens,
+       failure_code,
+       failure_output_summary,
        prepared_at,
        dispatched_at,
+       failed_at,
        verified_at
      ) VALUES (
        $1::uuid,
@@ -650,7 +695,10 @@ async function insertOrMatchPreparedInvocation(
        NULL,
        NULL,
        NULL,
+       NULL,
+       NULL,
        clock_timestamp(),
+       NULL,
        NULL,
        NULL
      )
@@ -741,24 +789,40 @@ async function markPreparedInvocationDispatched(
   contracts: ContractValidator,
   current: StoredModelInvocation,
 ): Promise<StoredAmbiguousModelInvocation> {
-  if (current.phase !== "prepared") {
+  if (
+    current.phase !== "prepared" &&
+    current.phase !== "failed_definite"
+  ) {
     throw new EngineFault(
       "model.invocation.dispatch_forbidden",
-      "Model dispatch is allowed exactly once from prepared state",
+      "Model dispatch is allowed from prepared or failed_definite state",
       {
         request_id: current.requestId,
         phase: current.phase,
       },
     );
   }
-  const update = await client.query(
-    `UPDATE luoxia_engine.model_invocations
-        SET invocation_status = 'dispatched_ambiguous',
-            dispatched_at = clock_timestamp()
-      WHERE request_id = $1::uuid
-        AND invocation_status = 'prepared'`,
-    [current.requestId],
-  );
+  const update =
+    current.phase === "prepared"
+      ? await client.query(
+          `UPDATE luoxia_engine.model_invocations
+              SET invocation_status = 'dispatched_ambiguous',
+                  dispatched_at = clock_timestamp()
+            WHERE request_id = $1::uuid
+              AND invocation_status = 'prepared'`,
+          [current.requestId],
+        )
+      : await client.query(
+          `UPDATE luoxia_engine.model_invocations
+              SET invocation_status = 'dispatched_ambiguous',
+                  dispatched_at = clock_timestamp(),
+                  failure_code = NULL,
+                  failure_output_summary = NULL,
+                  failed_at = NULL
+            WHERE request_id = $1::uuid
+              AND invocation_status = 'failed_definite'`,
+          [current.requestId],
+        );
   if (update.rowCount !== 1) {
     throw new EngineFault(
       "model.invocation.state_conflict",
@@ -776,6 +840,82 @@ async function markPreparedInvocationDispatched(
       "model.invocation.database_corrupt",
       "Dispatched model invocation did not enter ambiguous state",
       { request_id: current.requestId, phase: stored.phase },
+    );
+  }
+  return stored;
+}
+
+async function persistFailedDefiniteInvocation(
+  client: PoolClient,
+  contracts: ContractValidator,
+  current: StoredModelInvocation,
+  failureCode: string,
+  outputSummary: JsonObject,
+): Promise<StoredFailedDefiniteModelInvocation> {
+  if (current.phase === "failed_definite") {
+    if (
+      current.failureCode !== failureCode ||
+      !jsonEquals(current.outputSummary, outputSummary)
+    ) {
+      throw new EngineFault(
+        "model.invocation.failed_definite_conflict",
+        "request_id is already bound to a different definite failure",
+        { request_id: current.requestId },
+      );
+    }
+    return current;
+  }
+  if (current.phase !== "dispatched_ambiguous") {
+    throw new EngineFault(
+      "model.invocation.failed_definite_forbidden",
+      "Definite failure can only be recorded from dispatched_ambiguous state",
+      {
+        request_id: current.requestId,
+        phase: current.phase,
+      },
+    );
+  }
+  const update = await client.query(
+    `UPDATE luoxia_engine.model_invocations
+        SET invocation_status = 'failed_definite',
+            failure_code = $2,
+            failure_output_summary = $3::jsonb,
+            failed_at = clock_timestamp()
+      WHERE request_id = $1::uuid
+        AND invocation_status = 'dispatched_ambiguous'`,
+    [
+      current.requestId,
+      failureCode,
+      JSON.stringify(outputSummary),
+    ],
+  );
+  if (update.rowCount !== 1) {
+    throw new EngineFault(
+      "model.invocation.state_conflict",
+      "Model invocation state changed before definite failure persistence",
+      { request_id: current.requestId },
+    );
+  }
+  const stored = await readModelInvocationByRequestIdLocked(
+    client,
+    contracts,
+    current.requestId,
+  );
+  if (stored.phase !== "failed_definite") {
+    throw new EngineFault(
+      "model.invocation.database_corrupt",
+      "Definite failure did not retain its failure record",
+      { request_id: current.requestId, phase: stored.phase },
+    );
+  }
+  if (
+    stored.failureCode !== failureCode ||
+    !jsonEquals(stored.outputSummary, outputSummary)
+  ) {
+    throw new EngineFault(
+      "model.invocation.failed_definite_conflict",
+      "Persisted definite failure does not match the recorded failure",
+      { request_id: current.requestId },
     );
   }
   return stored;
@@ -1157,6 +1297,14 @@ function validateDailyRunRow(
       invocation,
     });
   }
+  if (invocation.phase === "failed_definite") {
+    return Object.freeze({
+      worldId: row.run_world_id,
+      day,
+      phase: "failed_definite",
+      invocation,
+    });
+  }
   return Object.freeze({
     worldId: row.run_world_id,
     day,
@@ -1214,7 +1362,8 @@ function validateModelInvocationRow(
     if (
       row.response_document !== null ||
       row.proof_document !== null ||
-      hasProviderUsageColumns(row)
+      hasProviderUsageColumns(row) ||
+      hasFailureColumns(row)
     ) {
       throw modelInvocationShapeFault(row);
     }
@@ -1224,7 +1373,8 @@ function validateModelInvocationRow(
     if (
       row.response_document !== null ||
       row.proof_document !== null ||
-      hasProviderUsageColumns(row)
+      hasProviderUsageColumns(row) ||
+      hasFailureColumns(row)
     ) {
       throw modelInvocationShapeFault(row);
     }
@@ -1233,8 +1383,34 @@ function validateModelInvocationRow(
       phase: "dispatched_ambiguous" as const,
     });
   }
+  if (row.invocation_status === "failed_definite") {
+    if (
+      row.response_document !== null ||
+      row.proof_document !== null ||
+      hasProviderUsageColumns(row) ||
+      row.failure_code === null ||
+      row.failure_output_summary === null
+    ) {
+      throw modelInvocationShapeFault(row);
+    }
+    assertFailureCode(row.failure_code, row.request_id);
+    const outputSummary = expectJsonObject(
+      row.failure_output_summary as JsonObject,
+      "ModelInvocation.failure_output_summary",
+    );
+    return Object.freeze({
+      ...base,
+      phase: "failed_definite" as const,
+      failureCode: row.failure_code,
+      outputSummary,
+    });
+  }
   if (row.invocation_status === "verified") {
-    if (row.response_document === null || row.proof_document === null) {
+    if (
+      row.response_document === null ||
+      row.proof_document === null ||
+      hasFailureColumns(row)
+    ) {
       throw modelInvocationShapeFault(row);
     }
     const response = contracts.assertObject(
@@ -1305,6 +1481,28 @@ function hasProviderUsageColumns(row: ModelInvocationRow): boolean {
     row.cached_input_tokens_text !== null ||
     row.output_tokens_text !== null
   );
+}
+
+function hasFailureColumns(row: ModelInvocationRow): boolean {
+  return (
+    row.failure_code !== null ||
+    row.failure_output_summary !== null
+  );
+}
+
+function assertFailureCode(failureCode: string, requestId: string): void {
+  if (
+    failureCode.length === 0 ||
+    failureCode.length > 256 ||
+    failureCode !== failureCode.trim() ||
+    /[\r\n]/.test(failureCode)
+  ) {
+    throw new EngineFault(
+      "model.invocation.failure_code_invalid",
+      "Definite model failure code must be a non-empty trimmed string up to 256 characters",
+      { request_id: requestId, failure_code: failureCode },
+    );
+  }
 }
 
 function readStoredProviderUsage(

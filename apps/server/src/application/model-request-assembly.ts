@@ -1002,7 +1002,8 @@ async function continueModelFromStored(input: {
           world_revision: input.stored.worldRevision,
         },
       );
-    case "prepared": {
+    case "prepared":
+    case "failed_definite": {
       const authorization = (
         await input.journal.markDispatched(input.prepared)
       ).authorization;
@@ -1019,6 +1020,35 @@ async function continueModelFromStored(input: {
           error instanceof EngineFault &&
           error.code === "runtime.kernel.model_dispatch_ambiguous"
         ) {
+          throw error;
+        }
+        if (isDefiniteModelProviderFailure(error)) {
+          try {
+            await input.journal.recordFailedDefinite({
+              requestId: input.requestId,
+              failureCode: error.code,
+              outputSummary: definiteFailureOutputSummary(error),
+            });
+          } catch (persistError: unknown) {
+            throw new EngineFault(
+              "runtime.kernel.model_dispatch_ambiguous",
+              "Model invocation was dispatched but definite failure could not be recorded; execution is blocked",
+              {
+                request_id: input.requestId,
+                request_kind: input.stored.requestKind,
+                world_id: input.stored.worldId,
+                world_revision: input.stored.worldRevision,
+                failure_code: error.code,
+                ...(error.details !== undefined
+                  ? { failure_details: error.details }
+                  : {}),
+                persist_failure_code:
+                  persistError instanceof EngineFault
+                    ? persistError.code
+                    : "model.dispatch.failed_definite_persist_unknown",
+              },
+            );
+          }
           throw error;
         }
         throw new EngineFault(
@@ -1049,6 +1079,38 @@ async function continueModelFromStored(input: {
       );
     }
   }
+}
+
+/**
+ * Closed set of definite failures after a complete provider response.
+ * Network / timeout / no response stay ambiguous and never auto-retry.
+ */
+function isDefiniteModelProviderFailure(
+  error: unknown,
+): error is EngineFault {
+  if (!(error instanceof EngineFault)) {
+    return false;
+  }
+  if (
+    error.code === "model.provider.response_not_json" ||
+    error.code === "model.provider.output_not_json" ||
+    error.code === "contract.value.invalid" ||
+    error.code === "model.response.failed"
+  ) {
+    return true;
+  }
+  return (
+    error.code.startsWith("model.semantic.") ||
+    error.code.startsWith("model.output.")
+  );
+}
+
+function definiteFailureOutputSummary(error: EngineFault): JsonObject {
+  return Object.freeze({
+    failure_code: error.code,
+    message: error.message,
+    ...(error.details !== undefined ? { details: error.details } : {}),
+  });
 }
 
 function expectIntegerSafe(object: JsonObject, field: string): number {

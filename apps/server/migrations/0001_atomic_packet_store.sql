@@ -587,8 +587,11 @@ CREATE TABLE luoxia_engine.model_invocations (
   input_tokens bigint,
   cached_input_tokens bigint,
   output_tokens bigint,
+  failure_code text,
+  failure_output_summary jsonb,
   prepared_at timestamptz NOT NULL,
   dispatched_at timestamptz,
+  failed_at timestamptz,
   verified_at timestamptz,
   CONSTRAINT model_invocations_world_foreign_key FOREIGN KEY (world_id)
     REFERENCES luoxia_engine.worlds(world_id),
@@ -601,6 +604,7 @@ CREATE TABLE luoxia_engine.model_invocations (
     invocation_status IN (
       'prepared',
       'dispatched_ambiguous',
+      'failed_definite',
       'verified'
     )
   ),
@@ -615,6 +619,10 @@ CREATE TABLE luoxia_engine.model_invocations (
       proof_document IS NULL
       OR jsonb_typeof(proof_document) = 'object'
     )
+    AND (
+      failure_output_summary IS NULL
+      OR jsonb_typeof(failure_output_summary) = 'object'
+    )
   ),
   CONSTRAINT model_invocations_status_shape CHECK (
     (
@@ -623,6 +631,9 @@ CREATE TABLE luoxia_engine.model_invocations (
       AND response_document IS NULL
       AND proof_document IS NULL
       AND verified_at IS NULL
+      AND failure_code IS NULL
+      AND failure_output_summary IS NULL
+      AND failed_at IS NULL
     )
     OR (
       invocation_status = 'dispatched_ambiguous'
@@ -630,6 +641,23 @@ CREATE TABLE luoxia_engine.model_invocations (
       AND response_document IS NULL
       AND proof_document IS NULL
       AND verified_at IS NULL
+      AND failure_code IS NULL
+      AND failure_output_summary IS NULL
+      AND failed_at IS NULL
+    )
+    OR (
+      invocation_status = 'failed_definite'
+      AND dispatched_at IS NOT NULL
+      AND response_document IS NULL
+      AND proof_document IS NULL
+      AND verified_at IS NULL
+      AND failure_code IS NOT NULL
+      AND char_length(failure_code) BETWEEN 1 AND 256
+      AND failure_code = btrim(failure_code)
+      AND failure_code !~ E'[\\r\\n]'
+      AND failure_output_summary IS NOT NULL
+      AND jsonb_typeof(failure_output_summary) = 'object'
+      AND failed_at IS NOT NULL
     )
     OR (
       invocation_status = 'verified'
@@ -637,6 +665,9 @@ CREATE TABLE luoxia_engine.model_invocations (
       AND response_document IS NOT NULL
       AND proof_document IS NOT NULL
       AND verified_at IS NOT NULL
+      AND failure_code IS NULL
+      AND failure_output_summary IS NULL
+      AND failed_at IS NULL
     )
   ),
   CONSTRAINT model_invocations_provider_usage_shape CHECK (
