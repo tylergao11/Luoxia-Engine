@@ -48,6 +48,12 @@ interface RenderCandidate {
   readonly instance: RenderInstance;
 }
 
+interface RenderPresenceScope {
+  readonly playerEntityId: string;
+  readonly playerLocationEntityId: string;
+  readonly entityLocationById: ReadonlyMap<string, string>;
+}
+
 type RenderInstance =
   | {
       readonly kind: "world";
@@ -71,6 +77,14 @@ type RenderInstance =
  *
  * It is synchronous and read-only: no RulePlugin, model, asset I/O, fallback
  * guessing, or WorldState mutation is permitted on this path.
+ *
+ * Visibility and presence are distinct gates: a fact may be known to the
+ * player (visible lore, dossier) while its subject is elsewhere. Any entity
+ * that has an active location relation (the WorldDefinition's
+ * player_location_relation_type_id) only renders nodes while that relation
+ * targets the player's current location. Subjects without a location
+ * relation (locations themselves, world-level bindings) follow visibility
+ * alone.
  */
 export function createSessionRenderNodeProjector(
   dependencies: SessionRenderNodeProjectorDependencies,
@@ -137,6 +151,11 @@ class DefaultSessionRenderNodeProjector
         relations,
         visibleEntityIds: visibility.entityIds,
         visibleRelationIds: visibility.relationIds,
+        presence: Object.freeze({
+          playerEntityId: input.playerEntityId,
+          playerLocationEntityId: visibility.playerLocationEntityId,
+          entityLocationById: visibility.entityLocationById,
+        }),
       }),
     );
     const assets = indexContentObjects(
@@ -187,8 +206,19 @@ class DefaultSessionRenderNodeProjector
     readonly relations: ReadonlyMap<string, JsonObject>;
     readonly visibleEntityIds: ReadonlySet<string>;
     readonly visibleRelationIds: ReadonlySet<string>;
+    readonly presence: RenderPresenceScope;
   }): readonly RenderCandidate[] {
     const candidates: RenderCandidate[] = [];
+    const presenceAllows = (entityId: string): boolean => {
+      if (entityId === input.presence.playerEntityId) {
+        return true;
+      }
+      const location = input.presence.entityLocationById.get(entityId);
+      return (
+        location === undefined ||
+        location === input.presence.playerLocationEntityId
+      );
+    };
     const worldDefinitionId = expectString(
       input.content.worldDefinition,
       "world_id",
@@ -233,7 +263,7 @@ class DefaultSessionRenderNodeProjector
             kind: "entity",
             localId: subjectId,
           });
-          if (!input.visibleEntityIds.has(entityId)) {
+          if (!input.visibleEntityIds.has(entityId) || !presenceAllows(entityId)) {
             break;
           }
           const entity = requireActiveEntity(
@@ -256,6 +286,9 @@ class DefaultSessionRenderNodeProjector
         }
         case "definition":
           for (const entityId of input.visibleEntityIds) {
+            if (!presenceAllows(entityId)) {
+              continue;
+            }
             const entity = requireActiveEntity(
               input.entities,
               entityId,
@@ -512,6 +545,7 @@ function resolveVisibleWorldFacts(input: {
   readonly entityIds: ReadonlySet<string>;
   readonly relationIds: ReadonlySet<string>;
   readonly playerLocationEntityId: string;
+  readonly entityLocationById: ReadonlyMap<string, string>;
 } {
   const entityIds = new Set<string>([input.playerEntityId]);
   const relationIds = new Set<string>();
@@ -575,6 +609,49 @@ function resolveVisibleWorldFacts(input: {
     "Player location",
   );
   entityIds.add(playerLocationEntityId);
+
+  // Presence index: every active location relation places its from-entity at
+  // exactly one location. Ambiguous placement is corrupt world state.
+  const entityLocationById = new Map<string, string>();
+  for (const relation of input.relations.values()) {
+    if (
+      expectString(relation, "state", "RelationState") !== "active" ||
+      !jsonEquals(
+        expectProperty(relation, "relation_type", "RelationState"),
+        locationRelationType,
+      )
+    ) {
+      continue;
+    }
+    const fromId = entitySubjectId(
+      expectJsonObject(
+        expectProperty(relation, "from", "RelationState"),
+        "RelationState.from",
+      ),
+      input.worldId,
+    );
+    const toId = entitySubjectId(
+      expectJsonObject(
+        expectProperty(relation, "to", "RelationState"),
+        "RelationState.to",
+      ),
+      input.worldId,
+    );
+    if (fromId === undefined || toId === undefined) {
+      continue;
+    }
+    if (entityLocationById.has(fromId)) {
+      throw new EngineFault(
+        "session.render_node.entity_location_ambiguous",
+        "Entity must have at most one active location relation",
+        {
+          entity_id: fromId,
+          relation_id: expectString(relation, "relation_id", "RelationState"),
+        },
+      );
+    }
+    entityLocationById.set(fromId, toId);
+  }
 
   for (const relation of input.relations.values()) {
     if (
@@ -642,6 +719,7 @@ function resolveVisibleWorldFacts(input: {
     entityIds,
     relationIds,
     playerLocationEntityId,
+    entityLocationById,
   });
 }
 
