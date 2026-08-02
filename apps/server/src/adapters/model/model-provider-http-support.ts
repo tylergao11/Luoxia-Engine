@@ -179,13 +179,19 @@ function stripGenerationSchemaMeta(schema: JsonObject): JsonObject {
 
 /**
  * Static trailing developer/system instruction before dynamic user JSON.
- * output_kind is already constrained by the schema; keep wording minimal and
- * stable for provider prefix caching.
+ * output_kind is already constrained by the schema; keep wording generic,
+ * kind-agnostic, and stable for provider prefix caching. Do not add
+ * request-kind examples or sample field values.
  */
 export function buildProviderOutputSchemaInstruction(
   outputSchema: JsonObject,
 ): string {
-  return `JSON object only. Match schema: ${JSON.stringify(outputSchema)}`;
+  return [
+    "Return one JSON object only.",
+    "No markdown, prose, or code fences.",
+    "Match the schema exactly: required fields present, unknown fields forbidden, types and enums exact.",
+    `Schema: ${JSON.stringify(outputSchema)}`,
+  ].join(" ");
 }
 
 /**
