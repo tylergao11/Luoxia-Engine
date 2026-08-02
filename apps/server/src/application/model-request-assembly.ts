@@ -1082,22 +1082,48 @@ async function continueModelFromStored(input: {
 }
 
 /**
- * Closed set of definite failures after a complete provider response.
- * Network / timeout / no response stay ambiguous and never auto-retry.
+ * Closed set of definite failures after a complete provider HTTP response
+ * whose body/output is unusable. Timeout / transport / no-response stay
+ * ambiguous and never authorize re-dispatch.
+ *
+ * `contract.value.invalid` is definite only with
+ * `failure_provenance === "provider_output_gate"` (stamped by ModelGateway
+ * when the provider response fails a closed output Schema gate). Local
+ * journal/proof re-validation after a valid provider result must stay
+ * ambiguous — it must not authorize another dispatch.
  */
+const DEFINITE_COMPLETED_PROVIDER_FAILURE_CODES: ReadonlySet<string> =
+  new Set([
+    "model.provider.response_not_json",
+    "model.provider.output_not_json",
+    "model.provider.response_incomplete",
+    "model.provider.refused",
+    "model.provider.response_shape",
+    "model.provider.response_role_invalid",
+    "model.provider.unexpected_tool_call",
+    "model.provider.output_text_count",
+    "model.provider.response_model_mismatch",
+    "model.provider.response_too_large",
+    "model.provider.response_encoding_invalid",
+    "model.response.failed",
+  ]);
+
+const PROVIDER_OUTPUT_GATE_PROVENANCE = "provider_output_gate";
+
 function isDefiniteModelProviderFailure(
   error: unknown,
 ): error is EngineFault {
   if (!(error instanceof EngineFault)) {
     return false;
   }
-  if (
-    error.code === "model.provider.response_not_json" ||
-    error.code === "model.provider.output_not_json" ||
-    error.code === "contract.value.invalid" ||
-    error.code === "model.response.failed"
-  ) {
+  if (DEFINITE_COMPLETED_PROVIDER_FAILURE_CODES.has(error.code)) {
     return true;
+  }
+  if (error.code === "contract.value.invalid") {
+    return (
+      error.details !== undefined &&
+      error.details.failure_provenance === PROVIDER_OUTPUT_GATE_PROVENANCE
+    );
   }
   return (
     error.code.startsWith("model.semantic.") ||

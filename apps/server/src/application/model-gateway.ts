@@ -434,19 +434,21 @@ export class ModelGateway {
               this.#contracts.assert(kindSchema, output);
             } catch (kindError: unknown) {
               if (kindError instanceof EngineFault) {
-                throw new EngineFault(kindError.code, kindError.message, {
-                  ...(kindError.details !== undefined
-                    ? { output_validation: kindError.details }
-                    : {}),
-                  ...(error.details !== undefined
-                    ? { response_validation: error.details }
-                    : {}),
-                  ...(typeof outputKind === "string"
-                    ? { output_kind: outputKind }
-                    : {}),
-                  request_kind: requestKind,
-                  output_schema: kindSchema,
-                });
+                throw markProviderOutputGateFailure(
+                  new EngineFault(kindError.code, kindError.message, {
+                    ...(kindError.details !== undefined
+                      ? { output_validation: kindError.details }
+                      : {}),
+                    ...(error.details !== undefined
+                      ? { response_validation: error.details }
+                      : {}),
+                    ...(typeof outputKind === "string"
+                      ? { output_kind: outputKind }
+                      : {}),
+                    request_kind: requestKind,
+                    output_schema: kindSchema,
+                  }),
+                );
               }
               throw kindError;
             }
@@ -455,10 +457,8 @@ export class ModelGateway {
             this.#contracts.assert(CONTRACT_REF.modelOutput, output);
           } catch (outputError: unknown) {
             if (outputError instanceof EngineFault) {
-              throw new EngineFault(
-                outputError.code,
-                outputError.message,
-                {
+              throw markProviderOutputGateFailure(
+                new EngineFault(outputError.code, outputError.message, {
                   ...(outputError.details !== undefined
                     ? { output_validation: outputError.details }
                     : {}),
@@ -469,16 +469,14 @@ export class ModelGateway {
                     ? { output_kind: outputKind }
                     : {}),
                   request_kind: requestKind,
-                },
+                }),
               );
             }
             throw outputError;
           }
           const responseRequestKind = (candidate as JsonObject).request_kind;
-          throw new EngineFault(
-            error.code,
-            error.message,
-            {
+          throw markProviderOutputGateFailure(
+            new EngineFault(error.code, error.message, {
               ...(error.details !== undefined
                 ? { response_validation: error.details }
                 : {}),
@@ -490,9 +488,12 @@ export class ModelGateway {
               ...(typeof responseRequestKind === "string"
                 ? { response_request_kind: responseRequestKind }
                 : {}),
-            },
+            }),
           );
         }
+      }
+      if (error instanceof EngineFault) {
+        throw markProviderOutputGateFailure(error);
       }
       throw error;
     }
@@ -501,12 +502,34 @@ export class ModelGateway {
     assertResponseOutputDigest(response, this.#digest);
     this.#semanticGate.assertResponse(invocation.request, response);
 
+    // Proof is locally constructed after a valid provider output gate; its
+    // Schema failure is not a provider-output-gate definite failure.
     const proof = this.#contracts.assertObject(
       CONTRACT_REF.verifiedModelOutput,
       createProof(response),
     );
     return Object.freeze({ response, proof });
   }
+}
+
+/**
+ * Internal provenance for journal definite-failure classification.
+ * Only Schema/output-gate failures on the completed provider response may
+ * carry this marker; journal/proof re-validation must not.
+ */
+const PROVIDER_OUTPUT_GATE_PROVENANCE = "provider_output_gate";
+
+function markProviderOutputGateFailure(error: EngineFault): EngineFault {
+  if (
+    error.details !== undefined &&
+    error.details.failure_provenance === PROVIDER_OUTPUT_GATE_PROVENANCE
+  ) {
+    return error;
+  }
+  return new EngineFault(error.code, error.message, {
+    ...(error.details !== undefined ? error.details : {}),
+    failure_provenance: PROVIDER_OUTPUT_GATE_PROVENANCE,
+  });
 }
 
 interface ValidatedModelResponse {
