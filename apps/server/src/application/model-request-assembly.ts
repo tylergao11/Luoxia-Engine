@@ -9,6 +9,7 @@ import {
   jsonEquals,
   type JsonDigest,
   type JsonObject,
+  type JsonValue,
 } from "@luoxia/contracts-runtime";
 import type {
   StateMachineContractAuthority,
@@ -1455,7 +1456,7 @@ function assertStoredCharacterReactIdentity(
     expectInteger(dynamicInput, "day", "CharacterReactInput") !== input.day ||
     !jsonEquals(
       expectProperty(dynamicInput, "events", "CharacterReactInput"),
-      input.events as unknown as import("@luoxia/contracts-runtime").JsonValue,
+      Object.freeze(input.events.map((event): JsonValue => event)),
     )
   ) {
     throw new EngineFault(
