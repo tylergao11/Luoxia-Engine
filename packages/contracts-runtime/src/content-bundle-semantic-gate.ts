@@ -146,11 +146,13 @@ interface BundleIndex {
   readonly capabilities: ReadonlySet<string>;
   readonly worldLaws: ReadonlySet<string>;
   readonly generationArchetypes: ReadonlySet<string>;
+  readonly stages: ReadonlySet<string>;
   readonly prompts: ReadonlyMap<string, PromptRecord>;
   readonly artProfiles: ReadonlySet<string>;
   readonly materializationProfiles: ReadonlyMap<string, JsonObject>;
   readonly assets: ReadonlySet<string>;
   readonly bindings: ReadonlySet<string>;
+  readonly loreEntries: ReadonlySet<string>;
   readonly machines: ReadonlyMap<string, MachineRecord>;
   readonly machineBindings: ReadonlySet<string>;
   readonly directorProfileWorlds: ReadonlyMap<string, string>;
@@ -304,6 +306,14 @@ function buildIndex(
     "archetype_id",
     "gameplay.generation_archetypes",
   );
+  const stages = uniqueIdSet(
+    asObjectArray(
+      expectProperty(gameplay, "stages", "gameplay"),
+      "gameplay.stages",
+    ),
+    "stage_id",
+    "gameplay.stages",
+  );
   const prompts = buildPromptIndex(
     asObjectArray(
       expectProperty(gameplay, "prompt_fragments", "gameplay"),
@@ -347,6 +357,14 @@ function buildIndex(
     ),
     "binding_id",
     "presentation.bindings",
+  );
+  const loreEntries = uniqueIdSet(
+    asObjectArray(
+      expectProperty(presentation, "lore_entries", "presentation"),
+      "presentation.lore_entries",
+    ),
+    "lore_id",
+    "presentation.lore_entries",
   );
 
   uniqueIdSet(
@@ -414,11 +432,13 @@ function buildIndex(
     capabilities,
     worldLaws,
     generationArchetypes,
+    stages,
     prompts,
     artProfiles,
     materializationProfiles,
     assets,
     bindings,
+    loreEntries,
     machines,
     machineBindings,
     directorProfileWorlds,
@@ -859,6 +879,13 @@ function assertWorlds(bundle: JsonObject, index: BundleIndex): void {
         index,
       );
     }
+
+    requireId(
+      index.stages,
+      expectString(world, "improv_stage_id", path),
+      `${path}.improv_stage_id`,
+      "stage",
+    );
 
     const system = expectJsonObject(
       expectProperty(world, "system", path),
@@ -1361,6 +1388,54 @@ function assertGameplay(bundle: JsonObject, index: BundleIndex): void {
       undefined,
     );
   }
+
+  const stages = asObjectArray(
+    expectProperty(gameplay, "stages", "gameplay"),
+    "gameplay.stages",
+  );
+  for (const [stageIndex, stage] of stages.entries()) {
+    const path = `gameplay.stages[${stageIndex}]`;
+    assertStageRef(
+      expectJsonObject(expectProperty(stage, "stage_ref", path), `${path}.stage_ref`),
+      `${path}.stage_ref`,
+      index,
+    );
+    const participants = expectJsonObject(
+      expectProperty(stage, "participants", path),
+      `${path}.participants`,
+    );
+    const minParticipants = expectInteger(participants, "min", `${path}.participants`);
+    const maxParticipants = expectInteger(participants, "max", `${path}.participants`);
+    if (maxParticipants < minParticipants) {
+      throw semanticFault(
+        "content_bundle.semantic.stage_participants_range",
+        "StageCatalogEntry.participants.max must be greater than or equal to min",
+        {
+          path: `${path}.participants`,
+          min: minParticipants,
+          max: maxParticipants,
+        },
+      );
+    }
+    const completionRuleIds = asStringArray(
+      expectProperty(stage, "completion_rule_ids", path),
+      `${path}.completion_rule_ids`,
+    );
+    for (const [ruleIndex, ruleId] of completionRuleIds.entries()) {
+      requireId(
+        index.worldLaws,
+        ruleId,
+        `${path}.completion_rule_ids[${ruleIndex}]`,
+        "world_law",
+      );
+    }
+    expectJsonObject(
+      expectProperty(stage, "initial_state", path),
+      `${path}.initial_state`,
+    );
+    expectString(stage, "cost_class", path);
+    expectString(stage, "npc_participation", path);
+  }
 }
 
 function assertPresentation(bundle: JsonObject, index: BundleIndex): void {
@@ -1464,6 +1539,66 @@ function assertPresentation(bundle: JsonObject, index: BundleIndex): void {
       "asset",
       undefined,
     );
+  }
+
+  const loreEntries = asObjectArray(
+    expectProperty(presentation, "lore_entries", "presentation"),
+    "presentation.lore_entries",
+  );
+  const loreUniqueness = new Set<string>();
+  for (const [loreIndex, lore] of loreEntries.entries()) {
+    const path = `presentation.lore_entries[${loreIndex}]`;
+    const subjectKind = expectString(lore, "subject_kind", path);
+    const subjectId = expectString(lore, "subject_id", path);
+    const loreKind = expectString(lore, "lore_kind", path);
+    const ordinal = expectInteger(lore, "ordinal", path);
+    if (loreKind === "opening" || loreKind === "nightfall") {
+      if (subjectKind !== "world") {
+        throw semanticFault(
+          "content_bundle.semantic.lore_subject_kind",
+          "opening and nightfall lore entries must use subject_kind=world",
+          { path, lore_kind: loreKind, subject_kind: subjectKind },
+        );
+      }
+      requireId(index.worlds, subjectId, `${path}.subject_id`, "world");
+    } else if (
+      loreKind === "arrival" ||
+      loreKind === "profile" ||
+      loreKind === "hearsay"
+    ) {
+      if (subjectKind !== "entity") {
+        throw semanticFault(
+          "content_bundle.semantic.lore_subject_kind",
+          "arrival, profile, and hearsay lore entries must use subject_kind=entity",
+          { path, lore_kind: loreKind, subject_kind: subjectKind },
+        );
+      }
+      requireId(index.entities, subjectId, `${path}.subject_id`, "entity");
+    } else {
+      throw semanticFault(
+        "content_bundle.semantic.lore_kind",
+        `Unknown LoreEntry.lore_kind ${loreKind}`,
+        { path, lore_kind: loreKind },
+      );
+    }
+    const uniquenessKey = `${subjectId}\0${loreKind}\0${String(ordinal)}`;
+    if (loreUniqueness.has(uniquenessKey)) {
+      throw semanticFault(
+        "content_bundle.semantic.lore_unique",
+        "LoreEntry (subject_id, lore_kind, ordinal) must be unique within the ContentBundle",
+        {
+          path,
+          subject_id: subjectId,
+          lore_kind: loreKind,
+          ordinal,
+        },
+      );
+    }
+    loreUniqueness.add(uniquenessKey);
+    expectJsonObject(expectProperty(lore, "body", path), `${path}.body`);
+    if (lore.title !== undefined) {
+      expectJsonObject(expectProperty(lore, "title", path), `${path}.title`);
+    }
   }
 
   const bindings = asObjectArray(
@@ -1801,6 +1936,9 @@ function assertContentUpgradeMappingTarget(
       break;
     case "state_machine_binding":
       exists = index.machineBindings.has(targetId);
+      break;
+    case "stage":
+      exists = index.stages.has(targetId);
       break;
     default: {
       throw semanticFault(

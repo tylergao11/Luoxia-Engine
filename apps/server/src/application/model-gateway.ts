@@ -1,6 +1,7 @@
 import {
   CONTRACT_REF,
   EngineFault,
+  MODEL_OUTPUT_SCHEMA_REF_BY_REQUEST_KIND,
   assertJsonValue,
   deepFreezeJson,
   expectInteger,
@@ -399,10 +400,102 @@ export class ModelGateway {
     invocation: PreparedModelInvocation,
     candidate: unknown,
   ): ValidatedModelResponse {
-    const response = this.#contracts.assertObject(
-      CONTRACT_REF.modelResponse,
-      candidate,
-    );
+    let response: ModelResponseDocument;
+    try {
+      response = this.#contracts.assertObject(
+        CONTRACT_REF.modelResponse,
+        candidate,
+      );
+    } catch (error: unknown) {
+      if (
+        error instanceof EngineFault &&
+        error.code === "contract.value.invalid" &&
+        typeof candidate === "object" &&
+        candidate !== null
+      ) {
+        const output = (candidate as JsonObject).output;
+        if (
+          typeof output === "object" &&
+          output !== null &&
+          !Array.isArray(output)
+        ) {
+          const outputKind = (output as JsonObject).output_kind;
+          const requestKind = expectString(
+            invocation.request.value,
+            "request_kind",
+            "ModelRequest",
+          );
+          const kindSchema =
+            MODEL_OUTPUT_SCHEMA_REF_BY_REQUEST_KIND[
+              requestKind as keyof typeof MODEL_OUTPUT_SCHEMA_REF_BY_REQUEST_KIND
+            ];
+          if (kindSchema !== undefined) {
+            try {
+              this.#contracts.assert(kindSchema, output);
+            } catch (kindError: unknown) {
+              if (kindError instanceof EngineFault) {
+                throw new EngineFault(kindError.code, kindError.message, {
+                  ...(kindError.details !== undefined
+                    ? { output_validation: kindError.details }
+                    : {}),
+                  ...(error.details !== undefined
+                    ? { response_validation: error.details }
+                    : {}),
+                  ...(typeof outputKind === "string"
+                    ? { output_kind: outputKind }
+                    : {}),
+                  request_kind: requestKind,
+                  output_schema: kindSchema,
+                });
+              }
+              throw kindError;
+            }
+          }
+          try {
+            this.#contracts.assert(CONTRACT_REF.modelOutput, output);
+          } catch (outputError: unknown) {
+            if (outputError instanceof EngineFault) {
+              throw new EngineFault(
+                outputError.code,
+                outputError.message,
+                {
+                  ...(outputError.details !== undefined
+                    ? { output_validation: outputError.details }
+                    : {}),
+                  ...(error.details !== undefined
+                    ? { response_validation: error.details }
+                    : {}),
+                  ...(typeof outputKind === "string"
+                    ? { output_kind: outputKind }
+                    : {}),
+                  request_kind: requestKind,
+                },
+              );
+            }
+            throw outputError;
+          }
+          const responseRequestKind = (candidate as JsonObject).request_kind;
+          throw new EngineFault(
+            error.code,
+            error.message,
+            {
+              ...(error.details !== undefined
+                ? { response_validation: error.details }
+                : {}),
+              output_validated: true,
+              ...(typeof outputKind === "string"
+                ? { output_kind: outputKind }
+                : {}),
+              request_kind: requestKind,
+              ...(typeof responseRequestKind === "string"
+                ? { response_request_kind: responseRequestKind }
+                : {}),
+            },
+          );
+        }
+      }
+      throw error;
+    }
 
     assertModelCorrelation(invocation.request, response);
     assertResponseOutputDigest(response, this.#digest);

@@ -146,6 +146,10 @@ class DefaultPromptMaterializer implements PromptMaterializer {
         : [selectionSpaceBlock]),
       modeBlock,
     ]);
+    // DeepSeek/OpenAI-style providers send ordered_blocks as consecutive system
+    // messages (stable resident prefix), then schema instruction, then dynamic
+    // user JSON only. Keep shared core/persona/selection before mode so prefix
+    // caching does not see operation input earlier than necessary.
     const coreRefs = directorCoreBlocks.map((block) =>
       cacheBlockRef(block),
     );

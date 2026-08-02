@@ -203,6 +203,7 @@
         "dialogue_close_resolver",
         "default_art_profile_id",
         "default_materialization_profile_id",
+        "improv_stage_id",
         "system",
         "event_budget"
       ],
@@ -271,6 +272,9 @@
           "$ref": "common.v1.schema.json#/$defs/Identifier"
         },
         "default_materialization_profile_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "improv_stage_id": {
           "$ref": "common.v1.schema.json#/$defs/Identifier"
         },
         "default_stage": {
@@ -916,7 +920,8 @@
         "capabilities",
         "world_laws",
         "generation_archetypes",
-        "prompt_fragments"
+        "prompt_fragments",
+        "stages"
       ],
       "properties": {
         "capabilities": {
@@ -942,6 +947,94 @@
           "items": {
             "$ref": "#/$defs/PromptFragment"
           }
+        },
+        "stages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StageCatalogEntry"
+          }
+        }
+      }
+    },
+    "StageCatalogEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage_id",
+        "stage_kind",
+        "name",
+        "description",
+        "intent_coverage",
+        "stage_ref",
+        "participants",
+        "npc_participation",
+        "completion_rule_ids",
+        "initial_state",
+        "cost_class"
+      ],
+      "properties": {
+        "stage_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "stage_kind": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "name": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "description": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "intent_coverage": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "example_intents": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+          }
+        },
+        "stage_ref": {
+          "$ref": "#/$defs/StageRef"
+        },
+        "participants": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "min",
+            "max"
+          ],
+          "properties": {
+            "min": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "max": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "npc_participation": {
+          "enum": [
+            "commitment_required",
+            "unilateral"
+          ]
+        },
+        "completion_rule_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/Identifier"
+          }
+        },
+        "initial_state": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        },
+        "cost_class": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
         }
       }
     },
@@ -1151,7 +1244,8 @@
         "art_profiles",
         "materialization_profiles",
         "assets",
-        "bindings"
+        "bindings",
+        "lore_entries"
       ],
       "properties": {
         "art_profiles": {
@@ -1177,6 +1271,57 @@
           "items": {
             "$ref": "#/$defs/PackBinding"
           }
+        },
+        "lore_entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LoreEntry"
+          }
+        }
+      }
+    },
+    "LoreEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lore_id",
+        "subject_kind",
+        "subject_id",
+        "lore_kind",
+        "body",
+        "ordinal"
+      ],
+      "properties": {
+        "lore_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "subject_kind": {
+          "enum": [
+            "world",
+            "entity"
+          ]
+        },
+        "subject_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "lore_kind": {
+          "enum": [
+            "opening",
+            "arrival",
+            "profile",
+            "hearsay",
+            "nightfall"
+          ]
+        },
+        "title": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "body": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "ordinal": {
+          "type": "integer",
+          "minimum": 0
         }
       }
     },
@@ -1470,7 +1615,8 @@
             "materialization_profile",
             "asset",
             "binding",
-            "state_machine_binding"
+            "state_machine_binding",
+            "stage"
           ]
         },
         "source_id": {

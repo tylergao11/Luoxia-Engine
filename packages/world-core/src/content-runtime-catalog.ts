@@ -151,6 +151,7 @@ export interface WorldContentBinding {
   readonly worldDefinition: JsonObject;
   readonly directorProfile: JsonObject;
   readonly eventBudget: JsonObject;
+  readonly stages: readonly JsonObject[];
   readonly initialization: WorldInitializationContent;
   readonly presentation: WorldPresentationContent;
   readonly rulePluginOperations: readonly ContentRulePluginOperationBinding[];
@@ -178,6 +179,7 @@ export interface WorldPresentationContent {
   readonly assets: readonly JsonObject[];
   readonly materializationProfiles: readonly JsonObject[];
   readonly bindings: readonly JsonObject[];
+  readonly loreEntries: readonly JsonObject[];
 }
 
 export interface ContentRuntimeCatalog extends StaticComponentDigestLookup {
@@ -300,6 +302,8 @@ interface IndexedBundle {
   readonly capabilities: ReadonlyMap<string, JsonObject>;
   readonly capabilitiesOrdered: readonly JsonObject[];
   readonly generationArchetypes: ReadonlyMap<string, JsonObject>;
+  readonly stages: ReadonlyMap<string, JsonObject>;
+  readonly stagesOrdered: readonly JsonObject[];
   readonly presentationArtProfiles: ReadonlyMap<string, JsonObject>;
   readonly presentationAssetMap: ReadonlyMap<string, JsonObject>;
   readonly presentationAssets: readonly JsonObject[];
@@ -309,6 +313,7 @@ interface IndexedBundle {
   >;
   readonly presentationMaterializationProfiles: readonly JsonObject[];
   readonly presentationBindings: readonly JsonObject[];
+  readonly presentationLoreEntries: readonly JsonObject[];
   readonly contentUpgrades: ReadonlyMap<string, JsonObject>;
   readonly modelSelectionCatalog: ModelSelectionCatalog;
 }
@@ -544,6 +549,18 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
       bundleDigest,
       "content.catalog.duplicate_generation_archetype",
     );
+    const stagesOrdered = asObjectArray(
+      expectProperty(gameplay, "stages", "gameplay"),
+      "gameplay.stages",
+    );
+    const stages = uniqueIdMap(
+      stagesOrdered,
+      "stage_id",
+      "StageCatalogEntry",
+      packId,
+      bundleDigest,
+      "content.catalog.duplicate_stage",
+    );
 
     const simulation = expectJsonObject(
       expectProperty(bundle, "simulation", "bundle"),
@@ -668,6 +685,10 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
       expectProperty(presentation, "bindings", "presentation"),
       "presentation.bindings",
     );
+    const presentationLoreEntries = asObjectArray(
+      expectProperty(presentation, "lore_entries", "presentation"),
+      "presentation.lore_entries",
+    );
     const contentUpgrades = uniqueIdMap(
       asObjectArray(
         expectProperty(bundle, "content_upgrades", "bundle"),
@@ -746,6 +767,8 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
         capabilities,
         capabilitiesOrdered: frozenCapabilities,
         generationArchetypes,
+        stages,
+        stagesOrdered: Object.freeze([...stagesOrdered]),
         presentationArtProfiles,
         presentationAssetMap,
         presentationAssets: Object.freeze([...presentationAssets]),
@@ -754,6 +777,7 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
           ...presentationMaterializationProfiles,
         ]),
         presentationBindings: Object.freeze([...presentationBindings]),
+        presentationLoreEntries: Object.freeze([...presentationLoreEntries]),
         contentUpgrades,
         modelSelectionCatalog,
       }),
@@ -1122,6 +1146,24 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
       );
     }
 
+    const improvStageId = expectString(
+      worldDefinition,
+      "improv_stage_id",
+      "WorldDefinition",
+    );
+    if (!indexed.stages.has(improvStageId)) {
+      throw new EngineFault(
+        "content.catalog.improv_stage_missing",
+        "WorldDefinition.improv_stage_id must resolve to exactly one StageCatalogEntry in the locked ContentBundle",
+        {
+          pack_id: packId,
+          bundle_digest: bundleDigest,
+          world_definition_id: worldDefinitionId,
+          improv_stage_id: improvStageId,
+        },
+      );
+    }
+
     const stateMachines = indexed.stateMachinesOrdered.filter(
       (machine) =>
         expectString(machine, "world_id", "StateMachineDefinition") ===
@@ -1189,6 +1231,15 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
           );
         }),
       ),
+      loreEntries: Object.freeze(
+        indexed.presentationLoreEntries.filter((lore) => {
+          const subjectKind = expectString(lore, "subject_kind", "LoreEntry");
+          return (
+            subjectKind !== "world" ||
+            expectString(lore, "subject_id", "LoreEntry") === worldDefinitionId
+          );
+        }),
+      ),
     });
 
     return Object.freeze({
@@ -1199,6 +1250,7 @@ class DefaultContentRuntimeCatalog implements ContentRuntimeCatalog {
       worldDefinition,
       directorProfile,
       eventBudget,
+      stages: indexed.stagesOrdered,
       initialization,
       presentation,
       rulePluginOperations,

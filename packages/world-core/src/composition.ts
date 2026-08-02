@@ -81,7 +81,9 @@ export interface SessionViewProjectionInput {
   readonly viewRevision: number;
   readonly basisToken: string;
   readonly controlBindingId: string;
+  readonly playerLocationEntityId: string;
   readonly renderNodeCandidates: readonly unknown[];
+  readonly loreCandidates: readonly unknown[];
   readonly noticeCandidates: readonly unknown[];
 }
 

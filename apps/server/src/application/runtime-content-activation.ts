@@ -644,16 +644,38 @@ function assertRequiredStageRefs(
     "bundle.worlds",
   );
   for (const [worldIndex, world] of worlds.entries()) {
-    if (world.default_stage === undefined) {
-      continue;
+    if (world.default_stage !== undefined) {
+      const stageRef = expectJsonObject(
+        world.default_stage as JsonValue,
+        `bundle.worlds[${worldIndex}].default_stage`,
+      );
+      assertStageRefAgainstRequiredModules(
+        stageRef,
+        `bundle.worlds[${worldIndex}].default_stage`,
+        record,
+        dependencyById,
+        stageModules,
+        undefined,
+      );
     }
+  }
+
+  const gameplay = expectJsonObject(
+    expectProperty(bundle, "gameplay", "bundle"),
+    "bundle.gameplay",
+  );
+  const stages = asObjectArray(
+    expectProperty(gameplay, "stages", "gameplay"),
+    "gameplay.stages",
+  );
+  for (const [stageIndex, stage] of stages.entries()) {
     const stageRef = expectJsonObject(
-      world.default_stage as JsonValue,
-      `bundle.worlds[${worldIndex}].default_stage`,
+      expectProperty(stage, "stage_ref", `gameplay.stages[${stageIndex}]`),
+      `gameplay.stages[${stageIndex}].stage_ref`,
     );
     assertStageRefAgainstRequiredModules(
       stageRef,
-      `bundle.worlds[${worldIndex}].default_stage`,
+      `gameplay.stages[${stageIndex}].stage_ref`,
       record,
       dependencyById,
       stageModules,

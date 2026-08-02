@@ -287,6 +287,26 @@ class DefaultStageContractAuthority implements StageContractAuthority {
       });
     }
 
+    // Stage catalog is the content-owned action vocabulary; any catalog
+    // entry whose StageRef resolves to this module+scene may open.
+    for (const [stageIndex, stageEntry] of content.stages.entries()) {
+      const stageRef = expectJsonObject(
+        expectProperty(stageEntry, "stage_ref", "StageCatalogEntry"),
+        `gameplay.stages[${stageIndex}].stage_ref`,
+      );
+      if (
+        this.#stageRefMatches({
+          worldContentLock: input.worldContentLock,
+          stageRef,
+          registered,
+          sceneId: input.sceneId,
+        })
+      ) {
+        allowedByContent = true;
+        break;
+      }
+    }
+
     for (const binding of content.presentation.bindings) {
       const stageRefValue = binding["stage"];
       if (stageRefValue === undefined) {

@@ -3051,6 +3051,8 @@ function handleEventCardPublish(context: OperationContext): void {
         context.operationKind,
       );
 
+      assertEventCardStagingConsistency(context, cardCandidate, sealed);
+
       const sealedWithoutDigest = omitField(sealed, "result_digest");
       assertEqual(
         "sealed.result_digest",
@@ -3162,6 +3164,104 @@ function assertEventBudgetSufficient(
       },
     );
   }
+}
+
+function assertEventCardStagingConsistency(
+  context: OperationContext,
+  candidate: JsonObject,
+  sealed: JsonObject,
+): void {
+  const candidateStaging = expectJsonObject(
+    expectProperty(candidate, "staging", "EventCardPublishCandidate"),
+    "EventCardPublishCandidate.staging",
+  );
+  const sealedStaging = expectJsonObject(
+    expectProperty(sealed, "staging", "SealedEventResult"),
+    "SealedEventResult.staging",
+  );
+  const candidateKind = expectString(
+    candidateStaging,
+    "staging_kind",
+    "EventCardPublishStaging",
+  );
+  const sealedKind = expectString(
+    sealedStaging,
+    "staging_kind",
+    "SealedEventResultStaging",
+  );
+  assertEqual(
+    "event_card.staging_kind",
+    candidateKind,
+    sealedKind,
+    context.operationKind,
+  );
+  if (candidateKind === "none") {
+    return;
+  }
+  if (candidateKind === "prefab_bind") {
+    assertJsonFieldEqual(
+      "event_card.staging.stage",
+      expectProperty(candidateStaging, "stage", "EventCardPublishStaging"),
+      expectProperty(sealedStaging, "stage", "SealedEventResultStaging"),
+      context.operationKind,
+    );
+    expectString(
+      sealedStaging,
+      "stage_instance_id",
+      "SealedEventResultStaging",
+    );
+    return;
+  }
+  if (candidateKind === "improv") {
+    expectString(
+      sealedStaging,
+      "stage_instance_id",
+      "SealedEventResultStaging",
+    );
+    expectString(sealedStaging, "improv_digest", "SealedEventResultStaging");
+    const improvWithoutDigest = Object.freeze({
+      stage: expectProperty(
+        candidateStaging,
+        "stage",
+        "MaterializedImprovStage",
+      ),
+      premise: expectProperty(
+        candidateStaging,
+        "premise",
+        "MaterializedImprovStage",
+      ),
+      participants: expectProperty(
+        candidateStaging,
+        "participants",
+        "MaterializedImprovStage",
+      ),
+      beats: expectProperty(
+        candidateStaging,
+        "beats",
+        "MaterializedImprovStage",
+      ),
+      choices: expectProperty(
+        candidateStaging,
+        "choices",
+        "MaterializedImprovStage",
+      ),
+    });
+    assertEqual(
+      "event_card.improv_digest",
+      context.digest.sha256(improvWithoutDigest),
+      expectString(sealedStaging, "improv_digest", "SealedEventResultStaging"),
+      context.operationKind,
+    );
+    return;
+  }
+  throw fault(
+    "rule_plugin.semantic.event_card_staging_kind",
+    "EventCardPublishCandidate.staging_kind is not a closed staging branch",
+    {
+      operation_kind: context.operationKind,
+      staging_kind: candidateKind,
+    },
+  );
 }
 
 function assertEventCardAgency(
@@ -5186,9 +5286,10 @@ function assertAutomaticEventCandidateMatchesDraft(
     expectedScope === "world"
       ? "subject_actor_indices"
       : "target_actor_indices";
-  // Match day-cycle materialize defaults:
-  // world empty → all actors; character empty → machine-bearing actors only;
-  // character explicit → filter to machine-bearing (same set as target_entity_ids).
+  // Match day-cycle materializeAutomaticEventCandidate defaults exactly:
+  // world empty/omit → all actors; character empty/omit → machine-bearing only;
+  // character explicit → filter to machine-bearing; filtered-to-empty → same
+  // structural default as omit (do not leave expected subjects as []).
   const worldState = requestWorldState(context);
   let actorIndices: readonly number[];
   if (
@@ -5218,6 +5319,12 @@ function assertAutomaticEventCandidateMatchesDraft(
         );
       });
     }
+  }
+  if (actorIndices.length === 0) {
+    actorIndices =
+      expectedScope === "character"
+        ? characterMachineActorIndicesFromWorld(worldState, actors)
+        : actors.map((_, index) => index);
   }
   const expectedEntityIds = actorIndices.map((index) => {
     const actor = actors[index];

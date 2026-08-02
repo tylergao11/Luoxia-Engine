@@ -14,8 +14,32 @@ import type {
 } from "@luoxia/world-core";
 
 /**
+ * Closed ModelRequest dialogue turn window: keep the most recent N turns only.
+ * Server owns truncation; models must not invent summary structures.
+ * Documented in contracts/model-protocol.v1.schema.json (ProviderDialogueView).
+ */
+export const MODEL_DIALOGUE_TURN_WINDOW = 24 as const;
+
+export type DirectorWorldViewScope =
+  | {
+      readonly mode: "day_settlement";
+      readonly keepEntityIds: ReadonlySet<string>;
+    }
+  | {
+      readonly mode: "dialogue_related";
+      readonly dialogue: JsonObject;
+    };
+
+/**
  * Project ModelRequest dynamic views from a locked WorldSnapshot only.
- * Callers never supply arbitrary View JSON.
+ * Callers never supply arbitrary View JSON. Scope is required: there is no
+ * silent full-graph default.
+ *
+ * `dialogue_related` keeps participants + one-hop relation neighbors + related
+ * facts + stages catalog + player-phase event_budget. `day_settlement` keeps
+ * active entities ∪ objective trace subjects (wider than dialogue, still drops
+ * retired unused noise) and omits stages/event_budget; Provider projection
+ * still drops empty-component noise and objective_traces.visibility.
  */
 export function projectDirectorWorldView(
   worldId: string,
@@ -23,6 +47,7 @@ export function projectDirectorWorldView(
   day: number,
   contentBinding: WorldContentBinding,
   stateMachineContracts: StateMachineContractAuthority,
+  scope: DirectorWorldViewScope,
 ): JsonObject {
   const entities = asObjectArray(
     expectProperty(worldState, "entities", "WorldState"),
@@ -41,7 +66,33 @@ export function projectDirectorWorldView(
     "WorldState.facts",
   );
 
-  const actors = entities.map((entity) => {
+  const entityScope =
+    scope.mode === "dialogue_related"
+      ? resolveDialogueRelatedEntityScope(worldState, scope.dialogue)
+      : resolveDaySettlementEntityScope(entities, scope.keepEntityIds);
+
+  const scopedEntities = entities.filter((entity) =>
+    entityScope.has(expectString(entity, "entity_id", "EntityState")),
+  );
+  for (const entityId of entityScope) {
+    const matches = scopedEntities.filter(
+      (entity) =>
+        expectString(entity, "entity_id", "EntityState") === entityId,
+    );
+    if (matches.length !== 1) {
+      throw new EngineFault(
+        scope.mode === "dialogue_related"
+          ? "model.view.dialogue_related_entity_missing"
+          : "model.view.day_settlement_entity_missing",
+        scope.mode === "dialogue_related"
+          ? "Dialogue-related world_view seed entity is absent from locked WorldState"
+          : "Day-settlement world_view keep-entity is absent from locked WorldState",
+        { entity_id: entityId, matches: matches.length },
+      );
+    }
+  }
+
+  const actors = scopedEntities.map((entity) => {
     const entityId = expectString(entity, "entity_id", "EntityState");
     const components = asObjectArray(
       expectProperty(entity, "components", "EntityState"),
@@ -82,6 +133,14 @@ export function projectDirectorWorldView(
     return Object.freeze(actor);
   });
 
+  const scopedRelations = relations.filter((relation) =>
+    relationEntityEndpoints(relation).every((entityId) =>
+      entityScope.has(entityId),
+    ),
+  );
+
+  const scopedFacts = filterScopedFacts(worldState, facts, entityScope);
+
   const worldMachines = machines
     .filter((machine) => {
       const owner = expectJsonObject(
@@ -101,13 +160,209 @@ export function projectDirectorWorldView(
       ),
     );
 
-  return Object.freeze({
+  const projected: Record<string, JsonValue> = {
     day,
     actors: Object.freeze(actors),
-    relations: Object.freeze(relations),
+    relations: Object.freeze(scopedRelations),
     world_machines: Object.freeze(worldMachines),
-    facts: Object.freeze(facts),
+    facts: Object.freeze(scopedFacts),
+  };
+  // Stage catalog and EventBudget belong to EventCard / planning paths only.
+  // daily_settlement omits both: budget opens only when entering player.
+  if (scope.mode === "dialogue_related") {
+    projected.stages = Object.freeze(projectDirectorStages(contentBinding));
+    projected.event_budget = Object.freeze(
+      projectDirectorEventBudget(worldState, day),
+    );
+  }
+  return Object.freeze(projected);
+}
+
+/**
+ * Day settlement keep-set: every active entity, plus any entity named as a
+ * subject on the settlement-window objective_traces (even if retired).
+ */
+export function resolveDaySettlementKeepEntityIds(
+  worldState: JsonObject,
+  objectiveTraces: readonly JsonObject[],
+): ReadonlySet<string> {
+  const entities = asObjectArray(
+    expectProperty(worldState, "entities", "WorldState"),
+    "WorldState.entities",
+  );
+  const keep = new Set<string>();
+  for (const entity of entities) {
+    if (expectString(entity, "state", "EntityState") === "active") {
+      keep.add(expectString(entity, "entity_id", "EntityState"));
+    }
+  }
+  for (const [traceIndex, trace] of objectiveTraces.entries()) {
+    const subjects = asObjectArray(
+      expectProperty(trace, "subjects", "ObjectiveTraceEntry"),
+      `ObjectiveTraceEntry[${traceIndex}].subjects`,
+    );
+    for (const subject of subjects) {
+      const entityId = entityIdFromSubjectRef(subject);
+      if (entityId !== undefined) {
+        keep.add(entityId);
+      }
+    }
+  }
+  if (keep.size === 0) {
+    throw new EngineFault(
+      "model.view.day_settlement_entity_scope_empty",
+      "Day-settlement world_view requires at least one active entity or objective-trace subject",
+      {},
+    );
+  }
+  return keep;
+}
+
+function resolveDaySettlementEntityScope(
+  entities: readonly JsonObject[],
+  keepEntityIds: ReadonlySet<string>,
+): ReadonlySet<string> {
+  if (keepEntityIds.size === 0) {
+    throw new EngineFault(
+      "model.view.day_settlement_entity_scope_empty",
+      "Day-settlement world_view keepEntityIds must be non-empty",
+      {},
+    );
+  }
+  const known = new Set(
+    entities.map((entity) =>
+      expectString(entity, "entity_id", "EntityState"),
+    ),
+  );
+  for (const entityId of keepEntityIds) {
+    if (!known.has(entityId)) {
+      throw new EngineFault(
+        "model.view.day_settlement_entity_missing",
+        "Day-settlement keepEntityIds names an entity absent from locked WorldState",
+        { entity_id: entityId },
+      );
+    }
+  }
+  return keepEntityIds;
+}
+
+function projectDirectorStages(
+  contentBinding: WorldContentBinding,
+): readonly JsonObject[] {
+  return contentBinding.stages.map((stage) => {
+    const projected: Record<string, JsonValue> = {
+      stage_kind: expectString(stage, "stage_kind", "StageCatalogEntry"),
+      intent_coverage: expectProperty(
+        stage,
+        "intent_coverage",
+        "StageCatalogEntry",
+      ),
+      participants: expectProperty(
+        stage,
+        "participants",
+        "StageCatalogEntry",
+      ),
+      npc_participation: expectString(
+        stage,
+        "npc_participation",
+        "StageCatalogEntry",
+      ),
+    };
+    if (stage.example_intents !== undefined) {
+      projected.example_intents = expectProperty(
+        stage,
+        "example_intents",
+        "StageCatalogEntry",
+      );
+    }
+    return Object.freeze(projected);
   });
+}
+
+/**
+ * Project EventBudgetView for dialogue_related DirectorWorldView.
+ * Player phase must own exactly one active human ControlBinding and its
+ * current-day EventBudget (day/capacity/spent/remaining).
+ */
+function projectDirectorEventBudget(
+  worldState: JsonObject,
+  day: number,
+): JsonObject {
+  const controlBindingId = resolveActiveHumanControlBindingId(worldState);
+  const matches = asObjectArray(
+    expectProperty(worldState, "event_budgets", "WorldState"),
+    "WorldState.event_budgets",
+  ).filter((budget) => {
+    const control = expectJsonObject(
+      expectProperty(budget, "control", "EventBudgetState"),
+      "EventBudgetState.control",
+    );
+    return (
+      expectInteger(budget, "day", "EventBudgetState") === day &&
+      expectString(control, "binding_id", "ControlBindingRef") ===
+        controlBindingId
+    );
+  });
+  if (matches.length !== 1) {
+    throw new EngineFault(
+      "model.view.event_budget_match",
+      "Dialogue-related world_view requires exactly one EventBudget for the active human control and current day",
+      {
+        day,
+        control_binding_id: controlBindingId,
+        matches: matches.length,
+      },
+    );
+  }
+  const budget = matches[0] as JsonObject;
+  const capacity = expectInteger(budget, "capacity", "EventBudgetState");
+  const spent = asObjectArray(
+    expectProperty(budget, "charges", "EventBudgetState"),
+    "EventBudgetState.charges",
+  ).reduce((total, charge) => {
+    const cost = expectJsonObject(
+      expectProperty(charge, "cost", "EventCharge"),
+      "EventCharge.cost",
+    );
+    return total + expectInteger(cost, "amount", "EventCost");
+  }, 0);
+  const remaining = capacity - spent;
+  if (remaining < 0) {
+    throw new EngineFault(
+      "model.view.event_budget_negative",
+      "Event budget charges exceed its capacity",
+      { capacity, spent, remaining },
+    );
+  }
+  return Object.freeze({
+    day,
+    capacity,
+    spent,
+    remaining,
+  });
+}
+
+function resolveActiveHumanControlBindingId(worldState: JsonObject): string {
+  const matches = asObjectArray(
+    expectProperty(worldState, "control_bindings", "WorldState"),
+    "WorldState.control_bindings",
+  ).filter(
+    (binding) =>
+      expectString(binding, "binding_kind", "ControlBinding") === "human" &&
+      expectString(binding, "status", "ControlBinding") === "active",
+  );
+  if (matches.length !== 1) {
+    throw new EngineFault(
+      "model.view.human_control_binding_match",
+      "Dialogue-related world_view requires exactly one active human ControlBinding",
+      { matches: matches.length },
+    );
+  }
+  return expectString(
+    matches[0] as JsonObject,
+    "binding_id",
+    "ControlBinding",
+  );
 }
 
 export function projectObjectiveTraces(input: {
@@ -178,6 +433,9 @@ export function projectObjectiveTraces(input: {
 export function projectDialogue(
   worldState: JsonObject,
   dialogueId: string,
+  options: {
+    readonly turnWindow?: number;
+  } = {},
 ): JsonObject {
   const dialogues = asObjectArray(
     expectProperty(worldState, "dialogues", "WorldState"),
@@ -194,7 +452,28 @@ export function projectDialogue(
       { dialogue_id: dialogueId },
     );
   }
-  return dialogue;
+  const turnWindow = options.turnWindow ?? MODEL_DIALOGUE_TURN_WINDOW;
+  if (
+    !Number.isSafeInteger(turnWindow) ||
+    turnWindow < 1
+  ) {
+    throw new EngineFault(
+      "model.view.dialogue_turn_window_invalid",
+      "Dialogue turn window must be a positive safe integer",
+      { turn_window: turnWindow },
+    );
+  }
+  const turns = asObjectArray(
+    expectProperty(dialogue, "turns", "DialogueRecord"),
+    "DialogueRecord.turns",
+  );
+  if (turns.length <= turnWindow) {
+    return Object.freeze({ ...dialogue });
+  }
+  return Object.freeze({
+    ...dialogue,
+    turns: Object.freeze(turns.slice(-turnWindow)),
+  });
 }
 
 export function projectKnowledgeView(
@@ -312,6 +591,183 @@ export function readDayNumber(worldState: JsonObject): number {
     "WorldState.day_cycle",
   );
   return expectInteger(dayCycle, "day", "DayCycleState");
+}
+
+/**
+ * Participants ∪ one-hop relation neighbors. System participants contribute
+ * no entity seed; at least one entity participant is required.
+ */
+export function resolveDialogueRelatedEntityScope(
+  worldState: JsonObject,
+  dialogue: JsonObject,
+): ReadonlySet<string> {
+  const seed = dialogueParticipantEntityIds(dialogue);
+  if (seed.length === 0) {
+    throw new EngineFault(
+      "model.view.dialogue_entity_participants_empty",
+      "Dialogue-related world_view requires at least one entity participant",
+      {
+        dialogue_id: expectString(dialogue, "dialogue_id", "DialogueRecord"),
+      },
+    );
+  }
+  const seedSet = new Set(seed);
+  const relations = asObjectArray(
+    expectProperty(worldState, "relations", "WorldState"),
+    "WorldState.relations",
+  );
+  const scope = new Set(seedSet);
+  for (const relation of relations) {
+    const endpoints = relationEntityEndpoints(relation);
+    const touchesSeed = endpoints.some((entityId) => seedSet.has(entityId));
+    if (!touchesSeed) {
+      continue;
+    }
+    for (const entityId of endpoints) {
+      scope.add(entityId);
+    }
+  }
+  return scope;
+}
+
+function dialogueParticipantEntityIds(
+  dialogue: JsonObject,
+): readonly string[] {
+  const participants = asObjectArray(
+    expectProperty(dialogue, "participants", "DialogueRecord"),
+    "DialogueRecord.participants",
+  );
+  const entityIds: string[] = [];
+  for (const [index, participant] of participants.entries()) {
+    const participantKind = expectString(
+      participant,
+      "participant_kind",
+      "DialogueParticipantRef",
+    );
+    if (participantKind === "system") {
+      continue;
+    }
+    if (participantKind !== "entity") {
+      throw new EngineFault(
+        "model.view.dialogue_participant_kind_unknown",
+        `Dialogue participant kind ${participantKind} is not supported`,
+        {
+          participant_index: index,
+          participant_kind: participantKind,
+        },
+      );
+    }
+    const entity = expectJsonObject(
+      expectProperty(participant, "entity", "DialogueParticipantRef"),
+      "DialogueParticipantRef.entity",
+    );
+    entityIds.push(expectString(entity, "entity_id", "EntityRef"));
+  }
+  return Object.freeze(entityIds);
+}
+
+function relationEntityEndpoints(relation: JsonObject): readonly string[] {
+  const endpoints: string[] = [];
+  for (const side of ["from", "to"] as const) {
+    const subject = expectJsonObject(
+      expectProperty(relation, side, "RelationState"),
+      `RelationState.${side}`,
+    );
+    const entityId = entityIdFromSubjectRef(subject);
+    if (entityId !== undefined) {
+      endpoints.push(entityId);
+    }
+  }
+  return Object.freeze(endpoints);
+}
+
+function entityIdFromSubjectRef(subject: JsonObject): string | undefined {
+  const kind = expectString(subject, "kind", "SubjectRef");
+  if (kind !== "entity") {
+    return undefined;
+  }
+  const entity = expectJsonObject(
+    expectProperty(subject, "entity", "SubjectRef"),
+    "SubjectRef.entity",
+  );
+  return expectString(entity, "entity_id", "EntityRef");
+}
+
+function filterScopedFacts(
+  worldState: JsonObject,
+  facts: readonly JsonObject[],
+  entityScope: ReadonlySet<string>,
+): readonly JsonObject[] {
+  const knowledge = asObjectArray(
+    expectProperty(worldState, "knowledge", "WorldState"),
+    "WorldState.knowledge",
+  );
+  const knownFactIds = new Set(
+    knowledge
+      .filter((entry) =>
+        entityScope.has(
+          expectString(entry, "knower_entity_id", "KnowledgeState"),
+        ),
+      )
+      .map((entry) => expectString(entry, "fact_id", "KnowledgeState")),
+  );
+  return facts.filter((fact) => {
+    const factId = expectString(fact, "fact_id", "FactRecord");
+    if (knownFactIds.has(factId)) {
+      return true;
+    }
+    const visibility = expectJsonObject(
+      expectProperty(fact, "visibility", "FactRecord"),
+      "FactRecord.visibility",
+    );
+    if (visibilityTouchesEntityScope(visibility, entityScope)) {
+      return true;
+    }
+    return jsonTreeContainsEntityId(
+      expectProperty(fact, "claim", "FactRecord"),
+      entityScope,
+    );
+  });
+}
+
+function visibilityTouchesEntityScope(
+  visibility: JsonObject,
+  entityScope: ReadonlySet<string>,
+): boolean {
+  if (!Object.prototype.hasOwnProperty.call(visibility, "actor_ids")) {
+    return false;
+  }
+  const actorIds = expectProperty(visibility, "actor_ids", "Visibility");
+  if (!Array.isArray(actorIds)) {
+    throw new EngineFault(
+      "model.view.visibility_actor_ids_shape",
+      "Visibility.actor_ids must be an array when present",
+      {},
+    );
+  }
+  return actorIds.some(
+    (entry) => typeof entry === "string" && entityScope.has(entry),
+  );
+}
+
+function jsonTreeContainsEntityId(
+  value: JsonValue,
+  entityScope: ReadonlySet<string>,
+): boolean {
+  if (typeof value === "string") {
+    return entityScope.has(value);
+  }
+  if (Array.isArray(value)) {
+    return value.some((entry) =>
+      jsonTreeContainsEntityId(entry as JsonValue, entityScope),
+    );
+  }
+  if (value !== null && typeof value === "object") {
+    return Object.values(value as JsonObject).some((entry) =>
+      jsonTreeContainsEntityId(entry as JsonValue, entityScope),
+    );
+  }
+  return false;
 }
 
 function projectStateMachineModelView(

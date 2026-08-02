@@ -32,6 +32,7 @@ import {
   projectKnowledgeView,
   projectObjectiveTraces,
   readDayNumber,
+  resolveDaySettlementKeepEntityIds,
 } from "./model-view-projection.js";
 import type {
   CommittedEventReader,
@@ -264,6 +265,10 @@ class ModelRequestAssembly {
         worldBinding.record.eventHistoryFloorRevision,
       throughRevisionInclusive: currentRevision,
     });
+    const objectiveTraces = projectObjectiveTraces({
+      events: committedEvents,
+      currentDay: day,
+    });
     const dynamicInput = Object.freeze({
       world_view: projectDirectorWorldView(
         input.worldId,
@@ -271,11 +276,15 @@ class ModelRequestAssembly {
         day,
         worldBinding.contentBinding,
         this.#stateMachineContracts,
+        Object.freeze({
+          mode: "day_settlement",
+          keepEntityIds: resolveDaySettlementKeepEntityIds(
+            worldState,
+            objectiveTraces,
+          ),
+        }),
       ),
-      objective_traces: projectObjectiveTraces({
-        events: committedEvents,
-        currentDay: day,
-      }),
+      objective_traces: objectiveTraces,
     });
     return this.#invoke({
       snapshot,
@@ -312,6 +321,7 @@ class ModelRequestAssembly {
             day,
             ctx.contentBinding,
             this.#stateMachineContracts,
+            Object.freeze({ mode: "dialogue_related", dialogue }),
           ),
           dialogue,
           response_locale: readDialogueTurnLocale(
@@ -375,6 +385,7 @@ class ModelRequestAssembly {
             readDayNumber(ctx.worldState),
             ctx.contentBinding,
             this.#stateMachineContracts,
+            Object.freeze({ mode: "dialogue_related", dialogue }),
           ),
           knowledge_view: projectKnowledgeView(
             ctx.worldState,

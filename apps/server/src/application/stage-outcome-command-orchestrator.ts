@@ -148,28 +148,37 @@ class DefaultStageOutcomeCommandOrchestrator
       );
     }
 
-    const requestInput = createStageOutcomeInput(stored);
     let receipt: VerifiedRulePluginInvocationReceipt;
+    let requestInput: JsonObject;
     try {
+      const binding = await this.#worlds.resolveCurrent(
+        stored.session.worldId,
+      );
+      assertAcceptedWorldAndStageBasis(
+        binding,
+        stored,
+        this.#stageContracts,
+      );
+      requestInput = createStageOutcomeInput(stored, binding);
       receipt = await this.#rulePlugins.executeRecoverable({
         requestId: stored.stageOutcomeExecution.ruleRequestId,
         modelInvocations: [],
         candidateFactory: async () => {
-          const binding = await this.#worlds.resolveCurrent(
+          const candidateBinding = await this.#worlds.resolveCurrent(
             stored.session.worldId,
           );
           assertAcceptedWorldAndStageBasis(
-            binding,
+            candidateBinding,
             stored,
             this.#stageContracts,
           );
           const invocation = resolveStageOutcomeBinding(
-            binding,
+            candidateBinding,
             this.#rulePluginAbi,
           );
           return this.#createRulePluginRequest({
             stored,
-            binding,
+            binding: candidateBinding,
             invocation,
             requestInput,
           });
@@ -337,12 +346,71 @@ class DefaultStageOutcomeCommandOrchestrator
 
 function createStageOutcomeInput(
   stored: StoredReceivedCommand,
+  binding: RuntimeWorldBinding,
 ): JsonObject {
+  const snapshot = binding.record.snapshot.value;
+  const worldState = expectJsonObject(
+    expectProperty(snapshot, "world_state", "WorldSnapshot"),
+    "WorldSnapshot.world_state",
+  );
+  const stageId = expectString(
+    stored.message,
+    "stage_instance_id",
+    "StageOutcomeProposal",
+  );
+  const stages = asObjectArray(
+    expectProperty(worldState, "stage_instances", "WorldState"),
+    "WorldState.stage_instances",
+  ).filter(
+    (stage) =>
+      expectString(stage, "stage_instance_id", "StageInstanceState") ===
+      stageId,
+  );
+  if (stages.length !== 1) {
+    throw new EngineFault(
+      "stage_outcome.orchestration.stage_snapshot_match",
+      "Stage outcome input requires exactly one matching StageInstance in the accepted world",
+      {
+        stage_instance_id: stageId,
+        matches: stages.length,
+      },
+    );
+  }
+  const stage = stages[0] as JsonObject;
+  if (expectString(stage, "status", "StageInstanceState") !== "open") {
+    throw new EngineFault(
+      "stage_outcome.orchestration.stage_snapshot_closed",
+      "Stage outcome input requires an open StageInstance snapshot",
+      {
+        stage_instance_id: stageId,
+        stage_status: expectString(stage, "status", "StageInstanceState"),
+      },
+    );
+  }
   return Object.freeze({
     control: Object.freeze({
       binding_id: stored.session.controlBindingId,
     }),
     proposal: stored.message,
+    stage_instance: Object.freeze({
+      stage_instance_id: expectString(
+        stage,
+        "stage_instance_id",
+        "StageInstanceState",
+      ),
+      revision: expectInteger(stage, "revision", "StageInstanceState"),
+      state: expectProperty(stage, "state", "StageInstanceState"),
+      participants: expectProperty(
+        stage,
+        "participants",
+        "StageInstanceState",
+      ),
+      completion_rules: expectProperty(
+        stage,
+        "completion_rules",
+        "StageInstanceState",
+      ),
+    }),
   });
 }
 

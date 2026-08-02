@@ -11,7 +11,8 @@ Luoxia Engine 是一个始终联网、服务端权威、由外部内容包驱动
 - `contracts/` 是全部运行时 JSON 字段、枚举与消息形状的唯一机器真相；
 - Content Runtime 校验、锁定并索引部署显式提供的外部 ContentBundle；
 - World Core 通过唯一 `apply_packet` 入口执行闭合 EffectOp，拥有状态机、事件卡、目标、Stage、账本与当前 VisualBinding 等世界状态变换；
-- Server Runtime 拥有世界创建、存档导入导出与迁移、Session、Command Journal、日循环、对话、地图移动、EventCard、Stage outcome、Content Upgrade 与 Materialization 编排；
+- Server Runtime 拥有世界创建、存档导入导出与迁移、Session、Command Journal、日循环、对话、地图移动、EventCard（含 Stage catalog / staging 物化与封存）、Stage outcome、Content Upgrade 与 Materialization 编排；
+- SessionView 投影玩家可见 `lore`（与 RenderNode 同一可见实体集合）与 `player_location_entity_id`（由玩家唯一 active `located_at` 解出）；ContentBundle `presentation.lore_entries` 是唯一客户端可读故事层；
 - PostgreSQL 18.x 分字段保存运行时唯一事实；Journal、CommittedEvent 与 Materialization Ledger 提供幂等恢复和外部调用证据；
 - 各类闭合模型职责保持隔离，Provider 只接收最小语义投影；完整请求、关联证据与使用量仍由 Server Journal 拥有；
 - RulePlugin、模型、客户端、StageModule 与资产 Provider 只能提出经过合同校验的结果，均不能直接写 WorldState；

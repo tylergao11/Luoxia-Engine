@@ -50,7 +50,8 @@
             "art_profile",
             "materialization_profile",
             "state_machine",
-            "character_mind"
+            "character_mind",
+            "stage"
           ]
         },
         "local_id": {
@@ -1867,8 +1868,10 @@
         "view_revision",
         "basis_token",
         "player_entity_id",
+        "player_location_entity_id",
         "world_time",
         "render_nodes",
+        "lore",
         "goal_plans",
         "notices",
         "day_cycle",
@@ -1898,6 +1901,9 @@
         "player_entity_id": {
           "$ref": "common.v1.schema.json#/$defs/Uuid"
         },
+        "player_location_entity_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
         "world_time": {
           "$ref": "common.v1.schema.json#/$defs/LogicalTime"
         },
@@ -1905,6 +1911,12 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/RenderNode"
+          }
+        },
+        "lore": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LoreView"
           }
         },
         "goal_plans": {
@@ -1957,6 +1969,43 @@
         },
         "event_budget": {
           "$ref": "#/$defs/EventBudgetView"
+        }
+      }
+    },
+    "LoreView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lore_id",
+        "lore_kind",
+        "body",
+        "ordinal"
+      ],
+      "properties": {
+        "lore_id": {
+          "$ref": "common.v1.schema.json#/$defs/Identifier"
+        },
+        "lore_kind": {
+          "enum": [
+            "opening",
+            "arrival",
+            "profile",
+            "hearsay",
+            "nightfall"
+          ]
+        },
+        "subject": {
+          "$ref": "common.v1.schema.json#/$defs/SubjectRef"
+        },
+        "title": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "body": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "ordinal": {
+          "type": "integer",
+          "minimum": 0
         }
       }
     },
@@ -3002,7 +3051,8 @@
         "charge_id",
         "cost",
         "status",
-        "published_revision"
+        "published_revision",
+        "staging_kind"
       ],
       "properties": {
         "event_card_id": {
@@ -3046,6 +3096,9 @@
         "published_revision": {
           "type": "integer",
           "minimum": 0
+        },
+        "staging_kind": {
+          "$ref": "#/$defs/EventCardStagingKind"
         },
         "terminal_revision": {
           "type": "integer",
@@ -3125,7 +3178,8 @@
         "title",
         "summary",
         "event_cost",
-        "status"
+        "status",
+        "staging_kind"
       ],
       "properties": {
         "event_card_id": {
@@ -3150,6 +3204,9 @@
         },
         "event_cost": {
           "$ref": "#/$defs/EventCost"
+        },
+        "staging_kind": {
+          "$ref": "#/$defs/EventCardStagingKind"
         }
       }
     },
@@ -3679,6 +3736,7 @@
         "deterministic_context",
         "ops",
         "presentation",
+        "staging",
         "result_digest"
       ],
       "properties": {
@@ -3713,6 +3771,9 @@
         },
         "presentation": {
           "$ref": "#/$defs/EventResultPresentation"
+        },
+        "staging": {
+          "$ref": "#/$defs/SealedEventResultStaging"
         },
         "result_digest": {
           "$ref": "common.v1.schema.json#/$defs/Sha256"
@@ -4383,6 +4444,87 @@
             }
           }
         }
+      ]
+    },
+    "StageCatalogRef": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CatalogRef"
+        },
+        {
+          "type": "object",
+          "required": [
+            "catalog_kind"
+          ],
+          "properties": {
+            "catalog_kind": {
+              "const": "stage"
+            }
+          }
+        }
+      ]
+    },
+    "SealedEventResultStaging": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "staging_kind"
+          ],
+          "properties": {
+            "staging_kind": {
+              "const": "none"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "staging_kind",
+            "stage",
+            "stage_instance_id"
+          ],
+          "properties": {
+            "staging_kind": {
+              "const": "prefab_bind"
+            },
+            "stage": {
+              "$ref": "#/$defs/StageCatalogRef"
+            },
+            "stage_instance_id": {
+              "$ref": "common.v1.schema.json#/$defs/Uuid"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "staging_kind",
+            "stage_instance_id",
+            "improv_digest"
+          ],
+          "properties": {
+            "staging_kind": {
+              "const": "improv"
+            },
+            "stage_instance_id": {
+              "$ref": "common.v1.schema.json#/$defs/Uuid"
+            },
+            "improv_digest": {
+              "$ref": "common.v1.schema.json#/$defs/Sha256"
+            }
+          }
+        }
+      ]
+    },
+    "EventCardStagingKind": {
+      "enum": [
+        "none",
+        "prefab_bind",
+        "improv"
       ]
     },
     "AgencyRequirement": {

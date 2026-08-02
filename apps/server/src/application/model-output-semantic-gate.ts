@@ -151,6 +151,20 @@ function assertDirectorDailyRequest(request: JsonObject): void {
     expectProperty(input, "world_view", "DirectorDailySettlementInput"),
     "DirectorDailySettlementInput.world_view",
   );
+  if (Object.prototype.hasOwnProperty.call(worldView, "stages")) {
+    throw fault(
+      "model.semantic.daily_settlement_stages_forbidden",
+      "director.daily_settlement world_view must omit stages; EventCard staging catalog is dialogue_events/goal_plan only",
+      {},
+    );
+  }
+  if (Object.prototype.hasOwnProperty.call(worldView, "event_budget")) {
+    throw fault(
+      "model.semantic.daily_settlement_event_budget_forbidden",
+      "director.daily_settlement world_view must omit event_budget; EventBudget opens only when entering player",
+      {},
+    );
+  }
   assertUniqueIds(
     objectArray(
       expectProperty(worldView, "actors", "DirectorWorldView"),
@@ -160,6 +174,60 @@ function assertDirectorDailyRequest(request: JsonObject): void {
     "DirectorWorldView.actors",
   );
   assertDirectorStateMachineViews(worldView);
+  assertDirectorWorldViewRelationEndpointsInActors(worldView);
+  assertDailySettlementTracesCoveredByWorldView(
+    worldView,
+    objectArray(
+      expectProperty(
+        input,
+        "objective_traces",
+        "DirectorDailySettlementInput",
+      ),
+      "DirectorDailySettlementInput.objective_traces",
+    ),
+  );
+}
+
+function assertDailySettlementTracesCoveredByWorldView(
+  worldView: JsonObject,
+  traces: readonly JsonObject[],
+): void {
+  const actorIds = new Set(
+    objectArray(
+      expectProperty(worldView, "actors", "DirectorWorldView"),
+      "DirectorWorldView.actors",
+    ).map((actor) => expectString(actor, "entity_id", "DirectorActorView")),
+  );
+  for (const [traceIndex, trace] of traces.entries()) {
+    for (const [subjectIndex, subject] of objectArray(
+      expectProperty(trace, "subjects", "ObjectiveTraceEntry"),
+      `ObjectiveTraceEntry[${traceIndex}].subjects`,
+    ).entries()) {
+      const kind = expectString(subject, "kind", "SubjectRef");
+      if (kind !== "entity") {
+        continue;
+      }
+      const entityId = expectString(
+        expectJsonObject(
+          expectProperty(subject, "entity", "SubjectRef"),
+          "SubjectRef.entity",
+        ),
+        "entity_id",
+        "EntityRef",
+      );
+      if (!actorIds.has(entityId)) {
+        throw fault(
+          "model.semantic.daily_trace_subject_outside_world_view",
+          "Daily settlement objective_traces entity subject is absent from projected world_view actors",
+          {
+            trace_index: traceIndex,
+            subject_index: subjectIndex,
+            entity_id: entityId,
+          },
+        );
+      }
+    }
+  }
 }
 
 function assertDirectorDialogueEventsRequest(request: JsonObject): void {
@@ -168,12 +236,22 @@ function assertDirectorDialogueEventsRequest(request: JsonObject): void {
     expectProperty(input, "world_view", "DirectorDialogueEventsInput"),
     "DirectorDialogueEventsInput.world_view",
   );
+  assertDirectorWorldViewStagesPresent(
+    worldView,
+    "DirectorDialogueEventsInput.world_view",
+  );
+  assertDirectorWorldViewEventBudgetPresent(
+    worldView,
+    "DirectorDialogueEventsInput.world_view",
+  );
   const dialogue = expectJsonObject(
     expectProperty(input, "dialogue", "DirectorDialogueEventsInput"),
     "DirectorDialogueEventsInput.dialogue",
   );
   assertActiveDialogue(dialogue);
   assertDirectorStateMachineViews(worldView);
+  assertDialogueParticipantsCoveredByWorldView(dialogue, worldView);
+  assertDirectorWorldViewRelationEndpointsInActors(worldView);
   assertEqual(
     "model.semantic.dialogue_day_mismatch",
     "Dialogue day does not match Director world day",
@@ -219,6 +297,14 @@ function assertDirectorGoalPlanRequest(request: JsonObject): void {
     expectProperty(input, "world_view", "DirectorGoalPlanInput"),
     "DirectorGoalPlanInput.world_view",
   );
+  assertDirectorWorldViewStagesPresent(
+    worldView,
+    "DirectorGoalPlanInput.world_view",
+  );
+  assertDirectorWorldViewEventBudgetPresent(
+    worldView,
+    "DirectorGoalPlanInput.world_view",
+  );
   assertDirectorStateMachineViews(worldView);
   const actorIds = new Set(
     objectArray(
@@ -233,6 +319,8 @@ function assertDirectorGoalPlanRequest(request: JsonObject): void {
       { viewer_entity_id: viewerId },
     );
   }
+  assertDialogueParticipantsCoveredByWorldView(dialogue, worldView);
+  assertDirectorWorldViewRelationEndpointsInActors(worldView);
   assertEqual(
     "model.semantic.dialogue_day_mismatch",
     "Dialogue day does not match Director world day",
@@ -508,6 +596,10 @@ function assertDirectorDialogueEventsResponse(
     expectProperty(worldView, "actors", "DirectorWorldView"),
     "DirectorWorldView.actors",
   );
+  const stages = objectArray(
+    expectProperty(worldView, "stages", "DirectorWorldView"),
+    "DirectorWorldView.stages",
+  );
   const dialogue = expectJsonObject(
     expectProperty(input, "dialogue", "DirectorDialogueEventsInput"),
     "DirectorDialogueEventsInput.dialogue",
@@ -516,7 +608,7 @@ function assertDirectorDialogueEventsResponse(
     expectProperty(output, "event_cards", "DirectorDialogueEventsOutput"),
     "DirectorDialogueEventsOutput.event_cards",
   );
-  // Schema + product: one observation → one open-envelope card.
+  // Schema: exactly one card when dialogue_events is called (remaining > 0).
   if (cards.length !== 1) {
     throw fault(
       "model.output.dialogue_events_card_count",
@@ -528,6 +620,7 @@ function assertDirectorDialogueEventsResponse(
     assertEventCardDraft(
       card,
       actors.length,
+      stages.length,
       dialogue,
       `DirectorDialogueEventsOutput.event_cards[${cardIndex}]`,
     );
@@ -1068,6 +1161,139 @@ function assertDirectorStateMachineViews(worldView: JsonObject): void {
   }
 }
 
+function assertDirectorWorldViewStagesPresent(
+  worldView: JsonObject,
+  path: string,
+): void {
+  objectArray(
+    expectProperty(worldView, "stages", "DirectorWorldView"),
+    `${path}.stages`,
+  );
+}
+
+function assertDirectorWorldViewEventBudgetPresent(
+  worldView: JsonObject,
+  path: string,
+): void {
+  const budget = expectJsonObject(
+    expectProperty(worldView, "event_budget", "DirectorWorldView"),
+    `${path}.event_budget`,
+  );
+  assertEqual(
+    "model.semantic.event_budget_day_mismatch",
+    "DirectorWorldView.event_budget.day must match world_view.day",
+    expectInteger(worldView, "day", "DirectorWorldView"),
+    expectInteger(budget, "day", "EventBudgetView"),
+    "day",
+  );
+  const capacity = expectInteger(budget, "capacity", "EventBudgetView");
+  const spent = expectInteger(budget, "spent", "EventBudgetView");
+  const remaining = expectInteger(budget, "remaining", "EventBudgetView");
+  if (remaining !== capacity - spent) {
+    throw fault(
+      "model.semantic.event_budget_remaining",
+      "DirectorWorldView.event_budget.remaining must equal capacity - spent",
+      { capacity, spent, remaining },
+    );
+  }
+}
+
+/**
+ * Dialogue/goal_plan subgraph closedness: every entity endpoint on a projected
+ * relation must already appear in world_view.actors.
+ */
+function assertDirectorWorldViewRelationEndpointsInActors(
+  worldView: JsonObject,
+): void {
+  const actorIds = new Set(
+    objectArray(
+      expectProperty(worldView, "actors", "DirectorWorldView"),
+      "DirectorWorldView.actors",
+    ).map((actor) => expectString(actor, "entity_id", "DirectorActorView")),
+  );
+  for (const [relationIndex, relation] of objectArray(
+    expectProperty(worldView, "relations", "DirectorWorldView"),
+    "DirectorWorldView.relations",
+  ).entries()) {
+    for (const side of ["from", "to"] as const) {
+      const subject = expectJsonObject(
+        expectProperty(relation, side, "RelationState"),
+        `DirectorWorldView.relations[${relationIndex}].${side}`,
+      );
+      const kind = expectString(subject, "kind", "SubjectRef");
+      if (kind !== "entity") {
+        continue;
+      }
+      const entityId = expectString(
+        expectJsonObject(
+          expectProperty(subject, "entity", "SubjectRef"),
+          "SubjectRef.entity",
+        ),
+        "entity_id",
+        "EntityRef",
+      );
+      if (!actorIds.has(entityId)) {
+        throw fault(
+          "model.semantic.world_view_relation_endpoint_outside_actors",
+          "Director world_view relation endpoint is absent from projected actors",
+          {
+            relation_index: relationIndex,
+            side,
+            entity_id: entityId,
+          },
+        );
+      }
+    }
+  }
+}
+
+function assertDialogueParticipantsCoveredByWorldView(
+  dialogue: JsonObject,
+  worldView: JsonObject,
+): void {
+  const actorIds = new Set(
+    objectArray(
+      expectProperty(worldView, "actors", "DirectorWorldView"),
+      "DirectorWorldView.actors",
+    ).map((actor) => expectString(actor, "entity_id", "DirectorActorView")),
+  );
+  for (const [index, participant] of objectArray(
+    expectProperty(dialogue, "participants", "DialogueRecord"),
+    "DialogueRecord.participants",
+  ).entries()) {
+    const participantKind = expectString(
+      participant,
+      "participant_kind",
+      "DialogueParticipantRef",
+    );
+    if (participantKind === "system") {
+      continue;
+    }
+    if (participantKind !== "entity") {
+      throw fault(
+        "model.semantic.dialogue_participant_kind_unknown",
+        "Dialogue participant kind is not supported by Director world_view coverage",
+        { participant_index: index, participant_kind: participantKind },
+      );
+    }
+    const entityId = expectString(
+      expectJsonObject(
+        expectProperty(participant, "entity", "DialogueParticipantRef"),
+        "DialogueParticipantRef.entity",
+      ),
+      "entity_id",
+      "EntityRef",
+    );
+    if (!actorIds.has(entityId)) {
+      throw fault(
+        "model.semantic.dialogue_participant_not_in_world_view",
+        "Dialogue entity participant is absent from the projected Director world_view actors",
+        { participant_index: index, entity_id: entityId },
+      );
+    }
+  }
+}
+
 function assertStateMachineModelView(view: JsonObject): void {
   const currentState = expectJsonObject(
     expectProperty(view, "current_state", "StateMachineModelView"),
@@ -1262,6 +1488,7 @@ function assertEventSituationDraft(
 function assertEventCardDraft(
   card: JsonObject,
   actorCount: number,
+  stageCount: number,
   dialogue: JsonObject,
   path: string,
 ): void {
@@ -1335,6 +1562,119 @@ function assertEventCardDraft(
     situationActorIndices,
     path,
   );
+  assertEventCardStagingDraft(
+    expectJsonObject(
+      expectProperty(card, "staging", "EventCardSemanticDraft"),
+      `${path}.staging`,
+    ),
+    actorCount,
+    stageCount,
+    situationActorIndices,
+    `${path}.staging`,
+  );
+}
+
+function assertEventCardStagingDraft(
+  staging: JsonObject,
+  actorCount: number,
+  stageCount: number,
+  situationActorIndices: readonly number[],
+  path: string,
+): void {
+  const stagingKind = expectString(
+    staging,
+    "staging_kind",
+    "EventCardStagingSemanticDraft",
+  );
+  if (stagingKind === "none") {
+    return;
+  }
+  const situationActorSet = new Set(situationActorIndices);
+  if (stagingKind === "prefab_bind") {
+    const stageIndex = expectInteger(
+      staging,
+      "stage_index",
+      "EventCardStagingSemanticDraft",
+    );
+    if (
+      !Number.isSafeInteger(stageIndex) ||
+      stageIndex < 0 ||
+      stageIndex >= stageCount
+    ) {
+      throw fault(
+        "model.semantic.event_card_stage_index",
+        "EventCard prefab_bind stage_index must address DirectorWorldView.stages",
+        {
+          path: `${path}.stage_index`,
+          stage_index: stageIndex,
+          stage_count: stageCount,
+        },
+      );
+    }
+    if (staging.participant_actor_indices !== undefined) {
+      assertActorIndicesWithinSituation(
+        staging,
+        "participant_actor_indices",
+        actorCount,
+        situationActorSet,
+        path,
+      );
+    }
+    return;
+  }
+  if (stagingKind !== "improv") {
+    throw fault(
+      "model.semantic.event_card_staging_kind",
+      "EventCard staging_kind must be a closed EventCardStagingSemanticDraft branch",
+      { path, staging_kind: stagingKind },
+    );
+  }
+  const participantIndices = assertIndexSelectorsWithin(
+    staging,
+    "participant_actor_indices",
+    actorCount,
+    path,
+  );
+  const participantSet = new Set(participantIndices);
+  for (const [beatIndex, beat] of objectArray(
+    expectProperty(staging, "beats", "ImprovStageSemanticDraft"),
+    `${path}.beats`,
+  ).entries()) {
+    if (beat.focus_actor_indices !== undefined) {
+      assertActorIndicesWithinSituation(
+        beat,
+        "focus_actor_indices",
+        actorCount,
+        participantSet,
+        `${path}.beats[${beatIndex}]`,
+      );
+    }
+  }
+  for (const [choiceIndex, choice] of objectArray(
+    expectProperty(staging, "choices", "ImprovStageSemanticDraft"),
+    `${path}.choices`,
+  ).entries()) {
+    for (const [intentIndex, intent] of objectArray(
+      expectProperty(choice, "sealed_intents", "ImprovChoiceSemanticDraft"),
+      `${path}.choices[${choiceIndex}].sealed_intents`,
+    ).entries()) {
+      const intentPath = `${path}.choices[${choiceIndex}].sealed_intents[${intentIndex}]`;
+      expectString(intent, "outcome_type", intentPath);
+      expectJsonObject(
+        expectProperty(intent, "parameters", "SemanticOutcomeDraft"),
+        `${intentPath}.parameters`,
+      );
+      if (intent.subject_indices !== undefined) {
+        assertActorIndicesWithinSituation(
+          intent,
+          "subject_indices",
+          actorCount,
+          participantSet,
+          intentPath,
+        );
+      }
+    }
+  }
 }
 
 function assertNarrativeSegments(

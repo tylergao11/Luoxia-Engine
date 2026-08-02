@@ -23,8 +23,14 @@ export interface SessionRenderNodeProjectionInput {
   readonly worldState: JsonObject;
 }
 
+export interface SessionPresentationProjection {
+  readonly renderNodes: readonly JsonObject[];
+  readonly lore: readonly JsonObject[];
+  readonly playerLocationEntityId: string;
+}
+
 export interface SessionRenderNodeProjector {
-  project(input: SessionRenderNodeProjectionInput): readonly JsonObject[];
+  project(input: SessionRenderNodeProjectionInput): SessionPresentationProjection;
 }
 
 export interface SessionRenderNodeProjectorDependencies {
@@ -89,7 +95,7 @@ class DefaultSessionRenderNodeProjector
 
   public project(
     input: SessionRenderNodeProjectionInput,
-  ): readonly JsonObject[] {
+  ): SessionPresentationProjection {
     const content = this.#catalog.resolveWorldContentBinding(
       input.worldContentLock,
     );
@@ -161,7 +167,17 @@ class DefaultSessionRenderNodeProjector
         visualBindings,
       }),
     );
-    return Object.freeze(nodes);
+    const lore = this.#projectLore({
+      worldId: input.worldId,
+      content,
+      entities,
+      visibleEntityIds: visibility.entityIds,
+    });
+    return Object.freeze({
+      renderNodes: Object.freeze(nodes),
+      lore: Object.freeze(lore),
+      playerLocationEntityId: visibility.playerLocationEntityId,
+    });
   }
 
   #collectCandidates(input: {
@@ -322,6 +338,79 @@ class DefaultSessionRenderNodeProjector
     return Object.freeze(candidates);
   }
 
+  #projectLore(input: {
+    readonly worldId: string;
+    readonly content: WorldContentBinding;
+    readonly entities: ReadonlyMap<string, JsonObject>;
+    readonly visibleEntityIds: ReadonlySet<string>;
+  }): readonly JsonObject[] {
+    const views: JsonObject[] = [];
+    for (const lore of input.content.presentation.loreEntries) {
+      const loreId = expectString(lore, "lore_id", "LoreEntry");
+      const subjectKind = expectString(lore, "subject_kind", "LoreEntry");
+      const subjectId = expectString(lore, "subject_id", "LoreEntry");
+      const loreKind = expectString(lore, "lore_kind", "LoreEntry");
+      const ordinal = expectInteger(lore, "ordinal", "LoreEntry");
+      const body = cloneJson(
+        expectProperty(lore, "body", "LoreEntry"),
+      );
+      const view: Record<string, JsonValue> = {
+        lore_id: loreId,
+        lore_kind: loreKind,
+        body,
+        ordinal,
+      };
+      if (lore.title !== undefined) {
+        view.title = cloneJson(expectProperty(lore, "title", "LoreEntry"));
+      }
+      if (subjectKind === "world") {
+        views.push(Object.freeze(view));
+        continue;
+      }
+      if (subjectKind !== "entity") {
+        throw new EngineFault(
+          "session.lore.subject_kind_unknown",
+          "LoreEntry subject_kind must be world or entity",
+          { lore_id: loreId, subject_kind: subjectKind },
+        );
+      }
+      const entityId = this.#identityMapper.toRuntimeUuid({
+        worldId: input.worldId,
+        packId: input.content.packId,
+        kind: "entity",
+        localId: subjectId,
+      });
+      if (!input.visibleEntityIds.has(entityId)) {
+        continue;
+      }
+      const entity = requireActiveEntity(
+        input.entities,
+        entityId,
+        "Lore subject entity",
+      );
+      view.subject = Object.freeze({
+        kind: "entity",
+        entity: Object.freeze({
+          world_id: input.worldId,
+          entity_id: entityId,
+          expected_revision: expectInteger(entity, "revision", "EntityState"),
+        }),
+      });
+      views.push(Object.freeze(view));
+    }
+    views.sort((left, right) => {
+      const leftOrdinal = expectInteger(left, "ordinal", "LoreView");
+      const rightOrdinal = expectInteger(right, "ordinal", "LoreView");
+      if (leftOrdinal !== rightOrdinal) {
+        return leftOrdinal - rightOrdinal;
+      }
+      return expectString(left, "lore_id", "LoreView").localeCompare(
+        expectString(right, "lore_id", "LoreView"),
+      );
+    });
+    return Object.freeze(views);
+  }
+
   #materializeNode(input: {
     readonly candidate: RenderCandidate;
     readonly worldId: string;
@@ -422,6 +511,7 @@ function resolveVisibleWorldFacts(input: {
 }): {
   readonly entityIds: ReadonlySet<string>;
   readonly relationIds: ReadonlySet<string>;
+  readonly playerLocationEntityId: string;
 } {
   const entityIds = new Set<string>([input.playerEntityId]);
   const relationIds = new Set<string>();
@@ -464,16 +554,27 @@ function resolveVisibleWorldFacts(input: {
   relationIds.add(
     expectString(playerLocation, "relation_id", "RelationState"),
   );
-  addEntitySubject({
-    subject: expectJsonObject(
-      expectProperty(playerLocation, "to", "RelationState"),
-      "RelationState.to",
-    ),
-    worldId: input.worldId,
-    entities: input.entities,
-    visible: entityIds,
-    source: "Player location",
-  });
+  const locationSubject = expectJsonObject(
+    expectProperty(playerLocation, "to", "RelationState"),
+    "RelationState.to",
+  );
+  const playerLocationEntityId = entitySubjectId(
+    locationSubject,
+    input.worldId,
+  );
+  if (playerLocationEntityId === undefined) {
+    throw new EngineFault(
+      "session.render_node.player_location_subject",
+      "Player location relation must target an entity subject",
+      { player_entity_id: input.playerEntityId },
+    );
+  }
+  requireActiveEntity(
+    input.entities,
+    playerLocationEntityId,
+    "Player location",
+  );
+  entityIds.add(playerLocationEntityId);
 
   for (const relation of input.relations.values()) {
     if (
@@ -540,6 +641,7 @@ function resolveVisibleWorldFacts(input: {
   return Object.freeze({
     entityIds,
     relationIds,
+    playerLocationEntityId,
   });
 }
 
@@ -969,4 +1071,18 @@ function stringArray(
 
 function compareText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function cloneJson(value: JsonValue): JsonValue {
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => cloneJson(entry));
+  }
+  const copy: Record<string, JsonValue> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    copy[key] = cloneJson(entry as JsonValue);
+  }
+  return Object.freeze(copy);
 }

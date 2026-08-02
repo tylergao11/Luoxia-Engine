@@ -226,6 +226,17 @@ class DefaultDialogueCommandOrchestrator
       );
     }
 
+    // Token-consuming dialogue requires remaining EventBudget. remaining === 0
+    // rejects before any model or RulePlugin side effect (no free Token burn).
+    const budgetGate = await this.#readSessionEventBudgetRemaining(stored);
+    if (budgetGate === 0) {
+      return this.#finalizer.completeRejected({
+        sessionId: stored.session.sessionId,
+        commandId: stored.commandId,
+        code: "dialogue.event_budget.exhausted",
+      });
+    }
+
     const humanReceipt = await this.#rulePlugins.executeRecoverable({
       requestId: stored.dialogueExecution.humanRuleRequestId,
       candidateFactory: async () =>
@@ -323,21 +334,18 @@ class DefaultDialogueCommandOrchestrator
       "character",
     );
 
-    const eventObservation = await this.#observeDialogueEventsIfBudgetAllows({
+    const eventObservation = await this.#observeDialogueEvents({
       command: stored,
       dialogueId: stored.dialogueExecution.dialogueId,
       latestPlayerTurnId: stored.dialogueExecution.humanTurnId,
       expectedBasisRevision: characterWorldRevision,
     });
-    const finalWorldRevision =
-      eventObservation === undefined
-        ? characterWorldRevision
-        : await this.#publishDirectorEventCards({
-            command: stored,
-            run: eventObservation.run,
-            modelReceipt: eventObservation.modelReceipt,
-            startingWorldRevision: characterWorldRevision,
-          });
+    const finalWorldRevision = await this.#publishDirectorEventCards({
+      command: stored,
+      run: eventObservation.run,
+      modelReceipt: eventObservation.modelReceipt,
+      startingWorldRevision: characterWorldRevision,
+    });
 
     return this.#finalizer.completeDialogueAccepted({
       sessionId: stored.session.sessionId,
@@ -424,7 +432,7 @@ class DefaultDialogueCommandOrchestrator
     );
 
     // Observe events at post-reply revision before planning may advance the world.
-    const eventObservation = await this.#observeDialogueEventsIfBudgetAllows({
+    const eventObservation = await this.#observeDialogueEvents({
       command: input.command,
       dialogueId: execution.dialogueId,
       latestPlayerTurnId: execution.humanTurnId,
@@ -442,15 +450,12 @@ class DefaultDialogueCommandOrchestrator
         planningInvocation,
         startingWorldRevision: responseWorldRevision,
       });
-    const finalWorldRevision =
-      eventObservation === undefined
-        ? planningWorldRevision
-        : await this.#publishDirectorEventCards({
-            command: input.command,
-            run: eventObservation.run,
-            modelReceipt: eventObservation.modelReceipt,
-            startingWorldRevision: planningWorldRevision,
-          });
+    const finalWorldRevision = await this.#publishDirectorEventCards({
+      command: input.command,
+      run: eventObservation.run,
+      modelReceipt: eventObservation.modelReceipt,
+      startingWorldRevision: planningWorldRevision,
+    });
 
     return this.#finalizer.completeDialogueAccepted({
       sessionId: input.command.session.sessionId,
@@ -1155,23 +1160,42 @@ class DefaultDialogueCommandOrchestrator
     });
   }
 
+  async #readSessionEventBudgetRemaining(
+    command: StoredReceivedCommand,
+  ): Promise<number> {
+    const binding = await this.#worlds.resolveCurrent(
+      command.session.worldId,
+    );
+    assertWorldRevision(
+      binding,
+      command.session.worldRevision,
+      command,
+      "event_budget_gate",
+    );
+    const worldState = worldStateFromSnapshot(
+      binding.record.snapshot.value,
+    );
+    return readEventBudgetRemaining(
+      worldState,
+      command.session.controlBindingId,
+    );
+  }
+
   /**
-   * Observe transcript for EventCards when budget can still fund a card.
-   * remaining === 0: skip model (no fabricated receipt). Callers publish
-   * cards after any planning applies, possibly at a higher world revision.
+   * Observe transcript for EventCards. Entry gate already requires
+   * remaining > 0 before any dialogue Token use; this call must still see
+   * remaining > 0 and produce exactly one card (Accept+publish, or fail).
+   * Dialogue and EventCard are paired: no free reply without a funded card.
    */
-  async #observeDialogueEventsIfBudgetAllows(input: {
+  async #observeDialogueEvents(input: {
     readonly command: StoredReceivedCommand;
     readonly dialogueId: string;
     readonly latestPlayerTurnId: string;
     readonly expectedBasisRevision: number;
-  }): Promise<
-    | {
-        readonly run: DialogueDirectorRunRecord;
-        readonly modelReceipt: VerifiedModelInvocationReceipt;
-      }
-    | undefined
-  > {
+  }): Promise<{
+    readonly run: DialogueDirectorRunRecord;
+    readonly modelReceipt: VerifiedModelInvocationReceipt;
+  }> {
     const binding = await this.#worlds.resolveCurrent(
       input.command.session.worldId,
     );
@@ -1189,7 +1213,15 @@ class DefaultDialogueCommandOrchestrator
       input.command.session.controlBindingId,
     );
     if (remaining === 0) {
-      return undefined;
+      throw new EngineFault(
+        "dialogue.orchestration.event_budget_exhausted_mid_command",
+        "EventBudget remaining became 0 before dialogue_events; dialogue must not consume Token without budget",
+        {
+          session_id: input.command.session.sessionId,
+          command_id: input.command.commandId,
+          dialogue_id: input.dialogueId,
+        },
+      );
     }
 
     const eventRun = await this.#directorRuns.prepare({
@@ -1274,8 +1306,9 @@ class DefaultDialogueCommandOrchestrator
         requestId: identity.ruleRequestId,
         expectedWorldRevision,
       });
-      // One observation → one card: Reject must fail the dialogue command.
-      // Silent skip would leave remaining>0 talk without a published world card.
+      // Reject must fail the dialogue command — silent skip would leave
+      // remaining>0 talk without a published world card after the model
+      // emitted the required single card.
       if (receipt.proposal === undefined) {
         const output = expectJsonObject(
           expectProperty(
@@ -1287,7 +1320,7 @@ class DefaultDialogueCommandOrchestrator
         );
         throw new EngineFault(
           "dialogue.orchestration.event_card_publish_rejected",
-          "EventCard RulePlugin rejected the single dialogue observation card; the command cannot complete without publishing it",
+          "EventCard RulePlugin rejected the dialogue observation card; the command cannot complete without publishing an emitted card",
           {
             session_id: input.command.session.sessionId,
             command_id: input.command.commandId,
@@ -1338,10 +1371,18 @@ class DefaultDialogueCommandOrchestrator
       }
       expectedWorldRevision = nextRevision;
     }
-    if (
-      drafts.length === 1 &&
-      expectedWorldRevision === input.startingWorldRevision
-    ) {
+    if (drafts.length !== 1) {
+      throw new EngineFault(
+        "dialogue.orchestration.event_card_count",
+        "Dialogue observation must produce exactly one EventCard draft when dialogue_events was called",
+        {
+          session_id: input.command.session.sessionId,
+          command_id: input.command.commandId,
+          draft_count: drafts.length,
+        },
+      );
+    }
+    if (expectedWorldRevision === input.startingWorldRevision) {
       throw new EngineFault(
         "dialogue.orchestration.event_card_not_published",
         "Dialogue observation produced a card draft but no EventCard was committed",
@@ -1393,6 +1434,7 @@ class DefaultDialogueCommandOrchestrator
       command: input.command,
       modelReceipt: input.modelReceipt,
       worldState,
+      contentBinding: binding.contentBinding,
       proposalId: input.proposalId,
       draft: input.draft,
       localIds: this.#localIds,
@@ -3011,6 +3053,7 @@ function worldStateFromSnapshot(snapshot: JsonObject): JsonObject {
  * EventBudget remaining for the session control on the world's current day.
  * Matches SessionView arithmetic: capacity - sum(charge cost amounts).
  * Missing or ambiguous budget is a hard fault (player phase must own exactly one).
+ * Dialogue entry requires remaining > 0; remaining === 0 means day-end only.
  */
 function readEventBudgetRemaining(
   worldState: JsonObject,
@@ -3461,6 +3504,7 @@ function materializeEventCardCandidate(input: {
   readonly command: StoredReceivedCommand;
   readonly modelReceipt: VerifiedModelInvocationReceipt;
   readonly worldState: JsonObject;
+  readonly contentBinding: WorldContentBinding;
   readonly proposalId: string;
   readonly draft: JsonObject;
   readonly localIds: DialogueLocalIdFactory;
@@ -3490,6 +3534,10 @@ function materializeEventCardCandidate(input: {
   const actors = asObjectArray(
     expectProperty(worldView, "actors", "DirectorWorldView"),
     "DirectorWorldView.actors",
+  );
+  const stages = asObjectArray(
+    expectProperty(worldView, "stages", "DirectorWorldView"),
+    "DirectorWorldView.stages",
   );
   const situationDraft = expectJsonObject(
     expectProperty(
@@ -3704,6 +3752,222 @@ function materializeEventCardCandidate(input: {
     ),
     result_options: Object.freeze(resultOptions),
     agency_gates: Object.freeze(agencyGates),
+    staging: materializeEventCardStaging({
+      command: input.command,
+      worldId: input.command.session.worldId,
+      worldState: input.worldState,
+      contentBinding: input.contentBinding,
+      actors,
+      stages,
+      situationActorSet,
+      locale,
+      draft: expectJsonObject(
+        expectProperty(input.draft, "staging", "EventCardSemanticDraft"),
+        "EventCardSemanticDraft.staging",
+      ),
+    }),
+  });
+}
+
+function materializeEventCardStaging(input: {
+  readonly command: StoredReceivedCommand;
+  readonly worldId: string;
+  readonly worldState: JsonObject;
+  readonly contentBinding: WorldContentBinding;
+  readonly actors: readonly JsonObject[];
+  readonly stages: readonly JsonObject[];
+  readonly situationActorSet: ReadonlySet<number>;
+  readonly locale: string;
+  readonly draft: JsonObject;
+}): JsonObject {
+  const stagingKind = expectString(
+    input.draft,
+    "staging_kind",
+    "EventCardStagingSemanticDraft",
+  );
+  if (stagingKind === "none") {
+    return Object.freeze({ staging_kind: "none" });
+  }
+  if (stagingKind === "prefab_bind") {
+    const stageIndex = expectInteger(
+      input.draft,
+      "stage_index",
+      "EventCardStagingSemanticDraft",
+    );
+    if (
+      !Number.isSafeInteger(stageIndex) ||
+      stageIndex < 0 ||
+      stageIndex >= input.stages.length ||
+      stageIndex >= input.contentBinding.stages.length
+    ) {
+      throw commandIdentityFault(
+        input.command,
+        "EventCard prefab_bind stage_index is outside DirectorWorldView.stages",
+        {
+          stage_index: stageIndex,
+          stage_count: input.stages.length,
+        },
+      );
+    }
+    const catalogEntry = input.contentBinding.stages[stageIndex] as JsonObject;
+    const projected = input.stages[stageIndex] as JsonObject;
+    if (
+      expectString(catalogEntry, "stage_kind", "StageCatalogEntry") !==
+        expectString(projected, "stage_kind", "DirectorStageCatalogView") ||
+      expectString(
+        catalogEntry,
+        "npc_participation",
+        "StageCatalogEntry",
+      ) !==
+        expectString(
+          projected,
+          "npc_participation",
+          "DirectorStageCatalogView",
+        )
+    ) {
+      throw commandIdentityFault(
+        input.command,
+        "EventCard prefab_bind stage_index does not match locked StageCatalogEntry projection",
+        { stage_index: stageIndex },
+      );
+    }
+    const staging: Record<string, JsonValue> = {
+      staging_kind: "prefab_bind",
+      stage: Object.freeze({
+        bundle_id: input.contentBinding.packId,
+        bundle_digest: input.contentBinding.bundleDigest,
+        catalog_kind: "stage",
+        local_id: expectString(catalogEntry, "stage_id", "StageCatalogEntry"),
+      }),
+    };
+    if (input.draft.participant_actor_indices !== undefined) {
+      staging.participants = Object.freeze(
+        materializeActorSubjects({
+          command: input.command,
+          worldId: input.worldId,
+          worldState: input.worldState,
+          actors: input.actors,
+          indices: readModelIndices(
+            input.draft,
+            "participant_actor_indices",
+            "EventCardStagingSemanticDraft",
+            input.actors.length,
+          ),
+          allowedActorIndices: input.situationActorSet,
+        }).map(subjectEntityRef),
+      );
+    }
+    return Object.freeze(staging);
+  }
+  if (stagingKind !== "improv") {
+    throw commandIdentityFault(
+      input.command,
+      "EventCard staging_kind is not a closed EventCardStagingSemanticDraft branch",
+      { staging_kind: stagingKind },
+    );
+  }
+  const improvStageId = expectString(
+    input.contentBinding.worldDefinition,
+    "improv_stage_id",
+    "WorldDefinition",
+  );
+  const improvEntry = input.contentBinding.stages.find(
+    (stage) =>
+      expectString(stage, "stage_id", "StageCatalogEntry") === improvStageId,
+  );
+  if (improvEntry === undefined) {
+    throw commandIdentityFault(
+      input.command,
+      "WorldDefinition.improv_stage_id is absent from locked StageCatalogEntry list",
+      { improv_stage_id: improvStageId },
+    );
+  }
+  const participantIndices = readModelIndices(
+    input.draft,
+    "participant_actor_indices",
+    "ImprovStageSemanticDraft",
+    input.actors.length,
+  );
+  const participantSet = new Set(participantIndices);
+  const beats = asObjectArray(
+    expectProperty(input.draft, "beats", "ImprovStageSemanticDraft"),
+    "ImprovStageSemanticDraft.beats",
+  ).map((beat) => {
+    const materialized: Record<string, JsonValue> = {
+      summary: localizedText(
+        input.locale,
+        expectString(beat, "summary", "ImprovBeatSemanticDraft"),
+      ),
+    };
+    if (beat.focus_actor_indices !== undefined) {
+      materialized.focus = Object.freeze(
+        materializeActorSubjects({
+          command: input.command,
+          worldId: input.worldId,
+          worldState: input.worldState,
+          actors: input.actors,
+          indices: readModelIndices(
+            beat,
+            "focus_actor_indices",
+            "ImprovBeatSemanticDraft",
+            input.actors.length,
+          ),
+          allowedActorIndices: participantSet,
+        }).map(subjectEntityRef),
+      );
+    }
+    return Object.freeze(materialized);
+  });
+  const choices = asObjectArray(
+    expectProperty(input.draft, "choices", "ImprovStageSemanticDraft"),
+    "ImprovStageSemanticDraft.choices",
+  ).map((choice, choiceOrdinal) => {
+    const sealedIntents = asObjectArray(
+      expectProperty(choice, "sealed_intents", "ImprovChoiceSemanticDraft"),
+      "ImprovChoiceSemanticDraft.sealed_intents",
+    ).map((intent, intentOrdinal) =>
+      materializeSemanticOutcomeCandidate({
+        command: input.command,
+        worldId: input.worldId,
+        worldState: input.worldState,
+        actors: input.actors,
+        allowedActorIndices: participantSet,
+        draft: intent,
+        outcomeId: `improv_choice_${choiceOrdinal}_intent_${intentOrdinal}`,
+        gateIds: [],
+      }),
+    );
+    return Object.freeze({
+      label: localizedText(
+        input.locale,
+        expectString(choice, "label", "ImprovChoiceSemanticDraft"),
+      ),
+      sealed_intents: Object.freeze(sealedIntents),
+    });
+  });
+  return Object.freeze({
+    staging_kind: "improv",
+    stage: Object.freeze({
+      bundle_id: input.contentBinding.packId,
+      bundle_digest: input.contentBinding.bundleDigest,
+      catalog_kind: "stage",
+      local_id: improvStageId,
+    }),
+    premise: localizedText(
+      input.locale,
+      expectString(input.draft, "premise", "ImprovStageSemanticDraft"),
+    ),
+    participants: Object.freeze(
+      materializeActorSubjects({
+        command: input.command,
+        worldId: input.worldId,
+        worldState: input.worldState,
+        actors: input.actors,
+        indices: participantIndices,
+      }).map(subjectEntityRef),
+    ),
+    beats: Object.freeze(beats),
+    choices: Object.freeze(choices),
   });
 }
 
@@ -5279,7 +5543,8 @@ function assertWorldRevision(
     | "director_system"
     | "definition"
     | "goal_plan"
-    | "event_card",
+    | "event_card"
+    | "event_budget_gate",
 ): void {
   const actualRevision = expectInteger(
     binding.record.snapshot.value,

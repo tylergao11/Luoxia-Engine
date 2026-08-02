@@ -145,7 +145,7 @@ function writeFailure(
     writeText(
       response,
       statusForEngineFault(error),
-      `${error.code}: ${error.message}`,
+      formatEngineFaultText(error),
     );
     return;
   }
@@ -154,6 +154,109 @@ function writeFailure(
     500,
     "server.internal: Server failed before producing a verified response",
   );
+}
+
+function formatEngineFaultText(error: EngineFault): string {
+  const base = `${error.code}: ${error.message}`;
+  if (error.details === undefined || typeof error.details !== "object" || error.details === null) {
+    return base;
+  }
+  const details = error.details as Record<string, unknown>;
+  const parts: string[] = [];
+  if (typeof details.failure_code === "string") {
+    parts.push(details.failure_code);
+  }
+  const nested = details.failure_details;
+  if (nested !== undefined && typeof nested === "object" && nested !== null) {
+    parts.push(...summarizeFaultDetailFields(nested as Record<string, unknown>));
+  }
+  parts.push(...summarizeFaultDetailFields(details));
+  return parts.length === 0 ? base : `${base} [${parts.join("; ")}]`;
+}
+
+function summarizeFaultDetailFields(
+  details: Record<string, unknown>,
+): readonly string[] {
+  const parts: string[] = [];
+  const outputValidation = details.output_validation;
+  if (
+    outputValidation !== undefined &&
+    typeof outputValidation === "object" &&
+    outputValidation !== null
+  ) {
+    parts.push("output");
+    parts.push(
+      ...summarizeContractDetails(outputValidation as Record<string, unknown>),
+    );
+  }
+  const responseValidation = details.response_validation;
+  if (
+    responseValidation !== undefined &&
+    typeof responseValidation === "object" &&
+    responseValidation !== null
+  ) {
+    parts.push("response");
+    parts.push(
+      ...summarizeContractDetails(
+        responseValidation as Record<string, unknown>,
+      ),
+    );
+  }
+  if (typeof details.output_kind === "string") {
+    parts.push(`output_kind=${details.output_kind}`);
+  }
+  if (typeof details.request_kind === "string") {
+    parts.push(`request_kind=${details.request_kind}`);
+  }
+  if (typeof details.response_request_kind === "string") {
+    parts.push(`response_request_kind=${details.response_request_kind}`);
+  }
+  if (details.output_validated === true) {
+    parts.push("output_validated=true");
+  }
+  parts.push(...summarizeContractDetails(details));
+  return parts;
+}
+
+function summarizeContractDetails(
+  details: Record<string, unknown>,
+): readonly string[] {
+  const parts: string[] = [];
+  if (typeof details.schema_ref === "string") {
+    parts.push(`schema=${details.schema_ref}`);
+  }
+  if (typeof details.path === "string") {
+    parts.push(`path=${details.path}`);
+  }
+  if (typeof details.message === "string") {
+    parts.push(details.message);
+  }
+  if (Array.isArray(details.errors)) {
+    for (const item of details.errors.slice(0, 3)) {
+      if (item === null || typeof item !== "object") {
+        continue;
+      }
+      const err = item as Record<string, unknown>;
+      const instancePath =
+        typeof err.instance_path === "string"
+          ? err.instance_path
+          : typeof err.instancePath === "string"
+            ? err.instancePath
+            : typeof err.path === "string"
+              ? err.path
+              : "";
+      const message =
+        typeof err.message === "string" ? err.message : "invalid";
+      const keyword =
+        typeof err.keyword === "string" ? ` (${err.keyword})` : "";
+      parts.push(
+        instancePath.length > 0
+          ? `${instancePath}: ${message}${keyword}`
+          : `${message}${keyword}`,
+      );
+    }
+  }
+  return parts;
 }
 
 function statusForEngineFault(error: EngineFault): number {

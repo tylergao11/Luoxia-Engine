@@ -1571,6 +1571,17 @@ const EFFECT_HANDLERS: { readonly [K in EffectOpName]: EffectHandler } = {
       );
     }
 
+    const sealedResult = cloneJson(
+      expectProperty(op, "sealed_result", "EventCardPublishOp"),
+    );
+    const sealedStaging = expectJsonObject(
+      expectProperty(
+        expectJsonObject(sealedResult, "EventCardPublishOp.sealed_result"),
+        "staging",
+        "SealedEventResult",
+      ),
+      "SealedEventResult.staging",
+    );
     context.world.event_cards.push({
       event_card_id: eventCardId,
       source_proposal_id: expectString(
@@ -1586,14 +1597,17 @@ const EFFECT_HANDLERS: { readonly [K in EffectOpName]: EffectHandler } = {
       day,
       title: cloneJson(expectProperty(op, "title", "EventCardPublishOp")),
       summary: cloneJson(expectProperty(op, "summary", "EventCardPublishOp")),
-      sealed_result: cloneJson(
-        expectProperty(op, "sealed_result", "EventCardPublishOp"),
-      ),
+      sealed_result: sealedResult,
       control: cloneJsonObject(control),
       charge_id: chargeId,
       cost: cloneJsonObject(cost),
       status: "available",
       published_revision: context.worldRevision + 1,
+      staging_kind: expectString(
+        sealedStaging,
+        "staging_kind",
+        "SealedEventResultStaging",
+      ),
     });
 
     context.world.event_budgets[budgetIndex] = {

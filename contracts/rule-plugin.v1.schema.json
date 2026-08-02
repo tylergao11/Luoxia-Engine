@@ -1535,7 +1535,8 @@
         "title",
         "summary",
         "result_options",
-        "agency_gates"
+        "agency_gates",
+        "staging"
       ],
       "properties": {
         "proposal_id": {
@@ -1579,6 +1580,137 @@
                 }
               }
             ]
+          }
+        },
+        "staging": {
+          "$ref": "#/$defs/EventCardPublishStaging"
+        }
+      }
+    },
+    "EventCardPublishStaging": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "staging_kind"
+          ],
+          "properties": {
+            "staging_kind": {
+              "const": "none"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "staging_kind",
+            "stage"
+          ],
+          "properties": {
+            "staging_kind": {
+              "const": "prefab_bind"
+            },
+            "stage": {
+              "$ref": "world-runtime.v1.schema.json#/$defs/StageCatalogRef"
+            },
+            "participants": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "$ref": "common.v1.schema.json#/$defs/EntityRef"
+              }
+            }
+          }
+        },
+        {
+          "$ref": "#/$defs/MaterializedImprovStage"
+        }
+      ]
+    },
+    "MaterializedImprovStage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "staging_kind",
+        "stage",
+        "premise",
+        "participants",
+        "beats",
+        "choices"
+      ],
+      "properties": {
+        "staging_kind": {
+          "const": "improv"
+        },
+        "stage": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/StageCatalogRef"
+        },
+        "premise": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "participants": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/EntityRef"
+          }
+        },
+        "beats": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "$ref": "#/$defs/MaterializedImprovBeat"
+          }
+        },
+        "choices": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "items": {
+            "$ref": "#/$defs/MaterializedImprovChoice"
+          }
+        }
+      }
+    },
+    "MaterializedImprovBeat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary"
+      ],
+      "properties": {
+        "summary": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "focus": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/EntityRef"
+          }
+        }
+      }
+    },
+    "MaterializedImprovChoice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "label",
+        "sealed_intents"
+      ],
+      "properties": {
+        "label": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "sealed_intents": {
+          "type": "array",
+          "maxItems": 4,
+          "items": {
+            "$ref": "#/$defs/MaterializedSemanticOutcomeCandidate"
           }
         }
       }
@@ -2183,7 +2315,8 @@
       "additionalProperties": false,
       "required": [
         "control",
-        "proposal"
+        "proposal",
+        "stage_instance"
       ],
       "properties": {
         "control": {
@@ -2191,6 +2324,48 @@
         },
         "proposal": {
           "$ref": "client-bridge.v1.schema.json#/$defs/StageOutcomeProposal"
+        },
+        "stage_instance": {
+          "$ref": "#/$defs/StageOutcomeStageInstanceSnapshot"
+        }
+      }
+    },
+    "StageOutcomeStageInstanceSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage_instance_id",
+        "revision",
+        "state",
+        "participants",
+        "completion_rules"
+      ],
+      "properties": {
+        "stage_instance_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "state": {
+          "$ref": "common.v1.schema.json#/$defs/JsonObject"
+        },
+        "participants": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/EntityRef"
+          }
+        },
+        "completion_rules": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/RuleRef"
+          }
         }
       }
     },

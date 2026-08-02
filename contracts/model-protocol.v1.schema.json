@@ -168,6 +168,66 @@
           "items": {
             "$ref": "world-runtime.v1.schema.json#/$defs/FactRecord"
           }
+        },
+        "stages": {
+          "description": "Required for director.dialogue_events and director.goal_plan (EventCard staging catalog). Omitted on director.daily_settlement to avoid irrelevant catalog inflation.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DirectorStageCatalogView"
+          }
+        },
+        "event_budget": {
+          "description": "Required for director.dialogue_events and director.goal_plan (player-phase EventBudgetView: day/capacity/spent/remaining). Omitted on director.daily_settlement because EventBudget opens only when entering player.",
+          "$ref": "world-runtime.v1.schema.json#/$defs/EventBudgetView"
+        }
+      }
+    },
+    "DirectorStageCatalogView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage_kind",
+        "intent_coverage",
+        "participants",
+        "npc_participation"
+      ],
+      "properties": {
+        "stage_kind": {
+          "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
+        },
+        "intent_coverage": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "example_intents": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+          }
+        },
+        "participants": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "min",
+            "max"
+          ],
+          "properties": {
+            "min": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "max": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "npc_participation": {
+          "enum": [
+            "commitment_required",
+            "unilateral"
+          ]
         }
       }
     },
@@ -231,6 +291,7 @@
       ],
       "properties": {
         "world_view": {
+          "description": "Wider Director graph for day settlement: all active entities plus objective_traces subjects (retired unused entities omitted). Must omit stages and event_budget (settlement does not author EventCard staging; EventBudget opens only when entering player). Provider projection still drops empty objective_components and objective_traces.visibility.",
           "$ref": "#/$defs/DirectorWorldView"
         },
         "objective_traces": {
@@ -251,9 +312,11 @@
       ],
       "properties": {
         "world_view": {
+          "description": "Dialogue-related subgraph only: entity participants, one-hop relation neighbors, related facts, world machines, required stages catalog, and required event_budget (EventBudgetView). Not the full world graph.",
           "$ref": "#/$defs/DirectorWorldView"
         },
         "dialogue": {
+          "description": "Locked DialogueRecord with turns truncated to the last MODEL_DIALOGUE_TURN_WINDOW (24) entries by Server projection.",
           "$ref": "world-runtime.v1.schema.json#/$defs/DialogueRecord"
         },
         "response_locale": {
@@ -275,6 +338,7 @@
           "$ref": "#/$defs/CharacterSubjectiveView"
         },
         "dialogue": {
+          "description": "Locked DialogueRecord with turns truncated to the last MODEL_DIALOGUE_TURN_WINDOW (24) entries by Server projection.",
           "$ref": "world-runtime.v1.schema.json#/$defs/DialogueRecord"
         },
         "response_locale": {
@@ -1048,7 +1112,8 @@
         "situation",
         "title",
         "summary",
-        "result_options"
+        "result_options",
+        "staging"
       ],
       "properties": {
         "situation": {
@@ -1077,6 +1142,139 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/EventCardAgencyGateSemanticDraft"
+          }
+        },
+        "staging": {
+          "$ref": "#/$defs/EventCardStagingSemanticDraft"
+        }
+      }
+    },
+    "EventCardStagingSemanticDraft": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "staging_kind"
+          ],
+          "properties": {
+            "staging_kind": {
+              "const": "none"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "staging_kind",
+            "stage_index"
+          ],
+          "properties": {
+            "staging_kind": {
+              "const": "prefab_bind"
+            },
+            "stage_index": {
+              "$ref": "#/$defs/ModelIndex"
+            },
+            "participant_actor_indices": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/ModelIndex"
+              }
+            }
+          }
+        },
+        {
+          "$ref": "#/$defs/ImprovStageSemanticDraft"
+        }
+      ]
+    },
+    "ImprovStageSemanticDraft": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "staging_kind",
+        "premise",
+        "participant_actor_indices",
+        "beats",
+        "choices"
+      ],
+      "properties": {
+        "staging_kind": {
+          "const": "improv"
+        },
+        "premise": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "participant_actor_indices": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/ModelIndex"
+          }
+        },
+        "beats": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "$ref": "#/$defs/ImprovBeatSemanticDraft"
+          }
+        },
+        "choices": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "items": {
+            "$ref": "#/$defs/ImprovChoiceSemanticDraft"
+          }
+        }
+      }
+    },
+    "ImprovBeatSemanticDraft": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary"
+      ],
+      "properties": {
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000
+        },
+        "focus_actor_indices": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/ModelIndex"
+          }
+        }
+      }
+    },
+    "ImprovChoiceSemanticDraft": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "label",
+        "sealed_intents"
+      ],
+      "properties": {
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000
+        },
+        "sealed_intents": {
+          "type": "array",
+          "maxItems": 4,
+          "items": {
+            "$ref": "#/$defs/SemanticOutcomeDraft"
           }
         }
       }
@@ -1276,6 +1474,7 @@
           "const": "director.dialogue_events"
         },
         "event_cards": {
+          "description": "Call director.dialogue_events only when EventBudget remaining > 0; the call must produce exactly one EventCardSemanticDraft. remaining === 0 skips this model call entirely (no fabricated empty output).",
           "type": "array",
           "minItems": 1,
           "maxItems": 1,
@@ -1755,7 +1954,9 @@
         "actors",
         "relations",
         "world_machines",
-        "facts"
+        "facts",
+        "stages",
+        "event_budget"
       ],
       "properties": {
         "day": {
@@ -1784,6 +1985,16 @@
           "items": {
             "$ref": "#/$defs/ProviderFactView"
           }
+        },
+        "stages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DirectorStageCatalogView"
+          }
+        },
+        "event_budget": {
+          "description": "Player-phase EventBudgetView (day/capacity/spent/remaining). Passed through from formal DirectorWorldView; remaining > 0 is a precondition for calling director.dialogue_events.",
+          "$ref": "world-runtime.v1.schema.json#/$defs/EventBudgetView"
         }
       }
     },
@@ -2121,8 +2332,10 @@
           }
         },
         "turns": {
+          "description": "Server projects at most the last MODEL_DIALOGUE_TURN_WINDOW (24) turns from the locked DialogueRecord. Truncation is Server-owned; models must not invent summary structures.",
           "type": "array",
           "minItems": 1,
+          "maxItems": 24,
           "items": {
             "$ref": "#/$defs/ProviderDialogueTurnView"
           }
@@ -3329,6 +3542,7 @@
           "$ref": "#/$defs/KnowledgeView"
         },
         "dialogue": {
+          "description": "Locked DialogueRecord with turns truncated to the last MODEL_DIALOGUE_TURN_WINDOW (24) entries by Server projection.",
           "$ref": "world-runtime.v1.schema.json#/$defs/DialogueRecord"
         },
         "response_locale": {
@@ -3348,12 +3562,14 @@
       ],
       "properties": {
         "world_view": {
+          "description": "Dialogue-related subgraph only: entity participants, one-hop relation neighbors, related facts, world machines, required stages catalog, and required event_budget (EventBudgetView).",
           "$ref": "#/$defs/DirectorWorldView"
         },
         "knowledge_view": {
           "$ref": "#/$defs/KnowledgeView"
         },
         "dialogue": {
+          "description": "Locked DialogueRecord with turns truncated to the last MODEL_DIALOGUE_TURN_WINDOW (24) entries by Server projection.",
           "$ref": "world-runtime.v1.schema.json#/$defs/DialogueRecord"
         },
         "response_locale": {
@@ -3376,6 +3592,7 @@
           "$ref": "#/$defs/KnowledgeView"
         },
         "dialogue": {
+          "description": "Locked DialogueRecord with turns truncated to the last MODEL_DIALOGUE_TURN_WINDOW (24) entries by Server projection.",
           "$ref": "world-runtime.v1.schema.json#/$defs/DialogueRecord"
         },
         "response_locale": {

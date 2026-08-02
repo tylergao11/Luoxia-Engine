@@ -49,6 +49,11 @@ class DefaultSessionViewProjector implements SessionViewProjector {
       "WorldState.day_cycle",
     );
     const currentDay = expectInteger(dayCycle, "day", "DayCycleState");
+    assertPlayerLocationEntity(
+      worldState,
+      playerEntityId,
+      input.playerLocationEntityId,
+    );
 
     const view: JsonObject = {
       contract_version: "world-runtime.v1",
@@ -57,10 +62,12 @@ class DefaultSessionViewProjector implements SessionViewProjector {
       view_revision: input.viewRevision,
       basis_token: input.basisToken,
       player_entity_id: playerEntityId,
+      player_location_entity_id: input.playerLocationEntityId,
       world_time: cloneJson(
         expectProperty(worldState, "clock", "WorldState"),
       ),
       render_nodes: input.renderNodeCandidates.map(cloneCandidate),
+      lore: input.loreCandidates.map(cloneCandidate),
       goal_plans: projectGoalPlans(worldState, playerEntityId),
       notices: input.noticeCandidates.map(cloneCandidate),
       day_cycle: cloneJsonObject(dayCycle),
@@ -132,6 +139,77 @@ function resolvePlayerEntityId(
     expectString(entities[0] as JsonObject, "state", "EntityState"),
   );
   return playerEntityId;
+}
+
+function assertPlayerLocationEntity(
+  worldState: JsonObject,
+  playerEntityId: string,
+  playerLocationEntityId: string,
+): void {
+  const entities = asObjectArray(
+    expectProperty(worldState, "entities", "WorldState"),
+    "WorldState.entities",
+  );
+  const locationMatches = entities.filter(
+    (entity) =>
+      expectString(entity, "entity_id", "EntityState") ===
+      playerLocationEntityId,
+  );
+  if (locationMatches.length !== 1) {
+    throw fault(
+      "world.session_view.player_location_entity_match",
+      "SessionView.player_location_entity_id must resolve to exactly one entity",
+      {
+        player_location_entity_id: playerLocationEntityId,
+        matches: locationMatches.length,
+      },
+    );
+  }
+  assertEqual(
+    "player_location_entity.state",
+    "active",
+    expectString(locationMatches[0] as JsonObject, "state", "EntityState"),
+  );
+  const locationLinks = asObjectArray(
+    expectProperty(worldState, "relations", "WorldState"),
+    "WorldState.relations",
+  ).filter((relation) => {
+    if (expectString(relation, "state", "RelationState") !== "active") {
+      return false;
+    }
+    const from = expectJsonObject(
+      expectProperty(relation, "from", "RelationState"),
+      "RelationState.from",
+    );
+    const to = expectJsonObject(
+      expectProperty(relation, "to", "RelationState"),
+      "RelationState.to",
+    );
+    return (
+      expectString(from, "kind", "SubjectRef") === "entity" &&
+      expectString(
+        expectJsonObject(expectProperty(from, "entity", "SubjectRef"), "SubjectRef.entity"),
+        "entity_id",
+        "EntityRef",
+      ) === playerEntityId &&
+      expectString(to, "kind", "SubjectRef") === "entity" &&
+      expectString(
+        expectJsonObject(expectProperty(to, "entity", "SubjectRef"), "SubjectRef.entity"),
+        "entity_id",
+        "EntityRef",
+      ) === playerLocationEntityId
+    );
+  });
+  if (locationLinks.length < 1) {
+    throw fault(
+      "world.session_view.player_location_relation",
+      "SessionView.player_location_entity_id must be linked by an active relation from the player entity",
+      {
+        player_entity_id: playerEntityId,
+        player_location_entity_id: playerLocationEntityId,
+      },
+    );
+  }
 }
 
 function projectEventBudget(
@@ -218,6 +296,7 @@ function projectEventCards(
         ),
       ),
       status: expectString(card, "status", "EventCardState"),
+      staging_kind: expectString(card, "staging_kind", "EventCardState"),
     }));
 }
 

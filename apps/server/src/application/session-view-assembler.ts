@@ -52,7 +52,7 @@ export function createSessionViewAssembler(
           world_content_lock: input.worldContentLock.value,
         },
       );
-      const renderNodeCandidates = dependencies.renderNodes.project({
+      const renderProjection = dependencies.renderNodes.project({
         worldContentLock: input.worldContentLock,
         worldId: input.session.worldId,
         playerEntityId: input.session.playerEntityId,
@@ -65,7 +65,9 @@ export function createSessionViewAssembler(
         viewRevision: input.session.viewRevision,
         basisToken: dependencies.basisTokens.issue(input.session),
         controlBindingId: input.session.controlBindingId,
-        renderNodeCandidates,
+        playerLocationEntityId: renderProjection.playerLocationEntityId,
+        renderNodeCandidates: renderProjection.renderNodes,
+        loreCandidates: renderProjection.lore,
         noticeCandidates: input.noticeCandidates,
       });
     },

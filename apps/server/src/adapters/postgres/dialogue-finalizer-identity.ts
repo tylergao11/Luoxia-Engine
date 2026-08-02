@@ -29,10 +29,10 @@ export interface DialogueResponseIdentity {
 
 /**
  * Close the dialogue responder identity from command-row + director-run joins.
- * `director.dialogue_events` is optional when EventBudget remaining === 0 skips
- * that model call (no fabricated receipt). When a run was prepared, the JOIN
- * populates dialogueEventsModelRequestId; proposal coverage still hard-fails
- * incomplete verified outputs.
+ * Live dialogue always funds `director.dialogue_events`; a null events request
+ * id is only tolerated for historical remaining===0 skip rows. When a run was
+ * prepared, the JOIN populates dialogueEventsModelRequestId; proposal coverage
+ * still hard-fails incomplete verified outputs.
  */
 export function readDialogueResponseIdentity(
   contracts: ContractValidator,
@@ -148,7 +148,8 @@ export function readDialogueResponseIdentity(
         },
       );
     }
-    // dialogue_events may be absent when EventBudget remaining === 0.
+    // Live path always funds dialogue_events; null id only for historical
+    // rows completed under the retired remaining===0 skip policy.
     return Object.freeze({
       kind: "director_system",
       turnId: systemResponseTurnId,
@@ -157,8 +158,8 @@ export function readDialogueResponseIdentity(
     });
   }
   // Character Mind NPC dialogue: response identity is the pre-allocated
-  // character turn/model ids. director.dialogue_events is optional when
-  // remaining === 0 skips that model call (no fabricated receipt).
+  // character turn/model ids. dialogue_events is required on the live path;
+  // null id only for historical remaining===0 skip rows.
   if (
     interactionKind === "dialogue" &&
     goalPlanModelRequestId === undefined &&
@@ -195,9 +196,10 @@ export function readDialogueResponseIdentity(
 }
 
 /**
- * Dialogue start/continue accepted-completion gate. Does not require
- * dialogueEventsModelRequestId (budget skip). Still requires two dialogue
- * packets and a closed response turn identity.
+ * Dialogue start/continue accepted-completion gate. Live path pairs dialogue
+ * with dialogue_events; dialogueEventsModelRequestId may still be absent on
+ * historical remaining===0 skip rows. Requires two dialogue packets and a
+ * closed response turn identity.
  */
 export function assertDialogueAcceptedCompletionIdentity(input: {
   readonly sessionId: string;
@@ -212,10 +214,8 @@ export function assertDialogueAcceptedCompletionIdentity(input: {
 }): void {
   const minimumFinalRevision =
     input.acceptedWorldRevision + DIALOGUE_PACKET_COUNT;
-  // dialogueEventsModelRequestId is optional: EventBudget remaining === 0
-  // skips director.dialogue_events (no fabricated model receipt). When a
-  // run was prepared, the JOIN populates the id and proposal coverage still
-  // requires a verified response with matching event_cards identities.
+  // dialogueEventsModelRequestId remains optional only for historical skip
+  // rows. Live accepted dialogue always prepares dialogue_events.
   if (
     input.eventCard !== undefined ||
     input.stageInstanceId !== undefined ||

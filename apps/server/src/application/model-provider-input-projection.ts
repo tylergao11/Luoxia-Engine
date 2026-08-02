@@ -241,6 +241,7 @@ function projectDirectorWorldView(world: JsonObject): {
 } {
   return projectDirectorWorldViewInternal(world, {
     projectMachine: projectStateMachine,
+    includeStages: false,
   });
 }
 
@@ -254,6 +255,7 @@ function projectDirectorWorldViewForDialogueEvents(world: JsonObject): {
 } {
   return projectDirectorWorldViewInternal(world, {
     projectMachine: projectStateMachineCurrentOnly,
+    includeStages: true,
   });
 }
 
@@ -261,6 +263,7 @@ function projectDirectorWorldViewInternal(
   world: JsonObject,
   options: {
     readonly projectMachine: (machine: JsonObject) => JsonObject;
+    readonly includeStages: boolean;
   },
 ): {
   readonly worldView: JsonObject;
@@ -304,9 +307,61 @@ function projectDirectorWorldViewInternal(
           projectFact,
         ),
       ),
+      ...(options.includeStages
+        ? {
+            stages: Object.freeze(
+              expectObjectArrayProperty(
+                world,
+                "stages",
+                "DirectorWorldView",
+              ).map(projectDirectorStageCatalogView),
+            ),
+            event_budget: projectEventBudgetView(
+              expectObjectProperty(world, "event_budget", "DirectorWorldView"),
+            ),
+          }
+        : {}),
     }),
     actorIndexByEntityId,
   });
+}
+
+function projectEventBudgetView(budget: JsonObject): JsonObject {
+  return Object.freeze({
+    day: expectInteger(budget, "day", "EventBudgetView"),
+    capacity: expectInteger(budget, "capacity", "EventBudgetView"),
+    spent: expectInteger(budget, "spent", "EventBudgetView"),
+    remaining: expectInteger(budget, "remaining", "EventBudgetView"),
+  });
+}
+
+function projectDirectorStageCatalogView(stage: JsonObject): JsonObject {
+  const projected: Record<string, JsonValue> = {
+    stage_kind: expectString(stage, "stage_kind", "DirectorStageCatalogView"),
+    intent_coverage: expectProperty(
+      stage,
+      "intent_coverage",
+      "DirectorStageCatalogView",
+    ),
+    participants: expectProperty(
+      stage,
+      "participants",
+      "DirectorStageCatalogView",
+    ),
+    npc_participation: expectString(
+      stage,
+      "npc_participation",
+      "DirectorStageCatalogView",
+    ),
+  };
+  if (stage.example_intents !== undefined) {
+    projected.example_intents = expectProperty(
+      stage,
+      "example_intents",
+      "DirectorStageCatalogView",
+    );
+  }
+  return Object.freeze(projected);
 }
 
 function projectDirectorActor(

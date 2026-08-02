@@ -55,7 +55,7 @@ unity-host        → contracts-runtime/portable
 - RulePlugin 的 `operation_kind` 是唯一入口真相；每个 kind 都有闭合输入、输出与 allowed-op 子集，禁止通用 PacketProposal 旁路；RulePlugin 只能返回专属提案，不能调用 `applyPacket`。
 - System 是 Director 的一种模式，不是第三个模型、子类或独立事件权限。
 - 玩家与 NPC 是同一种 Entity，仅通过 ControlBinding 区分；禁止 `Player extends Character`、`Npc extends Character`。
-- NPC 没有 AP。玩家 EventCard 发卡即扣 AP；地图导航移动不扣 AP。
+- NPC 没有 AP。玩家对话与 EventCard 相辅相成：`dialogue.start` / `continue` 要求当日 `EventBudget.remaining > 0`，成功对话必经 `dialogue_events` 发卡扣点；`remaining === 0` 时拒绝对话，玩家只能 `player_day.end` 进入下一天。地图导航移动不扣 AP、不耗 Token。
 - EventCard 发卡时已经裁决并封存结果；点击时不能再调用模型或 RulePlugin。
 - 客户端只消费 SessionView 与表现消息，不读取隐藏世界真相，不按 `pack_id` 写内容分支。
 - 外部输入与模型输出一律视为不可信 JSON，先做 Schema 与语义校验。

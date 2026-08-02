@@ -382,6 +382,8 @@ class DefaultDayCycleOrchestrator implements DayCycleOrchestrator {
     day: number,
     automaticEvents: readonly MaterializedAutomaticEventRun[],
   ): Promise<ReadonlyMap<string, CharacterReactionRun>> {
+    // Only entities listed on automatic.character target_entity_ids receive
+    // character.react — world-scope drafts and non-targets are not called.
     const grouped = new Map<
       string,
       {
