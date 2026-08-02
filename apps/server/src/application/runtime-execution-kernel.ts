@@ -124,6 +124,10 @@ import {
   type VerifiedModelInvocationReceipt,
 } from "./model-gateway.js";
 import {
+  createModelInvocationOperatorFacade,
+  type ModelInvocationOperatorFacade,
+} from "./model-invocation-operator.js";
+import {
   createRuntimeModelFacades,
   type RuntimeModelFacades,
 } from "./model-request-assembly.js";
@@ -297,6 +301,11 @@ export interface RuntimeExecutionKernel {
    * Closed model invocation surfaces only. No arbitrary ModelRequest candidate bypass.
    */
   readonly models: RuntimeModelFacades;
+  /**
+   * Trusted deployment-api operator surface for model invocation journal
+   * adjudication. Not a Client Bridge command and never auto-retries.
+   */
+  readonly modelInvocations: ModelInvocationOperatorFacade;
   /**
    * Sole DeterministicContext issue entry for additional day-cycle and
    * non-basic orchestration. Basic NPC dialogue uses the same internal
@@ -676,6 +685,9 @@ export function createRuntimeExecutionKernel(
     characterReactModelProfileId:
       dependencies.characterReactModelProfileId,
   });
+  const modelInvocations = createModelInvocationOperatorFacade({
+    journal,
+  });
   const worldExtensions = createWorldExtensionOrchestrator({
     contracts: dependencies.contracts,
     digest: dependencies.digest,
@@ -834,6 +846,7 @@ export function createRuntimeExecutionKernel(
     materializations,
     contentUpgrades,
     models,
+    modelInvocations,
     deterministicContexts,
     sessions,
     commands,

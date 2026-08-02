@@ -63,3 +63,12 @@ export type {
   MaterializationOrchestrator,
   MaterializationReviewResult,
 } from "./application/materialization-orchestrator.js";
+export {
+  MODEL_OPERATOR_ADJUDICATED_VOID_CODE,
+  type ModelInvocationOperatorAttestation,
+  type ModelInvocationOperatorFacade,
+  type ModelInvocationOperatorVoidInput,
+} from "./application/model-invocation-operator.js";
+export type {
+  StoredFailedDefiniteModelInvocation,
+} from "./application/runtime-persistence.js";
