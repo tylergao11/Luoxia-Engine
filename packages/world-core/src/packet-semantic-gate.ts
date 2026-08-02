@@ -266,6 +266,7 @@ class DefaultPacketSemanticGate implements PacketSemanticGate {
     );
     assertStateMachineContracts(context);
     assertStageOpenContracts(context);
+    assertDayCycleTransitionContracts(context);
   }
 }
 
@@ -469,6 +470,53 @@ function assertStageOpenContracts(context: EvaluationContext): void {
       ),
     });
   }
+}
+
+/**
+ * Day boundaries that advance the calendar day cannot leave active dialogues.
+ * Same-day phase transitions (autonomous → director_settlement → player) are
+ * unrestricted by this gate; only `to_day > from_day` is closed.
+ */
+function assertDayCycleTransitionContracts(context: EvaluationContext): void {
+  const dayAdvanceOps = asObjectArray(
+    expectProperty(context.packet, "ops", "ContentPacket"),
+    "ContentPacket.ops",
+  ).filter((op) => {
+    if (expectString(op, "op", "EffectOp") !== "day_cycle.transition") {
+      return false;
+    }
+    const fromDay = expectInteger(op, "from_day", "DayCycleTransitionOp");
+    const toDay = expectInteger(op, "to_day", "DayCycleTransitionOp");
+    return toDay > fromDay;
+  });
+  if (dayAdvanceOps.length === 0) {
+    return;
+  }
+
+  const activeDialogues = asObjectArray(
+    expectProperty(context.worldState, "dialogues", "WorldState"),
+    "WorldState.dialogues",
+  ).filter(
+    (dialogue) =>
+      expectString(dialogue, "status", "DialogueRecord") === "active",
+  );
+  if (activeDialogues.length === 0) {
+    return;
+  }
+  throw fault(
+    "world.packet.day_advance_active_dialogue",
+    "day_cycle.transition that advances the calendar day cannot apply while any DialogueRecord remains active",
+    {
+      world_id: context.worldId,
+      world_revision: context.worldRevision,
+      active_dialogue_count: activeDialogues.length,
+      active_dialogue_ids: Object.freeze(
+        activeDialogues.map((dialogue) =>
+          expectString(dialogue, "dialogue_id", "DialogueRecord"),
+        ),
+      ),
+    },
+  );
 }
 
 function assertPacketIdentity(context: EvaluationContext): void {

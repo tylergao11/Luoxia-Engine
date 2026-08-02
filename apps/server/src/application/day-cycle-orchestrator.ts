@@ -67,8 +67,9 @@ export interface DayCycleOrchestrator {
   }): Promise<DayCycleAdvanceResult>;
 
   /**
-   * Leave the current player day, expire its cards through day_cycle.advance,
-   * and finish the next day's autonomous + Director settlement.
+   * Leave the current player day: close every active DialogueRecord through
+   * dialogue.close (reason_code day_ended), then expire cards via
+   * day_cycle.advance, and finish the next day's autonomous + Director settlement.
    */
   endPlayerDay(input: {
     readonly worldId: string;
@@ -148,7 +149,7 @@ class DefaultDayCycleOrchestrator implements DayCycleOrchestrator {
     readonly controlBindingId: string;
     readonly fromDay: number;
   }): Promise<DayCycleAdvanceResult> {
-    const current = await this.#readState(input.worldId);
+    let current = await this.#readState(input.worldId);
     requireControl(current, input.controlBindingId);
     if (input.fromDay >= Number.MAX_SAFE_INTEGER) {
       throw new EngineFault(
@@ -158,6 +159,21 @@ class DefaultDayCycleOrchestrator implements DayCycleOrchestrator {
       );
     }
     if (current.day === input.fromDay && current.phase === "player") {
+      await this.#closeActiveDialoguesForDayEnd(current);
+      current = await this.#readState(input.worldId);
+      requireControl(current, input.controlBindingId);
+      if (current.day !== input.fromDay || current.phase !== "player") {
+        throw new EngineFault(
+          "day_cycle.orchestration.command_boundary_conflict",
+          "World no longer matches the persisted player-day command boundary after dialogue.close",
+          {
+            world_id: current.worldId,
+            from_day: input.fromDay,
+            current_day: current.day,
+            current_phase: current.phase,
+          },
+        );
+      }
       await this.#transition({
         state: current,
         controlBindingId: input.controlBindingId,
@@ -276,6 +292,92 @@ class DefaultDayCycleOrchestrator implements DayCycleOrchestrator {
     }
     assertPlayerBudget(settled, input.controlBindingId);
     return playerResult(settled);
+  }
+
+  async #closeActiveDialoguesForDayEnd(
+    initial: DayCycleState,
+  ): Promise<void> {
+    const dialogueIds = Object.freeze(
+      [...listActiveDialogues(initial.worldState)]
+        .map((dialogue) =>
+          expectString(dialogue, "dialogue_id", "DialogueRecord"),
+        )
+        .sort((left, right) =>
+          left < right ? -1 : left > right ? 1 : 0,
+        ),
+    );
+    for (const dialogueId of dialogueIds) {
+      const state = await this.#readState(initial.worldId);
+      if (
+        state.worldId !== initial.worldId ||
+        state.day !== initial.day ||
+        state.phase !== "player"
+      ) {
+        throw new EngineFault(
+          "day_cycle.orchestration.basis_changed",
+          "Day-end dialogue.close no longer owns the expected player day",
+          {
+            world_id: initial.worldId,
+            dialogue_id: dialogueId,
+            expected_day: initial.day,
+            actual_day: state.day,
+            actual_phase: state.phase,
+          },
+        );
+      }
+      const matches = listActiveDialogues(state.worldState).filter(
+        (dialogue) =>
+          expectString(dialogue, "dialogue_id", "DialogueRecord") ===
+          dialogueId,
+      );
+      if (matches.length !== 1) {
+        throw new EngineFault(
+          "day_cycle.orchestration.dialogue_close_target_invalid",
+          "Day-end dialogue.close target is not exactly one active DialogueRecord",
+          {
+            world_id: initial.worldId,
+            dialogue_id: dialogueId,
+            matches: matches.length,
+          },
+        );
+      }
+      const expectedRevision = expectInteger(
+        matches[0] as JsonObject,
+        "revision",
+        "DialogueRecord",
+      );
+      const requestId = await this.#identities.reserve({
+        worldId: initial.worldId,
+        day: initial.day,
+        executionKind: "dialogue.close",
+        subjectId: dialogueId,
+      });
+      const receipt = await this.#executeRulePlugin({
+        worldId: initial.worldId,
+        requestId,
+        operationKind: "dialogue.close",
+        modelInvocations: [],
+        faultOwner: "world_definition.dialogue_close_resolver",
+        assertBasis: (basis) =>
+          assertPlayerDayEndDialogueBasis(
+            initial,
+            basis,
+            dialogueId,
+            expectedRevision,
+          ),
+        requestInput: Object.freeze({
+          dialogue_id: dialogueId,
+          expected_revision: expectedRevision,
+          reason_code: "day_ended",
+        }),
+      });
+      requireProposal(receipt, "dialogue.close", {
+        dialogue_id: dialogueId,
+        day: initial.day,
+        reason_code: "day_ended",
+      });
+      await this.#mutations.commitRulePluginReceipt(receipt);
+    }
   }
 
   async #advanceStateMachines(initial: DayCycleState): Promise<void> {
@@ -608,6 +710,7 @@ class DefaultDayCycleOrchestrator implements DayCycleOrchestrator {
     readonly requestId: string;
     readonly operationKind:
       | "day_cycle.advance"
+      | "dialogue.close"
       | "state_machine.advance"
       | "automatic_event.world.resolve"
       | "automatic_event.character.resolve";
@@ -667,6 +770,7 @@ class DefaultDayCycleOrchestrator implements DayCycleOrchestrator {
     readonly requestId: string;
     readonly operationKind:
       | "day_cycle.advance"
+      | "dialogue.close"
       | "state_machine.advance"
       | "automatic_event.world.resolve"
       | "automatic_event.character.resolve";
@@ -1821,6 +1925,75 @@ function hasRetiredCharacterOwner(
   return (
     expectString(matches[0] as JsonObject, "state", "EntityState") ===
     "retired"
+  );
+}
+
+function assertPlayerDayEndDialogueBasis(
+  expected: DayCycleState,
+  actual: DayCycleState,
+  dialogueId: string,
+  expectedRevision: number,
+): void {
+  if (
+    actual.worldId !== expected.worldId ||
+    actual.day !== expected.day ||
+    actual.phase !== "player"
+  ) {
+    throw new EngineFault(
+      "day_cycle.orchestration.basis_changed",
+      "Day-end dialogue.close no longer owns the expected player day",
+      {
+        world_id: expected.worldId,
+        dialogue_id: dialogueId,
+        expected_day: expected.day,
+        actual_day: actual.day,
+        actual_phase: actual.phase,
+      },
+    );
+  }
+  const matches = listActiveDialogues(actual.worldState).filter(
+    (dialogue) =>
+      expectString(dialogue, "dialogue_id", "DialogueRecord") === dialogueId,
+  );
+  if (matches.length !== 1) {
+    throw new EngineFault(
+      "day_cycle.orchestration.dialogue_close_target_invalid",
+      "Day-end dialogue.close target is not exactly one active DialogueRecord",
+      {
+        world_id: expected.worldId,
+        dialogue_id: dialogueId,
+        matches: matches.length,
+      },
+    );
+  }
+  const actualRevision = expectInteger(
+    matches[0] as JsonObject,
+    "revision",
+    "DialogueRecord",
+  );
+  if (actualRevision !== expectedRevision) {
+    throw new EngineFault(
+      "day_cycle.orchestration.dialogue_close_revision_conflict",
+      "Day-end dialogue.close expected_revision no longer matches the locked DialogueRecord",
+      {
+        world_id: expected.worldId,
+        dialogue_id: dialogueId,
+        expected_revision: expectedRevision,
+        actual_revision: actualRevision,
+      },
+    );
+  }
+}
+
+function listActiveDialogues(
+  worldState: JsonObject,
+): readonly JsonObject[] {
+  return asObjectArray(
+    expectProperty(worldState, "dialogues", "WorldState"),
+    "WorldState.dialogues",
+  ).filter(
+    (dialogue) =>
+      expectString(dialogue, "status", "DialogueRecord") === "active",
   );
 }
 

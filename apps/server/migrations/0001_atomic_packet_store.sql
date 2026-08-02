@@ -1066,6 +1066,7 @@ CREATE TABLE luoxia_engine.day_cycle_execution_identities (
       'transition.autonomous_to_director',
       'transition.director_to_player',
       'transition.player_to_autonomous',
+      'dialogue.close',
       'state_machine.advance',
       'character.react',
       'automatic_event.resolve'
@@ -1074,6 +1075,7 @@ CREATE TABLE luoxia_engine.day_cycle_execution_identities (
   CONSTRAINT day_cycle_execution_identities_subject_shape CHECK (
     (
       execution_kind IN (
+        'dialogue.close',
         'state_machine.advance',
         'character.react',
         'automatic_event.resolve'

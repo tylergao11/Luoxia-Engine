@@ -30,11 +30,12 @@ description: >-
 
 规则：
 
-1. 未定案前，Grok **不得**改剧情文案、Prompt 语义、日容量/镖期故事语义、outcome 词表。
-2. 已定案后，Grok 只按定案落盘；不得借机重设计。
-3. Fable **不得**大面积改 Engine/Server/Unity 实现，除非用户明确要求它写代码。
-4. 父代理若是 Auto：设计阶段拉 Fable 子代理（或请用户切 Max 窗）；执行阶段拉 Grok 子代理。
-5. 向用户提及时用 UI 名（Fable 5 Max / Grok 4.5 High Fast），不要只甩 kebab slug。
+1. 未定案前，Grok **不得**改剧情文案、Prompt 语义、日容量/镖期故事语义、outcome 词表，**也不得重构 Unity UI 壳**（布局、滑动、热区、切图用法）。
+2. **Unity 主界面 / Map 切图壳**的任何重构：必须先由 **Fable 5 Max** 出可执行定案；定案未闭合前 Grok 禁止动 `MainWorldUiBuilder` / 场景层级 / 交互手势。
+3. 已定案后，Grok 只按定案落盘；不得借机重设计。
+4. Fable **不得**大面积改 Engine/Server/Unity 实现，除非用户明确要求它写代码；Fable 定案须写清改哪些文件、热区、手势、切图映射与验收条目。
+5. 父代理若是 Auto：设计阶段请用户切 **Fable 5 Max** 窗（定案级）；执行阶段用 Grok 4.5 High Fast。
+6. 向用户提及时用 UI 名（Fable 5 Max / Grok 4.5 High Fast），不要只甩 kebab slug。
 
 ## 工作流
 
@@ -47,14 +48,17 @@ description: >-
    - 先 `git status` 保护既有修改。
    - 内容只进 Deployment；Engine/Unity 只认合同与 hash。
    - 改完：`npm run build`；改了 Server 再 `GET /api/health`；`git diff --check`；bundle 变更后重启 Engine + provision 对齐 digest。
+   - Unity 改完必须自己跑 `Luoxia/UI/Accept Main World Screen`；涉及主界面交互时再跑 `Luoxia/UI/Play Accept Main World`（Provision + Play Mode）。读 Editor.log / Artifacts/play-accept/report.txt 取证。
+   - **禁止把 Play / 勾验收清单甩给用户**；控制台与日志你能读到，默认自己验完再交卷。仅当缺密钥、端口被占、或机器上无 Unity 等客观阻塞时才请用户介入，并写明已尝试的命令与报错。
    - 不建 `tests/`；不自动 commit/push。
-4. **交卷**：改了哪些文件、已证明什么、下游未接什么；停止。
+4. **交卷**：改了哪些文件、已证明什么（附 Accept/Play Accept 结果）、下游未接什么；停止。
 
 ## 产品硬规则（落霞已定）
 
 - 对话与 EventCard 一体：`EventBudget.remaining === 0` 拒绝对话，玩家只能 `player_day.end`。
 - 成功对话必走 `director.dialogue_events`，恰好 1 张有世界影响的卡；禁止空卡、禁止没点数白嫖 Token。
-- 孤烟渡节奏基线：日容量 **4**；盐镖 `salt_convoy` 日结推进（筹备→启程→过境→已过）；错过是分叉不是 Game Over。
+- EventBudget 归属 ContentBundle：`daily_capacity` 与卡成本表（Guyandu `cost_class_table` / Riverside `cost_amount` 等）由各包自行声明；**日容量 4 只是孤烟渡包基线**，不是 Engine/Unity 常量。新包设自己的 `event_budget`；Host 只投影 `SessionView.event_budget`。
+- 孤烟渡节奏基线（包内）：日容量 **4**；盐镖 `salt_convoy` 日结推进（筹备→启程→过境→已过）；错过是分叉不是 Game Over。
 - 玩家自由 = 点数/措辞/承诺/开卡/走位养结局；世界钟表自动走。
 
 ## 包边界

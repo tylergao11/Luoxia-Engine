@@ -2,6 +2,7 @@ export type DayCycleExecutionKind =
   | "transition.autonomous_to_director"
   | "transition.director_to_player"
   | "transition.player_to_autonomous"
+  | "dialogue.close"
   | "state_machine.advance"
   | "character.react"
   | "automatic_event.resolve";

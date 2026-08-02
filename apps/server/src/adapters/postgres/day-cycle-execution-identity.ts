@@ -20,12 +20,14 @@ const EXECUTION_KINDS = Object.freeze([
   "transition.autonomous_to_director",
   "transition.director_to_player",
   "transition.player_to_autonomous",
+  "dialogue.close",
   "state_machine.advance",
   "character.react",
   "automatic_event.resolve",
 ] as const satisfies readonly DayCycleExecutionKind[]);
 
 const SUBJECT_EXECUTION_KINDS = new Set<DayCycleExecutionKind>([
+  "dialogue.close",
   "state_machine.advance",
   "character.react",
   "automatic_event.resolve",

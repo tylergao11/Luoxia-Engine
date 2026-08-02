@@ -38,6 +38,13 @@ interface LockedWorldRow {
   readonly state_document: unknown;
 }
 
+/**
+ * Owns only `(session_id, command_id) → from_day` while the accepted world
+ * revision is still current. Per-dialogue `dialogue.close` request identities
+ * for this command are reserved through
+ * `DayCycleExecutionIdentityJournal` (`dialogue.close` + dialogue subject),
+ * matching `day_cycle.advance` crash recovery — not stored on this row.
+ */
 export function createPostgresPlayerDayEndRunJournal(
   dependencies: PostgresPlayerDayEndRunJournalDependencies,
 ): PlayerDayEndRunJournal {
