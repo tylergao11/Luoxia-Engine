@@ -192,20 +192,38 @@ function projectByRequestKind(
         "entity_id",
         "EntityRef",
       );
+      const dialogue = expectObjectProperty(
+        input,
+        "dialogue",
+        "CharacterDialogueInput",
+      );
+      const participantIndices = indexDialogueParticipants(dialogue);
       // Dialogue output is reply + commitments, not machine transitions.
       return Object.freeze({
         subjective_view: projectCharacterSubjectiveView(subjective, {
           machineMode: "current_only",
         }),
-        dialogue: projectDialogue(
-          expectObjectProperty(input, "dialogue", "CharacterDialogueInput"),
-          { characterEntityId },
+        prior_active_commitments: Object.freeze(
+          expectObjectArrayProperty(
+            input,
+            "prior_active_commitments",
+            "CharacterDialogueInput",
+          ).map((entry) =>
+            projectPriorActiveCommitment(
+              entry,
+              participantIndices,
+              characterEntityId,
+            ),
+          ),
         ),
         response_locale: expectString(
           input,
           "response_locale",
           "CharacterDialogueInput",
         ),
+        // Keep the growing transcript last. DeepSeek caches exact prefixes, so
+        // stable subjective/commitment context must precede per-turn dialogue.
+        dialogue: projectDialogue(dialogue, { characterEntityId }),
       });
     }
     case "character.react": {
@@ -241,13 +259,14 @@ function projectDirectorWorldView(world: JsonObject): {
 } {
   return projectDirectorWorldViewInternal(world, {
     projectMachine: projectStateMachine,
-    includeStages: false,
+    includeEntityId: true,
   });
 }
 
 /**
- * Dialogue-events Provider view: same actor index table and graph facts, but
- * state machines only carry current_state (no outgoing transition graph).
+ * Dialogue/planning Provider view: keep the actor-indexed graph and current
+ * machine states. The locked stage catalog lives in resident prompt context;
+ * event budget is enforced by Server and never crosses the Provider boundary.
  */
 function projectDirectorWorldViewForDialogueEvents(world: JsonObject): {
   readonly worldView: JsonObject;
@@ -255,7 +274,7 @@ function projectDirectorWorldViewForDialogueEvents(world: JsonObject): {
 } {
   return projectDirectorWorldViewInternal(world, {
     projectMachine: projectStateMachineCurrentOnly,
-    includeStages: true,
+    includeEntityId: false,
   });
 }
 
@@ -263,7 +282,7 @@ function projectDirectorWorldViewInternal(
   world: JsonObject,
   options: {
     readonly projectMachine: (machine: JsonObject) => JsonObject;
-    readonly includeStages: boolean;
+    readonly includeEntityId: boolean;
   },
 ): {
   readonly worldView: JsonObject;
@@ -285,7 +304,11 @@ function projectDirectorWorldViewInternal(
       day: expectInteger(world, "day", "DirectorWorldView"),
       actors: Object.freeze(
         actors.map((actor) =>
-          projectDirectorActor(actor, options.projectMachine),
+          projectDirectorActor(
+            actor,
+            options.projectMachine,
+            options.includeEntityId,
+          ),
         ),
       ),
       relations: Object.freeze(
@@ -307,66 +330,15 @@ function projectDirectorWorldViewInternal(
           projectFact,
         ),
       ),
-      ...(options.includeStages
-        ? {
-            stages: Object.freeze(
-              expectObjectArrayProperty(
-                world,
-                "stages",
-                "DirectorWorldView",
-              ).map(projectDirectorStageCatalogView),
-            ),
-            event_budget: projectEventBudgetView(
-              expectObjectProperty(world, "event_budget", "DirectorWorldView"),
-            ),
-          }
-        : {}),
     }),
     actorIndexByEntityId,
   });
 }
 
-function projectEventBudgetView(budget: JsonObject): JsonObject {
-  return Object.freeze({
-    day: expectInteger(budget, "day", "EventBudgetView"),
-    capacity: expectInteger(budget, "capacity", "EventBudgetView"),
-    spent: expectInteger(budget, "spent", "EventBudgetView"),
-    remaining: expectInteger(budget, "remaining", "EventBudgetView"),
-  });
-}
-
-function projectDirectorStageCatalogView(stage: JsonObject): JsonObject {
-  const projected: Record<string, JsonValue> = {
-    stage_kind: expectString(stage, "stage_kind", "DirectorStageCatalogView"),
-    intent_coverage: expectProperty(
-      stage,
-      "intent_coverage",
-      "DirectorStageCatalogView",
-    ),
-    participants: expectProperty(
-      stage,
-      "participants",
-      "DirectorStageCatalogView",
-    ),
-    npc_participation: expectString(
-      stage,
-      "npc_participation",
-      "DirectorStageCatalogView",
-    ),
-  };
-  if (stage.example_intents !== undefined) {
-    projected.example_intents = expectProperty(
-      stage,
-      "example_intents",
-      "DirectorStageCatalogView",
-    );
-  }
-  return Object.freeze(projected);
-}
-
 function projectDirectorActor(
   actor: JsonObject,
   projectMachine: (machine: JsonObject) => JsonObject = projectStateMachine,
+  includeEntityId = true,
 ): JsonObject {
   const components = expectObjectArrayProperty(
     actor,
@@ -374,9 +346,19 @@ function projectDirectorActor(
     "DirectorActorView",
   ).map(projectComponent);
   const projected: Record<string, JsonValue> = {
-    entity_id: expectString(actor, "entity_id", "DirectorActorView"),
+    name: expectJsonObject(
+      expectProperty(actor, "name", "DirectorActorView"),
+      "DirectorActorView.name",
+    ),
     status: expectString(actor, "status", "DirectorActorView"),
   };
+  if (includeEntityId) {
+    projected.entity_id = expectString(
+      actor,
+      "entity_id",
+      "DirectorActorView",
+    );
+  }
   // Empty component lists are local shape noise; omit rather than send [].
   if (components.length > 0) {
     projected.objective_components = Object.freeze(components);
@@ -677,19 +659,10 @@ function projectDialogue(
     "participants",
     "DialogueRecord",
   );
-  const participantIndices = new Map<string, number>();
-  const projectedParticipants = participants.map((participant, index) => {
-    const key = dialogueParticipantKey(participant);
-    if (participantIndices.has(key)) {
-      throw new EngineFault(
-        "model.provider_input.dialogue_participant_duplicate",
-        "Provider dialogue projection requires unique participants",
-        { participant_key: key },
-      );
-    }
-    participantIndices.set(key, index);
-    return projectDialogueParticipant(participant, options);
-  });
+  const participantIndices = indexDialogueParticipants(dialogue);
+  const projectedParticipants = participants.map((participant) =>
+    projectDialogueParticipant(participant, options),
+  );
   const subjectOptions: {
     readonly actorIndexByEntityId?: ReadonlyMap<string, number>;
     readonly characterEntityId?: string;
@@ -709,6 +682,60 @@ function projectDialogue(
         (turn) =>
           projectDialogueTurn(turn, participantIndices, subjectOptions),
       ),
+    ),
+  });
+}
+
+function indexDialogueParticipants(
+  dialogue: JsonObject,
+): ReadonlyMap<string, number> {
+  const participantIndices = new Map<string, number>();
+  for (const [index, participant] of expectObjectArrayProperty(
+    dialogue,
+    "participants",
+    "DialogueRecord",
+  ).entries()) {
+    const key = dialogueParticipantKey(participant);
+    if (participantIndices.has(key)) {
+      throw new EngineFault(
+        "model.provider_input.dialogue_participant_duplicate",
+        "Provider dialogue projection requires unique participants",
+        { participant_key: key },
+      );
+    }
+    participantIndices.set(key, index);
+  }
+  return participantIndices;
+}
+
+function projectPriorActiveCommitment(
+  entry: JsonObject,
+  participantIndices: ReadonlyMap<string, number>,
+  characterEntityId: string,
+): JsonObject {
+  const speaker = expectObjectProperty(
+    entry,
+    "speaker",
+    "PriorActiveAgencyCommitment",
+  );
+  const speakerKey = dialogueParticipantKey(speaker);
+  const speakerIndex = participantIndices.get(speakerKey);
+  if (speakerIndex === undefined) {
+    throw new EngineFault(
+      "model.provider_input.prior_commitment_speaker_not_participant",
+      "Prior active commitment speaker must belong to the projected dialogue participants",
+      { speaker_key: speakerKey },
+    );
+  }
+  return Object.freeze({
+    speaker_index: speakerIndex,
+    commitment: projectAgencyCommitment(
+      expectObjectProperty(
+        entry,
+        "commitment",
+        "PriorActiveAgencyCommitment",
+      ),
+      { characterEntityId },
     ),
   });
 }

@@ -131,6 +131,7 @@ import {
   createRuntimeModelFacades,
   type RuntimeModelFacades,
 } from "./model-request-assembly.js";
+import type { CharacterDialogueContextPolicy } from "./model-view-projection.js";
 import { createPromptMaterializer } from "./prompt-materializer.js";
 import {
   createPlayerDayCommandOrchestrator,
@@ -254,6 +255,8 @@ export interface RuntimeExecutionKernelDependencies {
   readonly contentUpgradeAuthorizationLifetimeSeconds: number;
   /** Explicit deployment selection for CharacterMind dialogue calls. */
   readonly characterDialogueModelProfileId: string;
+  /** Explicit deployment-owned projection limits for CharacterMind dialogue. */
+  readonly characterDialogueContextPolicy: CharacterDialogueContextPolicy;
   /** Explicit deployment selection for Director daily settlement calls. */
   readonly directorDailySettlementModelProfileId: string;
   /** Explicit deployment selection for Director NPC dialogue event calls. */
@@ -682,6 +685,8 @@ export function createRuntimeExecutionKernel(
       dependencies.directorDefinitionDraftModelProfileId,
     characterDialogueModelProfileId:
       dependencies.characterDialogueModelProfileId,
+    characterDialogueContextPolicy:
+      dependencies.characterDialogueContextPolicy,
     characterReactModelProfileId:
       dependencies.characterReactModelProfileId,
   });

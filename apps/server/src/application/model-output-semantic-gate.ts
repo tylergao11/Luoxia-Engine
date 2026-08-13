@@ -259,6 +259,24 @@ function assertDirectorDialogueEventsRequest(request: JsonObject): void {
     expectInteger(dialogue, "day", "DialogueRecord"),
     "day",
   );
+  const exchangeTurns = objectArray(
+    expectProperty(dialogue, "turns", "DialogueRecord"),
+    "DialogueRecord.turns",
+  );
+  if (exchangeTurns.length !== 2) {
+    throw fault(
+      "model.semantic.dialogue_events_exchange_size",
+      "director.dialogue_events must observe exactly the current human and responder exchange",
+      {
+        dialogue_id: expectString(
+          dialogue,
+          "dialogue_id",
+          "DialogueRecord",
+        ),
+        turn_count: exchangeTurns.length,
+      },
+    );
+  }
   const triggeringHumanTurn =
     assertCompletedDialogueExchange(dialogue, [
       "character_mind",
@@ -423,6 +441,100 @@ function assertCharacterDialogueRequest(request: JsonObject): void {
         character_id: characterId,
       },
     );
+  }
+  const recentTurnIds = new Set(
+    objectArray(
+      expectProperty(dialogue, "turns", "DialogueRecord"),
+      "DialogueRecord.turns",
+    ).map((turn) => expectString(turn, "turn_id", "DialogueTurn")),
+  );
+  const priorCommitmentKeys = new Set<string>();
+  const dialogueDay = expectInteger(dialogue, "day", "DialogueRecord");
+  for (const [index, entry] of objectArray(
+    expectProperty(
+      input,
+      "prior_active_commitments",
+      "CharacterDialogueInput",
+    ),
+    "CharacterDialogueInput.prior_active_commitments",
+  ).entries()) {
+    const sourceTurnId = expectString(
+      entry,
+      "source_turn_id",
+      "PriorActiveAgencyCommitment",
+    );
+    if (recentTurnIds.has(sourceTurnId)) {
+      throw fault(
+        "model.semantic.prior_commitment_not_prior",
+        "Prior active commitments must not duplicate commitments already present in the recent dialogue window",
+        { commitment_index: index, source_turn_id: sourceTurnId },
+      );
+    }
+    const speaker = expectJsonObject(
+      expectProperty(entry, "speaker", "PriorActiveAgencyCommitment"),
+      "PriorActiveAgencyCommitment.speaker",
+    );
+    const speakerKind = expectString(
+      speaker,
+      "participant_kind",
+      "DialogueParticipantRef",
+    );
+    const speakerEntityId =
+      speakerKind === "entity"
+        ? expectString(
+            expectJsonObject(
+              expectProperty(
+                speaker,
+                "entity",
+                "DialogueParticipantRef",
+              ),
+              "DialogueParticipantRef.entity",
+            ),
+            "entity_id",
+            "EntityRef",
+          )
+        : undefined;
+    if (speakerEntityId !== characterId) {
+      throw fault(
+        "model.semantic.prior_commitment_character_mismatch",
+        "Prior active commitment speaker must be the CharacterMind receiving this request",
+        {
+          commitment_index: index,
+          speaker_entity_id: speakerEntityId ?? null,
+          character_id: characterId,
+        },
+      );
+    }
+    const commitment = expectJsonObject(
+      expectProperty(entry, "commitment", "PriorActiveAgencyCommitment"),
+      "PriorActiveAgencyCommitment.commitment",
+    );
+    if (
+      expectInteger(
+        commitment,
+        "valid_through_day",
+        "AgencyCommitment",
+      ) < dialogueDay
+    ) {
+      throw fault(
+        "model.semantic.prior_commitment_expired",
+        "Expired commitments must not enter CharacterMind context",
+        { commitment_index: index, dialogue_day: dialogueDay },
+      );
+    }
+    const commitmentKey = `${sourceTurnId}:${expectString(
+      commitment,
+      "commitment_id",
+      "AgencyCommitment",
+    )}`;
+    if (priorCommitmentKeys.has(commitmentKey)) {
+      throw fault(
+        "model.semantic.prior_commitment_duplicate",
+        "Prior active commitment context must not contain duplicate transcript commitments",
+        { commitment_index: index, commitment_key: commitmentKey },
+      );
+    }
+    priorCommitmentKeys.add(commitmentKey);
   }
   assertEqual(
     "model.semantic.response_locale_mismatch",
@@ -619,8 +731,8 @@ function assertDirectorDialogueEventsResponse(
   for (const [cardIndex, card] of cards.entries()) {
     assertEventCardDraft(
       card,
-      actors.length,
-      stages.length,
+      actors,
+      stages,
       dialogue,
       `DirectorDialogueEventsOutput.event_cards[${cardIndex}]`,
     );
@@ -1487,8 +1599,8 @@ function assertEventSituationDraft(
 
 function assertEventCardDraft(
   card: JsonObject,
-  actorCount: number,
-  stageCount: number,
+  actors: readonly JsonObject[],
+  stages: readonly JsonObject[],
   dialogue: JsonObject,
   path: string,
 ): void {
@@ -1498,7 +1610,7 @@ function assertEventCardDraft(
   );
   const situationActorIndices = assertEventSituationDraft(
     situation,
-    actorCount,
+    actors.length,
     `${path}.situation`,
   );
   const options = objectArray(
@@ -1544,12 +1656,14 @@ function assertEventCardDraft(
   }
   // agency_gates: model shells only. commitment_evidence is Server-owned from
   // dialogue (not on model draft). Zero commitments ⇒ effective [].
-  const rawGates = [...effectiveEventCardAgencyGates(card, dialogue)];
+  const rawGates = [
+    ...effectiveEventCardAgencyGates(card, dialogue, { actors, stages }),
+  ];
   // Server closes index graph: inherit/repair subjects; fill gate back-links.
   const subjectClosed = withEffectiveOutcomeSubjects(
     rawOutcomes,
     situationActorIndices,
-    actorCount,
+    actors.length,
   );
   const { outcomes, gates } = closeAgencyGateOutcomeLinks(
     subjectClosed,
@@ -1558,7 +1672,7 @@ function assertEventCardDraft(
   assertSemanticEventGraph(
     outcomes,
     gates,
-    actorCount,
+    actors.length,
     situationActorIndices,
     path,
   );
@@ -1567,8 +1681,9 @@ function assertEventCardDraft(
       expectProperty(card, "staging", "EventCardSemanticDraft"),
       `${path}.staging`,
     ),
-    actorCount,
-    stageCount,
+    actors,
+    stages,
+    dialogue,
     situationActorIndices,
     `${path}.staging`,
   );
@@ -1576,8 +1691,9 @@ function assertEventCardDraft(
 
 function assertEventCardStagingDraft(
   staging: JsonObject,
-  actorCount: number,
-  stageCount: number,
+  actors: readonly JsonObject[],
+  stages: readonly JsonObject[],
+  dialogue: JsonObject,
   situationActorIndices: readonly number[],
   path: string,
 ): void {
@@ -1599,7 +1715,7 @@ function assertEventCardStagingDraft(
     if (
       !Number.isSafeInteger(stageIndex) ||
       stageIndex < 0 ||
-      stageIndex >= stageCount
+      stageIndex >= stages.length
     ) {
       throw fault(
         "model.semantic.event_card_stage_index",
@@ -1607,19 +1723,48 @@ function assertEventCardStagingDraft(
         {
           path: `${path}.stage_index`,
           stage_index: stageIndex,
-          stage_count: stageCount,
+          stage_count: stages.length,
         },
       );
     }
-    if (staging.participant_actor_indices !== undefined) {
-      assertActorIndicesWithinSituation(
-        staging,
-        "participant_actor_indices",
-        actorCount,
-        situationActorSet,
-        path,
+    const stage = stages[stageIndex];
+    if (stage === undefined) {
+      throw fault(
+        "model.semantic.event_card_stage_index",
+        "EventCard prefab_bind stage_index must resolve to a locked stage projection",
+        { path: `${path}.stage_index`, stage_index: stageIndex },
       );
     }
+    const entryModeIndex = expectInteger(
+      staging,
+      "entry_mode_index",
+      "EventCardStagingSemanticDraft",
+    );
+    const entryModes = objectArray(
+      expectProperty(stage, "entry_modes", "DirectorStageCatalogView"),
+      "DirectorStageCatalogView.entry_modes",
+    );
+    const entryMode = entryModes[entryModeIndex];
+    if (entryMode === undefined) {
+      throw fault(
+        "model.semantic.event_card_stage_entry_mode_index",
+        "EventCard prefab_bind entry_mode_index must resolve within the selected stage",
+        {
+          path: `${path}.entry_mode_index`,
+          entry_mode_index: entryModeIndex,
+          entry_mode_count: entryModes.length,
+        },
+      );
+    }
+    assertPrefabStageOrchestration(
+      staging,
+      stage,
+      entryMode,
+      actors,
+      dialogue,
+      situationActorSet,
+      path,
+    );
     return;
   }
   if (stagingKind !== "improv") {
@@ -1632,7 +1777,7 @@ function assertEventCardStagingDraft(
   const participantIndices = assertIndexSelectorsWithin(
     staging,
     "participant_actor_indices",
-    actorCount,
+    actors.length,
     path,
   );
   const participantSet = new Set(participantIndices);
@@ -1644,7 +1789,7 @@ function assertEventCardStagingDraft(
       assertActorIndicesWithinSituation(
         beat,
         "focus_actor_indices",
-        actorCount,
+        actors.length,
         participantSet,
         `${path}.beats[${beatIndex}]`,
       );
@@ -1668,12 +1813,174 @@ function assertEventCardStagingDraft(
         assertActorIndicesWithinSituation(
           intent,
           "subject_indices",
-          actorCount,
+          actors.length,
           participantSet,
           intentPath,
         );
       }
     }
+  }
+}
+
+function assertPrefabStageOrchestration(
+  staging: JsonObject,
+  stage: JsonObject,
+  entryMode: JsonObject,
+  actors: readonly JsonObject[],
+  dialogue: JsonObject,
+  situationActorSet: ReadonlySet<number>,
+  path: string,
+): void {
+  if (staging.participant_actor_indices === undefined) {
+    throw fault(
+      "model.semantic.event_card_stage_participants_missing",
+      "EventCard prefab_bind must explicitly select the stage participants",
+      { path: `${path}.participant_actor_indices` },
+    );
+  }
+  const participantIndices = assertActorIndicesWithinSituation(
+    staging,
+    "participant_actor_indices",
+    actors.length,
+    situationActorSet,
+    path,
+  );
+  const participantRange = expectJsonObject(
+    expectProperty(stage, "participants", "DirectorStageCatalogView"),
+    "DirectorStageCatalogView.participants",
+  );
+  const minimum = expectInteger(
+    participantRange,
+    "min",
+    "DirectorStageCatalogView.participants",
+  );
+  const maximum = expectInteger(
+    participantRange,
+    "max",
+    "DirectorStageCatalogView.participants",
+  );
+  if (
+    participantIndices.length < minimum ||
+    participantIndices.length > maximum
+  ) {
+    throw fault(
+      "model.semantic.event_card_stage_participant_count",
+      "EventCard prefab_bind participants must satisfy the selected stage catalog range",
+      {
+        path: `${path}.participant_actor_indices`,
+        participant_count: participantIndices.length,
+        minimum,
+        maximum,
+      },
+    );
+  }
+
+  const turns = objectArray(
+    expectProperty(dialogue, "turns", "DialogueRecord"),
+    "DialogueRecord.turns",
+  );
+  const humanTurn = turns.at(-2);
+  const responderTurn = turns.at(-1);
+  if (humanTurn === undefined || responderTurn === undefined) {
+    throw fault(
+      "model.semantic.completed_exchange_missing",
+      "Stage orchestration requires the completed dialogue exchange",
+      { path },
+    );
+  }
+  const playerEntityId = humanTurnSpeakerEntityId(humanTurn);
+  const playerActorIndex = actors.findIndex(
+    (actor) =>
+      expectString(actor, "entity_id", "DirectorActorView") ===
+      playerEntityId,
+  );
+  if (
+    playerActorIndex < 0 ||
+    !participantIndices.includes(playerActorIndex)
+  ) {
+    throw fault(
+      "model.semantic.event_card_stage_player_missing",
+      "A dialogue EventCard stage must include the player who entered it",
+      {
+        path: `${path}.participant_actor_indices`,
+        player_actor_index: playerActorIndex,
+      },
+    );
+  }
+
+  const participation = expectString(
+    entryMode,
+    "npc_participation",
+    "DirectorStageEntryModeView",
+  );
+  if (participation === "unilateral") {
+    return;
+  }
+  if (participation !== "commitment_required") {
+    throw fault(
+      "model.semantic.event_card_stage_participation_unknown",
+      "Selected stage has an unsupported npc_participation policy",
+      { path: `${path}.stage_index`, npc_participation: participation },
+    );
+  }
+
+  const responderSource = expectJsonObject(
+    expectProperty(responderTurn, "source", "DialogueTurn"),
+    "DialogueTurn.source",
+  );
+  const responderKind = expectString(
+    responderSource,
+    "source_kind",
+    "DialogueTurnSource",
+  );
+  const commitments = objectArray(
+    expectProperty(
+      responderTurn,
+      "agency_commitments",
+      "DialogueTurn",
+    ),
+    "DialogueTurn.agency_commitments",
+  );
+  if (responderKind !== "character_mind" || commitments.length === 0) {
+    throw fault(
+      "model.semantic.event_card_stage_commitment_missing",
+      "A stage marked commitment_required needs an explicit commitment on the current character responder turn",
+      {
+        path: `${path}.stage_index`,
+        responder_kind: responderKind,
+        commitment_count: commitments.length,
+      },
+    );
+  }
+  if (commitments.length !== 1) {
+    throw fault(
+      "model.semantic.event_card_stage_commitment_ambiguous",
+      "A commitment_required stage must bind exactly one current responder commitment",
+      {
+        path: `${path}.stage_index`,
+        commitment_count: commitments.length,
+      },
+    );
+  }
+
+  const responderEntityId = dialogueTurnSpeakerEntityId(responderTurn);
+  const responderActorIndex = actors.findIndex(
+    (actor) =>
+      expectString(actor, "entity_id", "DirectorActorView") ===
+      responderEntityId,
+  );
+  if (
+    responderActorIndex < 0 ||
+    !participantIndices.includes(responderActorIndex)
+  ) {
+    throw fault(
+      "model.semantic.event_card_stage_committer_missing",
+      "A stage marked commitment_required must include the character whose current commitment opens it",
+      {
+        path: `${path}.participant_actor_indices`,
+        responder_actor_index: responderActorIndex,
+      },
+    );
   }
 }
 
@@ -2166,6 +2473,18 @@ function assertCompletedDialogueExchange(
 }
 
 function humanTurnSpeakerEntityId(turn: JsonObject): string {
+  return dialogueTurnSpeakerEntityId(
+    turn,
+    "model.semantic.human_speaker_invalid",
+    "Human dialogue turn speaker must be an entity",
+  );
+}
+
+function dialogueTurnSpeakerEntityId(
+  turn: JsonObject,
+  faultCode = "model.semantic.dialogue_speaker_not_entity",
+  faultMessage = "Dialogue turn speaker must be an entity",
+): string {
   const speaker = expectJsonObject(
     expectProperty(turn, "speaker", "DialogueTurn"),
     "DialogueTurn.speaker",
@@ -2175,8 +2494,8 @@ function humanTurnSpeakerEntityId(turn: JsonObject): string {
     "entity"
   ) {
     throw fault(
-      "model.semantic.human_speaker_invalid",
-      "Human dialogue turn speaker must be an entity",
+      faultCode,
+      faultMessage,
       {
         turn_id: expectString(turn, "turn_id", "DialogueTurn"),
       },

@@ -3205,6 +3205,20 @@ function assertEventCardStagingConsistency(
       expectProperty(sealedStaging, "stage", "SealedEventResultStaging"),
       context.operationKind,
     );
+    assertEqual(
+      "event_card.staging.entry_mode_id",
+      expectString(
+        candidateStaging,
+        "entry_mode_id",
+        "EventCardPublishStaging",
+      ),
+      expectString(
+        sealedStaging,
+        "entry_mode_id",
+        "SealedEventResultStaging",
+      ),
+      context.operationKind,
+    );
     expectString(
       sealedStaging,
       "stage_instance_id",
@@ -5494,6 +5508,10 @@ function assertEventCardCandidateMatchesDraft(
     expectProperty(worldView, "actors", "DirectorWorldView"),
     "DirectorWorldView.actors",
   );
+  const stages = asObjectArray(
+    expectProperty(worldView, "stages", "DirectorWorldView"),
+    "DirectorWorldView.stages",
+  );
   const dialogue = expectJsonObject(
     expectProperty(
       requestInput,
@@ -5593,7 +5611,10 @@ function assertEventCardCandidateMatchesDraft(
   );
   assertArrayLength(context, "event_card.result_options", rawOptions, options);
   // Same effective gates as materialize/semantic: omit → []; zero commitments → [].
-  const rawGates = effectiveEventCardAgencyGates(rawDraft, dialogue);
+  const rawGates = effectiveEventCardAgencyGates(rawDraft, dialogue, {
+    actors,
+    stages,
+  });
   const gates = asObjectArray(
     expectProperty(
       candidate,

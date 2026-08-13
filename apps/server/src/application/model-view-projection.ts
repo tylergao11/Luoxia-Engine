@@ -18,7 +18,52 @@ import type {
  * Server owns truncation; models must not invent summary structures.
  * Documented in contracts/model-protocol.v1.schema.json (ProviderDialogueView).
  */
-export const MODEL_DIALOGUE_TURN_WINDOW = 24 as const;
+export const MODEL_DIALOGUE_TURN_SAFETY_LIMIT = 24 as const;
+
+/**
+ * Deployment-owned CharacterMind context policy. WorldState remains complete;
+ * these limits only shape the transient ModelRequest view.
+ */
+export interface CharacterDialogueContextPolicy {
+  readonly recentTurnLimit: number;
+  readonly memoryRecallLimit: number;
+}
+
+export function assertCharacterDialogueContextPolicy(
+  policy: CharacterDialogueContextPolicy,
+): void {
+  if (
+    !Number.isSafeInteger(policy.recentTurnLimit) ||
+    policy.recentTurnLimit < 1 ||
+    policy.recentTurnLimit > MODEL_DIALOGUE_TURN_SAFETY_LIMIT
+  ) {
+    throw new EngineFault(
+      "model.context_policy.recent_turn_limit_invalid",
+      "Character dialogue recent-turn limit must be a positive safe integer within the protocol safety limit",
+      {
+        recent_turn_limit: policy.recentTurnLimit,
+        safety_limit: MODEL_DIALOGUE_TURN_SAFETY_LIMIT,
+      },
+    );
+  }
+  if (
+    !Number.isSafeInteger(policy.memoryRecallLimit) ||
+    policy.memoryRecallLimit < 1
+  ) {
+    throw new EngineFault(
+      "model.context_policy.memory_recall_limit_invalid",
+      "Character dialogue memory-recall limit must be a positive safe integer",
+      { memory_recall_limit: policy.memoryRecallLimit },
+    );
+  }
+}
+
+/**
+ * dialogue_events owns one completed exchange, not the conversation history.
+ * Keeping exactly human + responder prevents an older action from being staged
+ * again and keeps turn_index selectors aligned with the current EventCard.
+ */
+export const DIALOGUE_EVENT_EXCHANGE_TURN_WINDOW = 2 as const;
 
 export type DirectorWorldViewScope =
   | {
@@ -119,6 +164,10 @@ export function projectDirectorWorldView(
     const actionMachine = actionMachines[0];
     const actor: Record<string, JsonValue> = {
       entity_id: entityId,
+      name: expectJsonObject(
+        expectProperty(entity, "name", "EntityState"),
+        "EntityState.name",
+      ),
       status: expectString(entity, "state", "EntityState"),
       objective_components: components,
     };
@@ -252,29 +301,39 @@ function projectDirectorStages(
   return contentBinding.stages.map((stage) => {
     const projected: Record<string, JsonValue> = {
       stage_kind: expectString(stage, "stage_kind", "StageCatalogEntry"),
-      intent_coverage: expectProperty(
-        stage,
-        "intent_coverage",
-        "StageCatalogEntry",
-      ),
       participants: expectProperty(
         stage,
         "participants",
         "StageCatalogEntry",
       ),
-      npc_participation: expectString(
-        stage,
-        "npc_participation",
-        "StageCatalogEntry",
+      entry_modes: Object.freeze(
+        asObjectArray(
+          expectProperty(stage, "entry_modes", "StageCatalogEntry"),
+          "StageCatalogEntry.entry_modes",
+        ).map((entryMode) => {
+          const entry: Record<string, JsonValue> = {
+            intent_coverage: expectProperty(
+              entryMode,
+              "intent_coverage",
+              "StageEntryMode",
+            ),
+            npc_participation: expectString(
+              entryMode,
+              "npc_participation",
+              "StageEntryMode",
+            ),
+          };
+          if (entryMode.example_intents !== undefined) {
+            entry.example_intents = expectProperty(
+              entryMode,
+              "example_intents",
+              "StageEntryMode",
+            );
+          }
+          return Object.freeze(entry);
+        }),
       ),
     };
-    if (stage.example_intents !== undefined) {
-      projected.example_intents = expectProperty(
-        stage,
-        "example_intents",
-        "StageCatalogEntry",
-      );
-    }
     return Object.freeze(projected);
   });
 }
@@ -452,7 +511,7 @@ export function projectDialogue(
       { dialogue_id: dialogueId },
     );
   }
-  const turnWindow = options.turnWindow ?? MODEL_DIALOGUE_TURN_WINDOW;
+  const turnWindow = options.turnWindow ?? MODEL_DIALOGUE_TURN_SAFETY_LIMIT;
   if (
     !Number.isSafeInteger(turnWindow) ||
     turnWindow < 1
@@ -476,9 +535,115 @@ export function projectDialogue(
   });
 }
 
+export function projectCharacterDialogueContext(
+  worldState: JsonObject,
+  dialogueId: string,
+  characterEntityId: string,
+  policy: CharacterDialogueContextPolicy,
+): {
+  readonly dialogue: JsonObject;
+  readonly prior_active_commitments: readonly JsonObject[];
+} {
+  assertCharacterDialogueContextPolicy(policy);
+  const dialogues = asObjectArray(
+    expectProperty(worldState, "dialogues", "WorldState"),
+    "WorldState.dialogues",
+  );
+  const dialogue = dialogues.find(
+    (entry) =>
+      expectString(entry, "dialogue_id", "DialogueRecord") === dialogueId,
+  );
+  if (dialogue === undefined) {
+    throw new EngineFault(
+      "model.view.dialogue_missing",
+      `Dialogue ${dialogueId} is absent from locked WorldState`,
+      { dialogue_id: dialogueId },
+    );
+  }
+  const day = expectInteger(dialogue, "day", "DialogueRecord");
+  const currentParticipantIds = new Set(dialogueParticipantEntityIds(dialogue));
+  const currentCounterpartyIds = new Set(currentParticipantIds);
+  currentCounterpartyIds.delete(characterEntityId);
+  const priorActiveCommitments: JsonObject[] = [];
+  for (const relatedDialogue of dialogues) {
+    const relatedParticipantIds = new Set(
+      dialogueParticipantEntityIds(relatedDialogue),
+    );
+    if (
+      !relatedParticipantIds.has(characterEntityId) ||
+      ![...currentCounterpartyIds].some((entityId) =>
+        relatedParticipantIds.has(entityId),
+      )
+    ) {
+      continue;
+    }
+    const relatedTurns = asObjectArray(
+      expectProperty(relatedDialogue, "turns", "DialogueRecord"),
+      "DialogueRecord.turns",
+    );
+    const sourceTurns =
+      expectString(relatedDialogue, "dialogue_id", "DialogueRecord") ===
+      dialogueId
+        ? relatedTurns.slice(
+            0,
+            Math.max(0, relatedTurns.length - policy.recentTurnLimit),
+          )
+        : relatedTurns;
+    for (const turn of sourceTurns) {
+      const source = expectJsonObject(
+        expectProperty(turn, "source", "DialogueTurn"),
+        "DialogueTurn.source",
+      );
+      if (
+        expectString(source, "source_kind", "DialogueTurnSource") !==
+        "character_mind"
+      ) {
+        continue;
+      }
+      const speaker = expectJsonObject(
+        expectProperty(turn, "speaker", "DialogueTurn"),
+        "DialogueTurn.speaker",
+      );
+      if (dialogueParticipantEntityId(speaker) !== characterEntityId) {
+        continue;
+      }
+      for (const commitment of asObjectArray(
+        expectProperty(turn, "agency_commitments", "DialogueTurn"),
+        "DialogueTurn.agency_commitments",
+      )) {
+        if (
+          expectInteger(
+            commitment,
+            "valid_through_day",
+            "AgencyCommitment",
+          ) < day
+        ) {
+          continue;
+        }
+        priorActiveCommitments.push(
+          Object.freeze({
+            source_turn_id: expectString(turn, "turn_id", "DialogueTurn"),
+            speaker,
+            commitment,
+          }),
+        );
+      }
+    }
+  }
+  return Object.freeze({
+    dialogue: projectDialogue(worldState, dialogueId, {
+      turnWindow: policy.recentTurnLimit,
+    }),
+    prior_active_commitments: Object.freeze(priorActiveCommitments),
+  });
+}
+
 export function projectKnowledgeView(
   worldState: JsonObject,
   viewerEntityId: string,
+  options: {
+    readonly memoryRecallLimit?: number;
+  } = {},
 ): JsonObject {
   const knowledge = asObjectArray(
     expectProperty(worldState, "knowledge", "WorldState"),
@@ -505,20 +670,37 @@ export function projectKnowledgeView(
     expectProperty(worldState, "memories", "WorldState"),
     "WorldState.memories",
   );
-  const memories = memoriesAll
+  const actorMemories = memoriesAll
     .filter(
       (entry) =>
         expectString(entry, "actor_entity_id", "MemoryRecord") ===
         viewerEntityId,
     )
-    .map((entry) =>
+    .map((entry, index) =>
       Object.freeze({
+        index,
         memory_id: expectString(entry, "memory_id", "MemoryRecord"),
         source_event_id: expectString(entry, "source_event_id", "MemoryRecord"),
         summary: expectProperty(entry, "summary", "MemoryRecord"),
-        salience: entry.salience as JsonValue,
+        salience: expectProperty(
+          entry,
+          "salience",
+          "MemoryRecord",
+        ) as number,
       }),
     );
+  const selectedMemories =
+    options.memoryRecallLimit === undefined
+      ? actorMemories
+      : [...actorMemories]
+          .sort(
+            (left, right) =>
+              right.salience - left.salience || right.index - left.index,
+          )
+          .slice(0, options.memoryRecallLimit);
+  const memories = selectedMemories.map(({ index: _index, ...entry }) =>
+    Object.freeze(entry),
+  );
 
   return Object.freeze({
     viewer_entity_id: viewerEntityId,
@@ -533,6 +715,9 @@ export function projectCharacterSubjectiveView(
   entityId: string,
   contentBinding: WorldContentBinding,
   stateMachineContracts: StateMachineContractAuthority,
+  options: {
+    readonly memoryRecallLimit?: number;
+  } = {},
 ): JsonObject {
   const entities = asObjectArray(
     expectProperty(worldState, "entities", "WorldState"),
@@ -575,7 +760,7 @@ export function projectCharacterSubjectiveView(
       world_id: worldId,
       entity_id: entityId,
     }),
-    knowledge_view: projectKnowledgeView(worldState, entityId),
+    knowledge_view: projectKnowledgeView(worldState, entityId, options),
     action_machine: projectStateMachineModelView(
       worldId,
       actionMachine,
@@ -664,6 +849,34 @@ function dialogueParticipantEntityIds(
     entityIds.push(expectString(entity, "entity_id", "EntityRef"));
   }
   return Object.freeze(entityIds);
+}
+
+function dialogueParticipantEntityId(
+  participant: JsonObject,
+): string | undefined {
+  const participantKind = expectString(
+    participant,
+    "participant_kind",
+    "DialogueParticipantRef",
+  );
+  if (participantKind === "system") {
+    return undefined;
+  }
+  if (participantKind !== "entity") {
+    throw new EngineFault(
+      "model.view.dialogue_participant_kind_unknown",
+      `Dialogue participant kind ${participantKind} is not supported`,
+      { participant_kind: participantKind },
+    );
+  }
+  return expectString(
+    expectJsonObject(
+      expectProperty(participant, "entity", "DialogueParticipantRef"),
+      "DialogueParticipantRef.entity",
+    ),
+    "entity_id",
+    "EntityRef",
+  );
 }
 
 function relationEntityEndpoints(relation: JsonObject): readonly string[] {

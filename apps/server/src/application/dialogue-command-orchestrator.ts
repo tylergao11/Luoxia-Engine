@@ -2224,6 +2224,7 @@ function createCharacterTurnCandidate(input: {
   const commitments = materializeAgencyCommitmentsFromCharacterDrafts({
     drafts,
     worldState: input.worldState,
+    speakerEntityId: input.recipientEntityId,
     createCommitmentId: () =>
       input.contracts.assert(CONTRACT_REF.uuid, input.localIds.createId())
         .value as string,
@@ -3563,7 +3564,10 @@ function materializeEventCardCandidate(input: {
     "EventCardSemanticDraft.result_options",
   );
   // Server: omit → []; zero transcript commitments → [] (drop invented gates).
-  const gateDrafts = effectiveEventCardAgencyGates(input.draft, dialogue);
+  const gateDrafts = effectiveEventCardAgencyGates(input.draft, dialogue, {
+    actors,
+    stages,
+  });
   const gateIds = gateDrafts.map((_, ordinal) => `gate_${ordinal}`);
   const flatOutcomeDraftsRaw = optionDrafts.flatMap((option) =>
     asObjectArray(
@@ -3811,18 +3815,40 @@ function materializeEventCardStaging(input: {
     }
     const catalogEntry = input.contentBinding.stages[stageIndex] as JsonObject;
     const projected = input.stages[stageIndex] as JsonObject;
+    const entryModeIndex = expectInteger(
+      input.draft,
+      "entry_mode_index",
+      "EventCardStagingSemanticDraft",
+    );
+    const catalogEntryModes = asObjectArray(
+      expectProperty(catalogEntry, "entry_modes", "StageCatalogEntry"),
+      "StageCatalogEntry.entry_modes",
+    );
+    const projectedEntryModes = asObjectArray(
+      expectProperty(projected, "entry_modes", "DirectorStageCatalogView"),
+      "DirectorStageCatalogView.entry_modes",
+    );
+    const catalogEntryMode = catalogEntryModes[entryModeIndex];
+    const projectedEntryMode = projectedEntryModes[entryModeIndex];
+    if (catalogEntryMode === undefined || projectedEntryMode === undefined) {
+      throw commandIdentityFault(
+        input.command,
+        "EventCard prefab_bind entry_mode_index is outside the selected stage",
+        { stage_index: stageIndex, entry_mode_index: entryModeIndex },
+      );
+    }
     if (
       expectString(catalogEntry, "stage_kind", "StageCatalogEntry") !==
         expectString(projected, "stage_kind", "DirectorStageCatalogView") ||
       expectString(
-        catalogEntry,
+        catalogEntryMode,
         "npc_participation",
-        "StageCatalogEntry",
+        "StageEntryMode",
       ) !==
         expectString(
-          projected,
+          projectedEntryMode,
           "npc_participation",
-          "DirectorStageCatalogView",
+          "DirectorStageEntryModeView",
         )
     ) {
       throw commandIdentityFault(
@@ -3833,6 +3859,11 @@ function materializeEventCardStaging(input: {
     }
     const staging: Record<string, JsonValue> = {
       staging_kind: "prefab_bind",
+      entry_mode_id: expectString(
+        catalogEntryMode,
+        "entry_mode_id",
+        "StageEntryMode",
+      ),
       stage: Object.freeze({
         bundle_id: input.contentBinding.packId,
         bundle_digest: input.contentBinding.bundleDigest,

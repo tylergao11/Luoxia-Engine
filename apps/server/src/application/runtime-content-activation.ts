@@ -31,6 +31,10 @@ import {
 } from "./asset-provider-registry.js";
 import { createExactDecimalStringComparer } from "./exact-decimal.js";
 import type { ModelProvider } from "./model-gateway.js";
+import {
+  assertCharacterDialogueContextPolicy,
+  type CharacterDialogueContextPolicy,
+} from "./model-view-projection.js";
 import type { RulePluginDependencyIdentity } from "./rule-plugin-abi.js";
 import type { RulePluginModuleV1 } from "./rule-plugin-abi.js";
 import type { SaveSchemaMigrationModuleV1 } from "./save-schema-migration-abi.js";
@@ -110,6 +114,8 @@ export interface RuntimeContentActivationInput {
    * dialogue. It is not content, client input, or a default.
    */
   readonly characterDialogueModelProfileId: string;
+  /** Explicit projection limits for CharacterMind dialogue model context. */
+  readonly characterDialogueContextPolicy: CharacterDialogueContextPolicy;
   /** Explicit deployment-owned ModelProfile selection for Director daily work. */
   readonly directorDailySettlementModelProfileId: string;
   /** Explicit deployment-owned ModelProfile selection for Director NPC dialogue events. */
@@ -173,6 +179,9 @@ interface LoadedBundleRecord {
 export async function createRuntimeContentActivation(
   input: RuntimeContentActivationInput,
 ): Promise<RuntimeContentActivation> {
+  assertCharacterDialogueContextPolicy(
+    input.characterDialogueContextPolicy,
+  );
   assertIndependentHmacKeyrings(
     input.deterministicContextHmacKeyring,
     input.sessionBasisHmacKeyring,
@@ -370,6 +379,8 @@ export async function createRuntimeContentActivation(
       input.contentUpgradeAuthorizationLifetimeSeconds,
     characterDialogueModelProfileId:
       input.characterDialogueModelProfileId,
+    characterDialogueContextPolicy:
+      input.characterDialogueContextPolicy,
     directorDailySettlementModelProfileId:
       input.directorDailySettlementModelProfileId,
     directorDialogueEventsModelProfileId:

@@ -1433,8 +1433,31 @@ function assertGameplay(bundle: JsonObject, index: BundleIndex): void {
       expectProperty(stage, "initial_state", path),
       `${path}.initial_state`,
     );
-    expectString(stage, "cost_class", path);
-    expectString(stage, "npc_participation", path);
+    if (stage.cost_class !== undefined) {
+      expectString(stage, "cost_class", path);
+    }
+    const entryModes = asObjectArray(
+      expectProperty(stage, "entry_modes", path),
+      `${path}.entry_modes`,
+    );
+    const entryModeIds = new Set<string>();
+    for (const [entryModeIndex, entryMode] of entryModes.entries()) {
+      const entryPath = `${path}.entry_modes[${entryModeIndex}]`;
+      const entryModeId = expectString(
+        entryMode,
+        "entry_mode_id",
+        entryPath,
+      );
+      if (entryModeIds.has(entryModeId)) {
+        throw semanticFault(
+          "content_bundle.semantic.stage_entry_mode_duplicate",
+          "StageCatalogEntry entry_mode_id must be unique within its stage",
+          { path: `${entryPath}.entry_mode_id`, entry_mode_id: entryModeId },
+        );
+      }
+      entryModeIds.add(entryModeId);
+      expectString(entryMode, "npc_participation", entryPath);
+    }
   }
 }
 

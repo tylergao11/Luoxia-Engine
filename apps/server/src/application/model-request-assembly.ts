@@ -27,7 +27,10 @@ import type {
   PromptMaterializer,
 } from "./prompt-materializer.js";
 import {
+  DIALOGUE_EVENT_EXCHANGE_TURN_WINDOW,
+  type CharacterDialogueContextPolicy,
   projectCharacterSubjectiveView,
+  projectCharacterDialogueContext,
   projectDialogue,
   projectDirectorWorldView,
   projectKnowledgeView,
@@ -111,6 +114,7 @@ export function createRuntimeModelFacades(input: {
   readonly directorGoalPlanModelProfileId: string;
   readonly directorDefinitionDraftModelProfileId: string;
   readonly characterDialogueModelProfileId: string;
+  readonly characterDialogueContextPolicy: CharacterDialogueContextPolicy;
   readonly characterReactModelProfileId: string;
 }): RuntimeModelFacades {
   const assembly = new ModelRequestAssembly({
@@ -133,6 +137,8 @@ export function createRuntimeModelFacades(input: {
       input.directorDefinitionDraftModelProfileId,
     characterDialogueModelProfileId:
       input.characterDialogueModelProfileId,
+    characterDialogueContextPolicy:
+      input.characterDialogueContextPolicy,
     characterReactModelProfileId:
       input.characterReactModelProfileId,
   });
@@ -175,6 +181,7 @@ class ModelRequestAssembly {
   readonly #directorGoalPlanModelProfileId: string;
   readonly #directorDefinitionDraftModelProfileId: string;
   readonly #characterDialogueModelProfileId: string;
+  readonly #characterDialogueContextPolicy: CharacterDialogueContextPolicy;
   readonly #characterReactModelProfileId: string;
 
   public constructor(input: {
@@ -191,6 +198,7 @@ class ModelRequestAssembly {
     readonly directorGoalPlanModelProfileId: string;
     readonly directorDefinitionDraftModelProfileId: string;
     readonly characterDialogueModelProfileId: string;
+    readonly characterDialogueContextPolicy: CharacterDialogueContextPolicy;
     readonly characterReactModelProfileId: string;
   }) {
     this.#digest = input.digest;
@@ -212,6 +220,8 @@ class ModelRequestAssembly {
       input.directorDefinitionDraftModelProfileId;
     this.#characterDialogueModelProfileId =
       input.characterDialogueModelProfileId;
+    this.#characterDialogueContextPolicy =
+      input.characterDialogueContextPolicy;
     this.#characterReactModelProfileId =
       input.characterReactModelProfileId;
   }
@@ -314,6 +324,7 @@ class ModelRequestAssembly {
         const dialogue = projectDialogue(
           ctx.worldState,
           input.dialogueId,
+          { turnWindow: DIALOGUE_EVENT_EXCHANGE_TURN_WINDOW },
         );
         return Object.freeze({
           world_view: projectDirectorWorldView(
@@ -464,7 +475,12 @@ class ModelRequestAssembly {
     try {
       return await this.#runCharacter("dialogue", input, async (ctx) =>
         {
-          const dialogue = projectDialogue(ctx.worldState, input.dialogueId);
+          const dialogueContext = projectCharacterDialogueContext(
+            ctx.worldState,
+            input.dialogueId,
+            input.entityId,
+            this.#characterDialogueContextPolicy,
+          );
           return Object.freeze({
             subjective_view: projectCharacterSubjectiveView(
               input.worldId,
@@ -472,10 +488,16 @@ class ModelRequestAssembly {
               input.entityId,
               ctx.contentBinding,
               this.#stateMachineContracts,
+              {
+                memoryRecallLimit:
+                  this.#characterDialogueContextPolicy.memoryRecallLimit,
+              },
             ),
-            dialogue,
+            dialogue: dialogueContext.dialogue,
+            prior_active_commitments:
+              dialogueContext.prior_active_commitments,
             response_locale: readDialogueTurnLocale(
-              dialogue,
+              dialogueContext.dialogue,
               input.latestPlayerTurnId,
             ),
           });

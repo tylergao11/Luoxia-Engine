@@ -1606,7 +1606,8 @@
           "additionalProperties": false,
           "required": [
             "staging_kind",
-            "stage"
+            "stage",
+            "entry_mode_id"
           ],
           "properties": {
             "staging_kind": {
@@ -1614,6 +1615,9 @@
             },
             "stage": {
               "$ref": "world-runtime.v1.schema.json#/$defs/StageCatalogRef"
+            },
+            "entry_mode_id": {
+              "$ref": "common.v1.schema.json#/$defs/Identifier"
             },
             "participants": {
               "type": "array",

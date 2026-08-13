@@ -107,12 +107,16 @@
       "additionalProperties": false,
       "required": [
         "entity_id",
+        "name",
         "status",
         "objective_components"
       ],
       "properties": {
         "entity_id": {
           "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "name": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
         },
         "status": {
           "enum": [
@@ -187,22 +191,18 @@
       "additionalProperties": false,
       "required": [
         "stage_kind",
-        "intent_coverage",
         "participants",
-        "npc_participation"
+        "entry_modes"
       ],
       "properties": {
         "stage_kind": {
           "$ref": "common.v1.schema.json#/$defs/NamespacedIdentifier"
         },
-        "intent_coverage": {
-          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
-        },
-        "example_intents": {
+        "entry_modes": {
           "type": "array",
-          "maxItems": 8,
+          "minItems": 1,
           "items": {
-            "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+            "$ref": "#/$defs/DirectorStageEntryModeView"
           }
         },
         "participants": {
@@ -222,8 +222,29 @@
               "minimum": 1
             }
           }
+        }
+      }
+    },
+    "DirectorStageEntryModeView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "intent_coverage",
+        "npc_participation"
+      ],
+      "properties": {
+        "intent_coverage": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+        },
+        "example_intents": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "common.v1.schema.json#/$defs/LocalizedText"
+          }
         },
         "npc_participation": {
+          "description": "Locked entry policy for one way into the selected stage mechanic.",
           "enum": [
             "commitment_required",
             "unilateral"
@@ -282,6 +303,27 @@
         }
       }
     },
+    "PriorActiveAgencyCommitment": {
+      "description": "Exact still-valid commitment from a related CharacterMind conversation with the current counterparties and absent from the recent dialogue turns. Server derives it from locked WorldState dialogue records; it is context, not a newly authored commitment.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_turn_id",
+        "speaker",
+        "commitment"
+      ],
+      "properties": {
+        "source_turn_id": {
+          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "speaker": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/DialogueParticipantRef"
+        },
+        "commitment": {
+          "$ref": "world-runtime.v1.schema.json#/$defs/AgencyCommitment"
+        }
+      }
+    },
     "DirectorDailySettlementInput": {
       "type": "object",
       "additionalProperties": false,
@@ -316,7 +358,7 @@
           "$ref": "#/$defs/DirectorWorldView"
         },
         "dialogue": {
-          "description": "Locked DialogueRecord with turns truncated to the last MODEL_DIALOGUE_TURN_WINDOW (24) entries by Server projection.",
+          "description": "Locked DialogueRecord projected to exactly the current completed exchange: the triggering human turn followed by its character_mind or director_system responder turn. Conversation history remains outside this per-turn EventCard decision.",
           "$ref": "world-runtime.v1.schema.json#/$defs/DialogueRecord"
         },
         "response_locale": {
@@ -331,6 +373,7 @@
       "required": [
         "subjective_view",
         "dialogue",
+        "prior_active_commitments",
         "response_locale"
       ],
       "properties": {
@@ -338,8 +381,15 @@
           "$ref": "#/$defs/CharacterSubjectiveView"
         },
         "dialogue": {
-          "description": "Locked DialogueRecord with turns truncated to the last MODEL_DIALOGUE_TURN_WINDOW (24) entries by Server projection.",
+          "description": "Locked DialogueRecord projected to the deployment-owned recent-turn window. The protocol permits no more than the ProviderDialogueView safety limit; WorldState remains complete.",
           "$ref": "world-runtime.v1.schema.json#/$defs/DialogueRecord"
+        },
+        "prior_active_commitments": {
+          "description": "Still-valid commitments authored by this CharacterMind in related conversations with the current counterparties but absent from dialogue.turns. Always present; recent-turn commitments remain only on their original turns and are not duplicated here.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PriorActiveAgencyCommitment"
+          }
         },
         "response_locale": {
           "type": "string",
@@ -987,7 +1037,7 @@
       }
     },
     "EventCardAgencyGateSemanticDraft": {
-      "description": "Model-authored gate shell only (which outcomes/participants/requirement/policy). commitment_evidence is NOT model-owned: Server materializes it from dialogue.turns[*].agency_commitments. Zero transcript commitments ⇒ omit agency_gates or [].",
+      "description": "Non-prefab model-authored gate shell only. For prefab_bind, omit or []; Server derives the gate from the selected entry mode npc_participation and current responder commitment. commitment_evidence is always Server-owned from the current exchange.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -1138,7 +1188,7 @@
           }
         },
         "agency_gates": {
-          "description": "Optional gate shells. Omit or [] when dialogue has no NPC agency_commitments. Do not re-copy commitment rows or invent evidence; Server binds commitment_evidence from transcript. Non-empty gates are rejected at materialize when commitment count is 0.",
+          "description": "Optional gate shells for non-prefab outcomes. For prefab_bind, omit or []; Server derives the effective gate from stage policy and the current responder commitment. Never copy commitment evidence or subjects into a second truth.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/EventCardAgencyGateSemanticDraft"
@@ -1168,13 +1218,17 @@
           "additionalProperties": false,
           "required": [
             "staging_kind",
-            "stage_index"
+            "stage_index",
+            "entry_mode_index"
           ],
           "properties": {
             "staging_kind": {
               "const": "prefab_bind"
             },
             "stage_index": {
+              "$ref": "#/$defs/ModelIndex"
+            },
+            "entry_mode_index": {
               "$ref": "#/$defs/ModelIndex"
             },
             "participant_actor_indices": {
@@ -1547,8 +1601,8 @@
         "reply": {
           "$ref": "#/$defs/DialogueReplyDraft"
         },
-        "commitments": {
-          "description": "Always present. Use [] when no face-to-face executable commitment. Non-empty only for explicit NPC promises that EventCard agency_gates may cite.",
+    "commitments": {
+      "description": "This-turn commitment delta; decide it before writing reply and always include the array. Use [] when no new or materially changed face-to-face executable commitment is created, including when merely recalling or confirming a still-valid prior_active_commitment. Any newly granted authorization for a mutual action to start now, including a short challenge-acceptance signal, requires a non-empty item that EventCard agency_gates may cite.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/AgencyCommitmentSemanticDraft"
@@ -1921,12 +1975,12 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "entity_id",
+        "name",
         "status"
       ],
       "properties": {
-        "entity_id": {
-          "$ref": "common.v1.schema.json#/$defs/Uuid"
+        "name": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
         },
         "status": {
           "enum": [
@@ -1954,9 +2008,7 @@
         "actors",
         "relations",
         "world_machines",
-        "facts",
-        "stages",
-        "event_budget"
+        "facts"
       ],
       "properties": {
         "day": {
@@ -1985,16 +2037,6 @@
           "items": {
             "$ref": "#/$defs/ProviderFactView"
           }
-        },
-        "stages": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/DirectorStageCatalogView"
-          }
-        },
-        "event_budget": {
-          "description": "Player-phase EventBudgetView (day/capacity/spent/remaining). Passed through from formal DirectorWorldView; remaining > 0 is a precondition for calling director.dialogue_events.",
-          "$ref": "world-runtime.v1.schema.json#/$defs/EventBudgetView"
         }
       }
     },
@@ -2050,11 +2092,15 @@
       "additionalProperties": false,
       "required": [
         "entity_id",
+        "name",
         "status"
       ],
       "properties": {
         "entity_id": {
           "$ref": "common.v1.schema.json#/$defs/Uuid"
+        },
+        "name": {
+          "$ref": "common.v1.schema.json#/$defs/LocalizedText"
         },
         "status": {
           "enum": [
@@ -2241,6 +2287,23 @@
         }
       }
     },
+    "ProviderPriorActiveAgencyCommitmentView": {
+      "description": "Still-valid CharacterMind commitment from before the recent raw-turn window. It must influence continuity but does not itself authorize a new current-turn commitment.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "speaker_index",
+        "commitment"
+      ],
+      "properties": {
+        "speaker_index": {
+          "$ref": "#/$defs/ModelIndex"
+        },
+        "commitment": {
+          "$ref": "#/$defs/ProviderAgencyCommitmentView"
+        }
+      }
+    },
     "ProviderDialogueTurnView": {
       "type": "object",
       "additionalProperties": false,
@@ -2332,7 +2395,7 @@
           }
         },
         "turns": {
-          "description": "Server projects at most the last MODEL_DIALOGUE_TURN_WINDOW (24) turns from the locked DialogueRecord. Truncation is Server-owned; models must not invent summary structures.",
+          "description": "Server-owned recent dialogue projection with a protocol safety maximum of 24 turns. Each operation may use a smaller explicit window; models must not invent summary structures.",
           "type": "array",
           "minItems": 1,
           "maxItems": 24,
@@ -2601,6 +2664,7 @@
       "required": [
         "subjective_view",
         "dialogue",
+        "prior_active_commitments",
         "response_locale"
       ],
       "properties": {
@@ -2609,6 +2673,12 @@
         },
         "dialogue": {
           "$ref": "#/$defs/ProviderDialogueView"
+        },
+        "prior_active_commitments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProviderPriorActiveAgencyCommitmentView"
+          }
         },
         "response_locale": {
           "type": "string",
@@ -3424,6 +3494,7 @@
             "properties": {
               "mode": {
                 "enum": [
+                  "dialogue_events",
                   "goal_plan",
                   "definition_draft"
                 ]
@@ -3542,7 +3613,7 @@
           "$ref": "#/$defs/KnowledgeView"
         },
         "dialogue": {
-          "description": "Locked DialogueRecord with turns truncated to the last MODEL_DIALOGUE_TURN_WINDOW (24) entries by Server projection.",
+          "description": "Locked DialogueRecord projected by Server within the 24-turn protocol safety maximum.",
           "$ref": "world-runtime.v1.schema.json#/$defs/DialogueRecord"
         },
         "response_locale": {
@@ -3569,7 +3640,7 @@
           "$ref": "#/$defs/KnowledgeView"
         },
         "dialogue": {
-          "description": "Locked DialogueRecord with turns truncated to the last MODEL_DIALOGUE_TURN_WINDOW (24) entries by Server projection.",
+          "description": "Locked DialogueRecord projected by Server within the 24-turn protocol safety maximum.",
           "$ref": "world-runtime.v1.schema.json#/$defs/DialogueRecord"
         },
         "response_locale": {
@@ -3592,7 +3663,7 @@
           "$ref": "#/$defs/KnowledgeView"
         },
         "dialogue": {
-          "description": "Locked DialogueRecord with turns truncated to the last MODEL_DIALOGUE_TURN_WINDOW (24) entries by Server projection.",
+          "description": "Locked DialogueRecord projected by Server within the 24-turn protocol safety maximum.",
           "$ref": "world-runtime.v1.schema.json#/$defs/DialogueRecord"
         },
         "response_locale": {

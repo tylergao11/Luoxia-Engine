@@ -365,6 +365,7 @@ class DefaultPromptMaterializer implements PromptMaterializer {
     priorResidentDigests: ReadonlySet<string>,
   ): MaterializedPromptBlock | undefined {
     if (
+      mode !== "dialogue_events" &&
       mode !== "goal_plan" &&
       mode !== "definition_draft"
     ) {
@@ -374,29 +375,15 @@ class DefaultPromptMaterializer implements PromptMaterializer {
       bundle_id: contentBinding.packId,
       bundle_digest: contentBinding.bundleDigest,
     };
-    const catalog = this.#catalog.listModelSelectionCatalog(ref);
-    if (catalog === undefined) {
-      throw unresolved(
-        "model_selection_catalog",
-        ref.bundle_id,
-        ref.bundle_digest,
-        ref.bundle_id,
-      );
-    }
-    const worldId = expectString(
-      contentBinding.worldDefinition,
-      "world_id",
-      "WorldDefinition",
-    );
     const selectionSpace =
-      mode === "goal_plan"
-        ? this.#goalPlanSelectionSpace(
+      mode === "dialogue_events"
+        ? dialogueEventsSelectionSpace(contentBinding)
+        : this.#materializeCatalogSelectionSpace(
+            contentBinding,
+            mode,
             ref,
-            worldId,
-            catalog,
             priorResidentDigests,
-          )
-        : definitionSelectionSpace(catalog);
+          );
     const text =
       "Use only zero-based indices from this immutable ContentBundle selection space. " +
       "Never invent catalog or rule identifiers. " +
@@ -412,6 +399,40 @@ class DefaultPromptMaterializer implements PromptMaterializer {
       text,
       purpose: `director_${mode}_selection_space`,
     });
+  }
+
+  #materializeCatalogSelectionSpace(
+    contentBinding: WorldContentBinding,
+    mode: "goal_plan" | "definition_draft",
+    ref: {
+      readonly bundle_id: string;
+      readonly bundle_digest: string;
+    },
+    priorResidentDigests: ReadonlySet<string>,
+  ): JsonObject {
+    const catalog = this.#catalog.listModelSelectionCatalog(ref);
+    if (catalog === undefined) {
+      throw unresolved(
+        "model_selection_catalog",
+        ref.bundle_id,
+        ref.bundle_digest,
+        ref.bundle_id,
+      );
+    }
+    if (mode === "definition_draft") {
+      return definitionSelectionSpace(catalog);
+    }
+    const worldId = expectString(
+      contentBinding.worldDefinition,
+      "world_id",
+      "WorldDefinition",
+    );
+    return this.#goalPlanSelectionSpace(
+      ref,
+      worldId,
+      catalog,
+      priorResidentDigests,
+    );
   }
 
   #goalPlanSelectionSpace(
@@ -610,6 +631,80 @@ class DefaultPromptMaterializer implements PromptMaterializer {
     }
     return expectString(fragment, "text", "PromptFragment");
   }
+}
+
+function dialogueEventsSelectionSpace(
+  contentBinding: WorldContentBinding,
+): JsonObject {
+  if (contentBinding.stages.length === 0) {
+    throw new EngineFault(
+      "prompt.materializer.selection_space_empty",
+      "Dialogue event selection requires at least one locked stage",
+      {
+        bundle_id: contentBinding.packId,
+        bundle_digest: contentBinding.bundleDigest,
+      },
+    );
+  }
+  return Object.freeze({
+    selection_space_kind: "dialogue_events",
+    stages: Object.freeze(
+      contentBinding.stages.map((stage, stageIndex) => {
+        const entryModes = expectProperty(
+          stage,
+          "entry_modes",
+          "StageCatalogEntry",
+        );
+        if (!Array.isArray(entryModes)) {
+          throw new EngineFault(
+            "prompt.materializer.stage_entry_modes_invalid",
+            "StageCatalogEntry.entry_modes must be an array",
+            { stage_index: stageIndex },
+          );
+        }
+        const projected: Record<string, JsonValue> = {
+          stage_index: stageIndex,
+          stage_kind: expectString(
+            stage,
+            "stage_kind",
+            "StageCatalogEntry",
+          ),
+          participants: expectProperty(
+            stage,
+            "participants",
+            "StageCatalogEntry",
+          ),
+          entry_modes: Object.freeze(
+            entryModes.map((value, entryModeIndex) => {
+              const entryMode = expectJsonObject(value, "StageEntryMode");
+              const entry: Record<string, JsonValue> = {
+                entry_mode_index: entryModeIndex,
+                intent_coverage: expectProperty(
+                  entryMode,
+                  "intent_coverage",
+                  "StageEntryMode",
+                ),
+                npc_participation: expectString(
+                  entryMode,
+                  "npc_participation",
+                  "StageEntryMode",
+                ),
+              };
+              if (entryMode.example_intents !== undefined) {
+                entry.example_intents = expectProperty(
+                  entryMode,
+                  "example_intents",
+                  "StageEntryMode",
+                );
+              }
+              return Object.freeze(entry);
+            }),
+          ),
+        };
+        return Object.freeze(projected);
+      }),
+    ),
+  });
 }
 
 function definitionSelectionSpace(

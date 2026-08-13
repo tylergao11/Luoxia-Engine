@@ -72,3 +72,6 @@ export {
 export type {
   StoredFailedDefiniteModelInvocation,
 } from "./application/runtime-persistence.js";
+export type {
+  CharacterDialogueContextPolicy,
+} from "./application/model-view-projection.js";

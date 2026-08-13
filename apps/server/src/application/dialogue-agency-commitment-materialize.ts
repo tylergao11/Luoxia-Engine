@@ -4,6 +4,7 @@ import {
   expectJsonObject,
   expectProperty,
   expectString,
+  jsonEquals,
   type JsonObject,
   type JsonValue,
 } from "@luoxia/contracts-runtime";
@@ -82,6 +83,7 @@ export function materializeAgencyCommitmentFromDraft(input: {
 export function materializeAgencyCommitmentsFromCharacterDrafts(input: {
   readonly drafts: readonly JsonObject[];
   readonly worldState: JsonObject;
+  readonly speakerEntityId: string;
   readonly createCommitmentId: () => string;
   readonly materializeSubjects: (
     draft: JsonObject,
@@ -93,34 +95,206 @@ export function materializeAgencyCommitmentsFromCharacterDrafts(input: {
   ) => void;
 }): readonly JsonObject[] {
   const validThroughDay = resolveCommitmentValidThroughDay(input.worldState);
+  const existingCommitments = activeCommitmentsBySpeaker(
+    input.worldState,
+    input.speakerEntityId,
+    validThroughDay,
+  );
   const usedIds = new Set<string>();
-  return Object.freeze(
-    input.drafts.map((draft, index) => {
-      const commitmentId = input.createCommitmentId();
-      if (input.assertCanonicalCommitmentId !== undefined) {
-        input.assertCanonicalCommitmentId(commitmentId, index);
-      }
-      if (
-        commitmentId !== commitmentId.toLowerCase() ||
-        usedIds.has(commitmentId)
-      ) {
-        throw new EngineFault(
-          "dialogue.orchestration.commitment_identity_invalid",
-          "Generated commitment IDs must be canonical lowercase and unique within the character turn",
-          {
-            commitment_index: index,
-            commitment_id: commitmentId,
-          },
-        );
-      }
-      usedIds.add(commitmentId);
-      return materializeAgencyCommitmentFromDraft({
+  const materialized: JsonObject[] = [];
+  for (const [index, draft] of input.drafts.entries()) {
+    const subjects = input.materializeSubjects(draft, index);
+    if (
+      [...existingCommitments, ...materialized].some((commitment) =>
+        sameCommitmentMeaning(draft, subjects, commitment),
+      )
+    ) {
+      continue;
+    }
+    const commitmentId = input.createCommitmentId();
+    if (input.assertCanonicalCommitmentId !== undefined) {
+      input.assertCanonicalCommitmentId(commitmentId, index);
+    }
+    if (
+      commitmentId !== commitmentId.toLowerCase() ||
+      usedIds.has(commitmentId)
+    ) {
+      throw new EngineFault(
+        "dialogue.orchestration.commitment_identity_invalid",
+        "Generated commitment IDs must be canonical lowercase and unique within the character turn",
+        {
+          commitment_index: index,
+          commitment_id: commitmentId,
+        },
+      );
+    }
+    usedIds.add(commitmentId);
+    materialized.push(
+      materializeAgencyCommitmentFromDraft({
         draft,
         commitmentId,
-        subjects: input.materializeSubjects(draft, index),
+        subjects,
         validThroughDay,
         draftLabel: "AgencyCommitmentSemanticDraft",
-      });
+      }),
+    );
+  }
+  return Object.freeze(materialized);
+}
+
+function activeCommitmentsBySpeaker(
+  worldState: JsonObject,
+  speakerEntityId: string,
+  currentDay: number,
+): readonly JsonObject[] {
+  const commitments: JsonObject[] = [];
+  for (const dialogue of asObjectArray(
+    expectProperty(worldState, "dialogues", "WorldState"),
+    "WorldState.dialogues",
+  )) {
+    for (const turn of asObjectArray(
+      expectProperty(dialogue, "turns", "DialogueRecord"),
+      "DialogueRecord.turns",
+    )) {
+      const source = expectJsonObject(
+        expectProperty(turn, "source", "DialogueTurn"),
+        "DialogueTurn.source",
+      );
+      if (
+        expectString(source, "source_kind", "DialogueTurnSource") !==
+        "character_mind" ||
+        participantEntityId(
+          expectJsonObject(
+            expectProperty(turn, "speaker", "DialogueTurn"),
+            "DialogueTurn.speaker",
+          ),
+        ) !== speakerEntityId
+      ) {
+        continue;
+      }
+      for (const commitment of asObjectArray(
+        expectProperty(turn, "agency_commitments", "DialogueTurn"),
+        "DialogueTurn.agency_commitments",
+      )) {
+        if (
+          expectInteger(
+            commitment,
+            "valid_through_day",
+            "AgencyCommitment",
+          ) >= currentDay
+        ) {
+          commitments.push(commitment);
+        }
+      }
+    }
+  }
+  return Object.freeze(commitments);
+}
+
+function participantEntityId(participant: JsonObject): string | undefined {
+  if (
+    expectString(
+      participant,
+      "participant_kind",
+      "DialogueParticipantRef",
+    ) !== "entity"
+  ) {
+    return undefined;
+  }
+  return expectString(
+    expectJsonObject(
+      expectProperty(participant, "entity", "DialogueParticipantRef"),
+      "DialogueParticipantRef.entity",
+    ),
+    "entity_id",
+    "EntityRef",
+  );
+}
+
+function sameCommitmentMeaning(
+  draft: JsonObject,
+  subjects: readonly JsonObject[],
+  existing: JsonObject,
+): boolean {
+  return (
+    expectString(
+      draft,
+      "semantic_intent",
+      "AgencyCommitmentSemanticDraft",
+    ) === expectString(existing, "semantic_intent", "AgencyCommitment") &&
+    expectString(draft, "stance", "AgencyCommitmentSemanticDraft") ===
+      expectString(existing, "stance", "AgencyCommitment") &&
+    jsonEquals(
+      expectJsonObject(
+        expectProperty(draft, "terms", "AgencyCommitmentSemanticDraft"),
+        "AgencyCommitmentSemanticDraft.terms",
+      ),
+      expectJsonObject(
+        expectProperty(existing, "terms", "AgencyCommitment"),
+        "AgencyCommitment.terms",
+      ),
+    ) &&
+    sameSubjectSet(
+      subjects,
+      asObjectArray(
+        expectProperty(existing, "subjects", "AgencyCommitment"),
+        "AgencyCommitment.subjects",
+      ),
+    )
+  );
+}
+
+function sameSubjectSet(
+  left: readonly JsonObject[],
+  right: readonly JsonObject[],
+): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  const unmatched = [...right];
+  for (const subject of left) {
+    const normalized = normalizeSubjectIdentity(subject);
+    const index = unmatched.findIndex((candidate) =>
+      jsonEquals(normalized, normalizeSubjectIdentity(candidate)),
+    );
+    if (index < 0) {
+      return false;
+    }
+    unmatched.splice(index, 1);
+  }
+  return unmatched.length === 0;
+}
+
+function normalizeSubjectIdentity(subject: JsonObject): JsonObject {
+  const kind = expectString(subject, "kind", "SubjectRef");
+  if (kind !== "entity") {
+    return subject;
+  }
+  const entity = expectJsonObject(
+    expectProperty(subject, "entity", "SubjectRef"),
+    "SubjectRef.entity",
+  );
+  return Object.freeze({
+    kind,
+    entity: Object.freeze({
+      world_id: expectString(entity, "world_id", "EntityRef"),
+      entity_id: expectString(entity, "entity_id", "EntityRef"),
     }),
+  });
+}
+
+function asObjectArray(
+  value: JsonValue,
+  path: string,
+): readonly JsonObject[] {
+  if (!Array.isArray(value)) {
+    throw new EngineFault(
+      "dialogue.orchestration.shape",
+      `${path} must be an array`,
+      { path },
+    );
+  }
+  return value.map((entry, index) =>
+    expectJsonObject(entry as JsonValue, `${path}[${index}]`),
   );
 }

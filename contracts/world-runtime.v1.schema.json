@@ -4484,6 +4484,7 @@
           "required": [
             "staging_kind",
             "stage",
+            "entry_mode_id",
             "stage_instance_id"
           ],
           "properties": {
@@ -4492,6 +4493,9 @@
             },
             "stage": {
               "$ref": "#/$defs/StageCatalogRef"
+            },
+            "entry_mode_id": {
+              "$ref": "common.v1.schema.json#/$defs/Identifier"
             },
             "stage_instance_id": {
               "$ref": "common.v1.schema.json#/$defs/Uuid"
